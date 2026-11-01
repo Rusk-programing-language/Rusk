@@ -209,6 +209,49 @@ fn infer_stmts(
                 }
                 infer_stmts(body, scope, sigs, out, allow_return)?;
             }
+            Stmt::While { cond, body, line } => {
+                let t = type_of(cond, scope, sigs).map_err(|m| at(*line, m))?;
+                if let Some(t) = t {
+                    if t != Ty::Bool {
+                        return Err(at(
+                            *line,
+                            format!(
+                                "'while' needs a condition that is true or false, but this is {t}"
+                            ),
+                        ));
+                    }
+                }
+                infer_stmts(body, scope, sigs, out, allow_return)?;
+            }
+            Stmt::ForEach {
+                name,
+                from,
+                to,
+                body,
+                line,
+            } => {
+                for (what, e) in [("start", from), ("end", to)] {
+                    let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
+                    if let Some(t) = t {
+                        if t != Ty::Int {
+                            return Err(at(
+                                *line,
+                                format!("the {what} of a 'for each' range must be a number, but this is {t}"),
+                            ));
+                        }
+                    }
+                }
+                let previous = scope.insert(name.clone(), Some(Ty::Int));
+                infer_stmts(body, scope, sigs, out, allow_return)?;
+                match previous {
+                    Some(t) => {
+                        scope.insert(name.clone(), t);
+                    }
+                    None => {
+                        scope.remove(name);
+                    }
+                }
+            }
             Stmt::GiveBack(e, line) => {
                 if !allow_return {
                     return Err(at(
@@ -308,7 +351,18 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                 return Ok(None);
             };
             match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                BinOp::Add => {
+                    if lt == Ty::Int && rt == Ty::Int {
+                        Ok(Some(Ty::Int))
+                    } else if lt == Ty::Str && rt == Ty::Str {
+                        Ok(Some(Ty::Str))
+                    } else {
+                        Err(format!(
+                            "'+' adds numbers or joins text, but this has {lt} and {rt}"
+                        ))
+                    }
+                }
+                BinOp::Sub | BinOp::Mul | BinOp::Div => {
                     if lt != Ty::Int || rt != Ty::Int {
                         return Err(format!(
                             "'{}' works on numbers, but this has {lt} and {rt}",
@@ -321,12 +375,6 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                     if lt != rt {
                         return Err(format!(
                             "'{}' can't compare {lt} with {rt}",
-                            op_word(*op)
-                        ));
-                    }
-                    if !matches!(lt, Ty::Int | Ty::Bool) {
-                        return Err(format!(
-                            "'{}' can't compare {lt} yet — text comparison is on the roadmap",
                             op_word(*op)
                         ));
                     }
@@ -430,5 +478,41 @@ to confused with n as a number:
 ";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("gives back"), "{err}");
+    }
+
+    #[test]
+    fn text_can_be_joined_and_compared() {
+        let src = "\
+let hello be \"hel\" + \"lo\"
+let yes be hello is \"hello\"
+say yes
+";
+        check_src(src).unwrap();
+    }
+
+    #[test]
+    fn text_cannot_be_added_to_numbers() {
+        let err = check_src("say \"a\" + 1\n").unwrap_err();
+        assert!(err.contains("adds numbers or joins text"), "{err}");
+    }
+
+    #[test]
+    fn while_needs_a_truth_value() {
+        let err = check_src("while 1:\n    say \"x\"\n").unwrap_err();
+        assert!(err.contains("'while' needs a condition"), "{err}");
+    }
+
+    #[test]
+    fn for_each_needs_numbers_and_scopes_its_name() {
+        let src = "\
+for each n from 1 to 3:
+    say n
+say n
+";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("don't know a thing called 'n'"), "{err}");
+
+        let err = check_src("for each n from \"a\" to 3:\n    say n\n").unwrap_err();
+        assert!(err.contains("start of a 'for each' range"), "{err}");
     }
 }

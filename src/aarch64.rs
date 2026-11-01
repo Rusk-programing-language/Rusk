@@ -20,6 +20,9 @@ pub const X5: u8 = 5;
 pub const X6: u8 = 6;
 pub const X7: u8 = 7;
 pub const X8: u8 = 8;
+pub const X9: u8 = 9;
+pub const X10: u8 = 10;
+pub const X11: u8 = 11;
 pub const X19: u8 = 19;
 pub const X29: u8 = 29;
 pub const X30: u8 = 30;
@@ -150,6 +153,12 @@ impl Asm {
     pub fn str(&mut self, rt: u8, rn: u8, disp: u32) {
         debug_assert!(disp % 8 == 0 && disp / 8 < 4096);
         self.emit(0xF900_0000 | ((disp / 8) << 10) | ((rn as u32) << 5) | rt as u32);
+    }
+
+    /// `ldrb wt, [rn, #disp]`
+    pub fn ldrb(&mut self, rt: u8, rn: u8, disp: u32) {
+        debug_assert!(disp < 4096);
+        self.emit(0x3940_0000 | (disp << 10) | ((rn as u32) << 5) | rt as u32);
     }
 
     /// `strb wt, [rn, #disp]`

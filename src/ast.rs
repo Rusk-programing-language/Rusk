@@ -85,6 +85,20 @@ pub enum Stmt {
         body: Vec<Stmt>,
         line: usize,
     },
+    /// `while CONDITION:` — runs the body for as long as the condition holds.
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+        line: usize,
+    },
+    /// `for each NAME from START to END:` — counts from START to END inclusive.
+    ForEach {
+        name: String,
+        from: Expr,
+        to: Expr,
+        body: Vec<Stmt>,
+        line: usize,
+    },
     FuncDef {
         name: String,
         params: Vec<Param>,

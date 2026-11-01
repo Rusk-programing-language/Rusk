@@ -23,9 +23,9 @@ kernel through `write(2)` and `exit(2)` syscalls.
 
 ## Status
 
-v0.2 adds functions: `to ... with ...`, `give back`, recursion, and typed
-parameters. The compiler is a lexer, parser, type checker, AArch64 code
-generator, and ELF writer, with 47 tests. It targets **AArch64 Linux** only.
+v0.3 adds text joining and comparison, plus `while`, `for each`, and chained
+`otherwise if`. The compiler is a lexer, parser, type checker, AArch64 code
+generator, and ELF writer, with 63 tests. It targets **AArch64 Linux** only.
 
 ## Quick start
 
@@ -55,11 +55,24 @@ otherwise:
 repeat 3 times:
     say "one loaf"
 
+while temperature is more than 150:
+    say "cooling..."
+    set temperature to temperature - 20
+
+for each slice from 1 to 3:
+    say slice
+
 # arithmetic and truth
 say (10 - 4) * 2
 say 100 / 3
 say temperature is at least 180
 say not false
+
+# text joins with `+` and compares like a dictionary
+let name be "Rusk"
+say "Hello, " + name + "!"
+if name is "Rusk":
+    say "the crust is on"
 ```
 
 Functions name a piece of work and can hand a value back:
@@ -134,20 +147,23 @@ Runtime facts worth knowing:
   address rides in `X30`. Each call gets a frame at `X29` holding the saved
   `X29`/`X30`, its parameters, and its locals.
 - Strings are stored as `[len: u64][bytes...]`, so a string value is just a
-  pointer to its length.
+  pointer to its length. Joining two strings bumps a 1 MiB heap in the data
+  area and copies both byte blobs into it.
+- Text compares byte by byte (unsigned), then by length, so `"b"` is more than
+  `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order.
 - `say` of a number calls a hand-built itoa loop that divides by ten and writes
   digits backwards into a 32-byte buffer.
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.2 doesn't do yet
+## What v0.3 doesn't do yet
 
 Honest list, so the docs don't lie:
 
-- No text comparison or concatenation (`"a" + "b"` is a type error, not a bug).
+- Text is immutable and append-only via `+`; there is no indexing, slicing, or
+  `length of`. Joining allocates from a fixed 1 MiB heap with no bound check.
 - At most 8 parameters per function, and no closures, anonymous functions, or
   function values.
-- One loop form (`repeat N times`), one condition form (`if` / `otherwise`).
 - Division by zero traps the process instead of reporting a Rusk error.
 - AArch64 Linux only. The codegen is written so an x86-64 encoder can slot in
   behind the same AST.

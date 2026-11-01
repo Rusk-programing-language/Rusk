@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.2
+# The Rusk Language — Specification v0.3
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.2
+emits native machine code directly. This document describes exactly what v0.3
 accepts and what it guarantees.
 
-Status: **v0.2, AArch64 Linux**. Everything here is implemented and tested;
+Status: **v0.3, AArch64 Linux**. Everything here is implemented and tested;
 anything not here does not exist yet.
 
 ---
@@ -36,7 +36,7 @@ Blank lines are ignored.
 | Text | `"hello"` | Immutable; escapes `\n`, `\t`, `\r`, `\0`, `\\`, `\"` |
 | Truth | `true`, `false` | The result of comparisons and `not` |
 
-Numbers are integers only. There is no floating point in v0.2.
+Numbers are integers only. There is no floating point in v0.3.
 
 ## 4. Naming things
 
@@ -72,11 +72,14 @@ Operator precedence, loosest first:
 
 | Level | Operators | Associativity |
 |---|---|---|
-| Comparison | `is more than`, `is less than`, `is equal to`, `is not`, `is at least`, `is at most`, `>`, `<`, `==`, `!=`, `>=`, `<=` | one comparison per expression |
+| Comparison | `is`, `is more than`, `is less than`, `is equal to`, `is not`, `is at least`, `is at most`, `>`, `<`, `==`, `!=`, `>=`, `<=` | one comparison per expression |
 | Sum | `+`, `-` | left |
 | Product | `*`, `/` | left |
 | Unary | `-`, `not` | right |
-| Primary | number, text, `true`, `false`, name, `( ... )` | — |
+| Primary | number, text, `true`, `false`, name, call, `( ... )` | — |
+
+`+` adds two numbers or joins two pieces of text. `-`, `*`, and `/` are numbers
+only. A bare `is` means `is equal to`: `if name is "Rusk":`.
 
 Examples:
 
@@ -88,20 +91,34 @@ say 100 / -7             # -14
 say 5 is more than 3     # true
 say 5 is at most 5       # true
 say not (1 is equal to 2)  # true
+say "Hello, " + "world"  # Hello, world
+say "apple" < "banana"   # true
+say "b" is more than "abc"  # true
 ```
 
 Rules:
 
-- `+ - * /` require numbers on both sides.
-- Comparisons require both sides to be the same kind, and that kind must be a
-  number or a truth value. Comparing text is not supported yet.
+- `+` requires two numbers or two pieces of text; kinds never mix.
+- `- * /` require numbers on both sides.
+- Comparisons require both sides to be the same kind. Numbers and truth values
+  compare directly; text compares byte by byte (unsigned), then by length, so
+  `"ab"` is less than `"abc"` and `"b"` is more than `"abc"`.
 - `not` requires a truth value.
 - Unary `-` requires a number.
 
+### Joining text
+
+Text is immutable. `left + right` allocates a new string in a fixed 1 MiB heap
+inside the program's data area, copies both byte blobs into it, and hands back
+the new value. Nothing is freed: this language is small and programs are short,
+but a long-running loop that keeps joining text will eventually run out of heap
+(and there is no runtime error for that yet).
+
 ## 7. Blocks
 
-`if` and `repeat` introduce a block: a colon, then an indented body. The body
-ends when the indentation returns to the enclosing level.
+`if`, `repeat`, `while`, and `for each` introduce a block: a colon, then an
+indented body. The body ends when the indentation returns to the enclosing
+level.
 
 ```rusk
 if condition:
@@ -122,13 +139,26 @@ otherwise:
     say "Just right."
 ```
 
-`otherwise` is optional. There is no `else if` in v0.2; nest an `if` inside an
-`otherwise` block instead.
+`otherwise` is optional. You can chain conditions with `otherwise if`:
+
+```rusk
+if score is at least 90:
+    say "A"
+otherwise if score is at least 70:
+    say "B"
+otherwise:
+    say "C"
+```
+
+`otherwise if CONDITION:` is simply an `if` living in the else branch, so only
+the first matching branch runs.
 
 The condition must be a truth value. A bare number is not accepted as a
 condition — write `is not 0` if that is what you mean.
 
 ## 9. Repetition
+
+`repeat` runs the body a fixed number of times:
 
 ```rusk
 repeat 3 times:
@@ -137,6 +167,28 @@ repeat 3 times:
 
 The count is evaluated once, before the first iteration. A count of zero or less
 runs the body zero times.
+
+`while` runs the body for as long as the condition stays true:
+
+```rusk
+let n be 0
+while n is less than 3:
+    say n
+    set n to n + 1
+```
+
+The condition is re-evaluated before each iteration and must be a truth value.
+
+`for each` counts through a range, inclusive at both ends:
+
+```rusk
+for each slice from 1 to 3:
+    say slice       # 1, 2, 3
+```
+
+The start is evaluated first, then the end. If the start is greater than the
+end, the body runs zero times. The loop name only exists inside the body; after
+the loop, the name means whatever it meant before (or nothing).
 
 ## 10. Functions
 
@@ -220,8 +272,8 @@ The output is a static ELF64 executable:
 - machine: AArch64 (`EM_AARCH64`), Linux syscall ABI;
 - one `PT_LOAD` segment mapping the whole image read/write/execute;
 - code at virtual address `0x400000 + 0x78`;
-- writable data (variables, number buffer) at `0x410000`, zero-filled by the
-  kernel;
+- writable data (variables, number buffer, text heap) at `0x410000`,
+  zero-filled by the kernel;
 - no interpreter, no dynamic section, no relocations, no libc.
 
 Because there is no libc, `say` is a direct `write` syscall (`x8 = 64`) and
@@ -244,10 +296,12 @@ parameters and locals above that, so recursion gets a fresh set of slots.
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.2, worth relocating later.
+  collide. Fine for v0.3, worth relocating later.
 - Division by zero traps (SIGFPE analogue) rather than producing a Rusk-level
   error.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
+- Joined text comes from a 1 MiB bump-allocated heap. Nothing is reclaimed, and
+  running past the end of the heap is not detected.
 - Recursion depth is bounded only by the process stack; runaway recursion dies
   rather than reporting an error.
 - At most 8 parameters per function; no function values, closures, or
@@ -255,8 +309,7 @@ parameters and locals above that, so recursion gets a fresh set of slots.
 
 ## 14. Roadmap (not implemented)
 
-- text comparison and concatenation
-- `while`, `for each`, `otherwise if`
+- text indexing, slicing, and `length of`
 - function values and closures
 - an x86-64 encoder behind the same AST and codegen
 - a real relocation-aware data layout

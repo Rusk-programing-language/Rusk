@@ -1,0 +1,22 @@
+# text.rk — joining and comparing text
+
+let first be "Hello"
+let second be "world"
+let greeting be first + ", " + second + "!"
+
+say greeting
+
+# `+` joins text; it still adds numbers.
+say "one " + "two " + "three"
+
+# Text compares like a dictionary: byte by byte, then by length.
+say "apple" is less than "banana"
+say "apple" is equal to "apple"
+say "b" is more than "abc"
+say "abc" is not "abd"
+
+# A function can build text too.
+to shout with s as text:
+    give back s + "!"
+
+say shout with greeting

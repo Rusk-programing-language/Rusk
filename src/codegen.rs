@@ -29,6 +29,10 @@ use std::collections::HashMap;
 /// Offset of the itoa scratch buffer inside the data area.
 const ITOA_OFFSET: u64 = 0x2000;
 const ITOA_CAPACITY: u64 = 32;
+/// Fixed slots in the zeroed data area for the text heap.
+const HEAP_PTR_OFFSET: u64 = 0x1000;
+const HEAP_START_OFFSET: u64 = 0x1_0000;
+const HEAP_SIZE: u64 = 0x10_0000;
 /// Frame slots start after the saved frame pointer and return address.
 const FRAME_HEADER: u64 = 16;
 
@@ -57,6 +61,12 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     let mut cg = Codegen::new(funcs);
 
     cg.asm.label("_start");
+    // The text heap starts at a fixed spot; a bump pointer in the data area
+    // remembers where the next joined string goes.
+    cg.asm.mov_imm64(X1, DATA_BASE + HEAP_PTR_OFFSET);
+    cg.asm.mov_imm64(X0, DATA_BASE + HEAP_START_OFFSET);
+    cg.asm.str(X0, X1, 0);
+
     for stmt in &program.stmts {
         if matches!(stmt, Stmt::FuncDef { .. }) {
             continue;
@@ -79,6 +89,12 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     }
 
     cg.emit_print_int();
+    cg.emit_text_concat();
+    cg.emit_text_compare();
+
+    if cg.next_global * 8 > HEAP_PTR_OFFSET {
+        return Err("this program has too many top-level things to keep track of".to_string());
+    }
 
     let bss = cg.bss_size();
     let (text, rodata) = cg.asm.finish();
@@ -114,7 +130,31 @@ impl Codegen {
     }
 
     fn bss_size(&self) -> u64 {
-        (self.next_global * 8).max(ITOA_OFFSET + ITOA_CAPACITY)
+        (self.next_global * 8)
+            .max(ITOA_OFFSET + ITOA_CAPACITY)
+            .max(HEAP_START_OFFSET + HEAP_SIZE)
+    }
+
+    /// Reserve an 8-byte number slot, in the current frame or at top level.
+    fn alloc_int_slot(&mut self) -> Var {
+        if self.frame.is_some() {
+            let frame = self.frame.as_mut().unwrap();
+            let slot = frame.next_slot;
+            frame.next_slot += 1;
+            Var {
+                slot,
+                ty: Ty::Int,
+                local: true,
+            }
+        } else {
+            let slot = self.next_global;
+            self.next_global += 1;
+            Var {
+                slot,
+                ty: Ty::Int,
+                local: false,
+            }
+        }
     }
 
     fn intern(&mut self, s: &str) -> usize {
@@ -175,6 +215,18 @@ impl Codegen {
             Stmt::Repeat { count, body, line } => {
                 self.repeat(count, body).map_err(|m| at(*line, m))
             }
+            Stmt::While { cond, body, line } => {
+                self.while_(cond, body).map_err(|m| at(*line, m))
+            }
+            Stmt::ForEach {
+                name,
+                from,
+                to,
+                body,
+                line,
+            } => self
+                .for_each(name, from, to, body)
+                .map_err(|m| at(*line, m)),
             Stmt::GiveBack(e, line) => self.give_back(e).map_err(|m| at(*line, m)),
             Stmt::Expr(e, line) => self.expr(e).map(|_| ()).map_err(|m| at(*line, m)),
             Stmt::FuncDef { line, .. } => Err(at(
@@ -262,23 +314,8 @@ impl Codegen {
         if ty != Ty::Int {
             return Err(format!("'repeat' needs a number, but the count is {ty}"));
         }
-        let slot = if self.frame.is_some() {
-            let frame = self.frame.as_mut().unwrap();
-            let slot = frame.next_slot;
-            frame.next_slot += 1;
-            slot
-        } else {
-            let slot = self.next_global;
-            self.next_global += 1;
-            slot
-        };
         // The counter is local to the current function or to the program.
-        let local = self.frame.is_some();
-        let counter = Var {
-            slot,
-            ty: Ty::Int,
-            local,
-        };
+        let counter = self.alloc_int_slot();
         self.store_var(&counter);
 
         let l_loop = self.new_label("loop");
@@ -296,6 +333,84 @@ impl Codegen {
         self.store_var(&counter);
         self.asm.b_label(&l_loop);
         self.asm.label(&l_end);
+        Ok(())
+    }
+
+    fn while_(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), String> {
+        let l_loop = self.new_label("while");
+        let l_end = self.new_label("after");
+        self.asm.label(&l_loop);
+        let ty = self.expr(cond)?;
+        if ty != Ty::Bool {
+            return Err(format!(
+                "'while' needs a condition that is true or false, but this is {ty}"
+            ));
+        }
+        self.asm.cmp_reg_reg(X0, XZR);
+        self.asm.bcond_label(CC_EQ, &l_end);
+        for s in body {
+            self.stmt(s)?;
+        }
+        self.asm.b_label(&l_loop);
+        self.asm.label(&l_end);
+        Ok(())
+    }
+
+    fn for_each(
+        &mut self,
+        name: &str,
+        from: &Expr,
+        to: &Expr,
+        body: &[Stmt],
+    ) -> Result<(), String> {
+        let ty = self.expr(from)?;
+        if ty != Ty::Int {
+            return Err(format!(
+                "the start of a 'for each' range must be a number, but this is {ty}"
+            ));
+        }
+        let item = self.alloc_int_slot();
+        self.store_var(&item);
+
+        let ty = self.expr(to)?;
+        if ty != Ty::Int {
+            return Err(format!(
+                "the end of a 'for each' range must be a number, but this is {ty}"
+            ));
+        }
+        let limit = self.alloc_int_slot();
+        self.store_var(&limit);
+
+        // The loop variable only exists inside the body; put back whatever the
+        // name meant before.
+        let previous = self.vars.insert(name.to_string(), item.clone());
+
+        let l_loop = self.new_label("each");
+        let l_end = self.new_label("after");
+        self.asm.label(&l_loop);
+        self.load_var(&item);
+        self.asm.mov_reg_reg(X2, X0);
+        self.load_var(&limit);
+        self.asm.cmp_reg_reg(X2, X0);
+        self.asm.bcond_label(CC_GT, &l_end);
+        for s in body {
+            self.stmt(s)?;
+        }
+        self.load_var(&item);
+        self.asm.mov_imm64(X2, 1);
+        self.asm.add_reg_reg(X0, X0, X2);
+        self.store_var(&item);
+        self.asm.b_label(&l_loop);
+        self.asm.label(&l_end);
+
+        match previous {
+            Some(var) => {
+                self.vars.insert(name.to_string(), var);
+            }
+            None => {
+                self.vars.remove(name);
+            }
+        }
         Ok(())
     }
 
@@ -478,7 +593,24 @@ impl Codegen {
     fn binary(&mut self, op: BinOp, lt: Ty, rt: Ty) -> Result<Ty, String> {
         use BinOp::*;
         match op {
-            Add | Sub | Mul | Div => {
+            Add => {
+                if lt == Ty::Int && rt == Ty::Int {
+                    self.asm.add_reg_reg(X0, X1, X0);
+                    Ok(Ty::Int)
+                } else if lt == Ty::Str && rt == Ty::Str {
+                    // X1 = left, X0 = right. `text_concat` wants left in X0.
+                    self.asm.mov_reg_reg(X2, X0);
+                    self.asm.mov_reg_reg(X0, X1);
+                    self.asm.mov_reg_reg(X1, X2);
+                    self.asm.bl_label("text_concat");
+                    Ok(Ty::Str)
+                } else {
+                    Err(format!(
+                        "'+' adds numbers or joins text, but this has {lt} and {rt}"
+                    ))
+                }
+            }
+            Sub | Mul | Div => {
                 if lt != Ty::Int || rt != Ty::Int {
                     return Err(format!(
                         "'{}' works on numbers, but this has {lt} and {rt}",
@@ -486,7 +618,6 @@ impl Codegen {
                     ));
                 }
                 match op {
-                    Add => self.asm.add_reg_reg(X0, X1, X0),
                     Sub => self.asm.sub_reg_reg(X0, X1, X0),
                     Mul => self.asm.mul_reg_reg(X0, X1, X0),
                     Div => self.asm.sdiv_reg_reg(X0, X1, X0),
@@ -498,13 +629,6 @@ impl Codegen {
                 if lt != rt {
                     return Err(format!("'{}' can't compare {lt} with {rt}", op_name(op)));
                 }
-                if !matches!(lt, Ty::Int | Ty::Bool) {
-                    return Err(format!(
-                        "'{}' can't compare {lt} yet — text comparison is on the roadmap",
-                        op_name(op)
-                    ));
-                }
-                self.asm.cmp_reg_reg(X1, X0);
                 let cc = match op {
                     Eq => CC_EQ,
                     NotEq => CC_NE,
@@ -514,6 +638,17 @@ impl Codegen {
                     GtEq => CC_GE,
                     _ => unreachable!(),
                 };
+                if lt == Ty::Str {
+                    // X1 = left, X0 = right. `text_compare` wants left in X0
+                    // and gives back -1, 0, or 1.
+                    self.asm.mov_reg_reg(X2, X0);
+                    self.asm.mov_reg_reg(X0, X1);
+                    self.asm.mov_reg_reg(X1, X2);
+                    self.asm.bl_label("text_compare");
+                    self.asm.cmp_reg_reg(X0, XZR);
+                } else {
+                    self.asm.cmp_reg_reg(X1, X0);
+                }
                 self.asm.cset(X0, cc);
                 Ok(Ty::Bool)
             }
@@ -618,6 +753,106 @@ impl Codegen {
         a.add_imm(SP, SP, 32);
         a.ret();
     }
+
+    /// `text_concat`: X0 = left, X1 = right, result in X0.
+    ///
+    /// Copies both byte blobs into the bump-allocated heap as one
+    /// length-prefixed string. There is no bound check yet; the heap is
+    /// 1 MiB, which is generous for a language this size.
+    fn emit_text_concat(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("text_concat");
+        a.ldr(X2, X0, 0); // left length
+        a.ldr(X3, X1, 0); // right length
+        a.add_reg_reg(X4, X2, X3); // total length
+
+        a.mov_imm64(X5, heap_ptr);
+        a.ldr(X6, X5, 0); // new string starts here
+        a.add_reg_reg(X7, X6, X4);
+        a.add_imm(X7, X7, 8);
+        a.str(X7, X5, 0); // bump the heap pointer
+        a.str(X4, X6, 0); // write the length
+        a.add_imm(X9, X6, 8); // destination bytes
+
+        a.add_imm(X8, X0, 8); // left bytes
+        a.mov_reg_reg(X10, X2);
+        a.label("tcat_left");
+        a.cmp_reg_reg(X10, XZR);
+        a.bcond_label(CC_EQ, "tcat_right");
+        a.ldrb(X11, X8, 0);
+        a.strb(X11, X9, 0);
+        a.add_imm(X8, X8, 1);
+        a.add_imm(X9, X9, 1);
+        a.sub_imm(X10, X10, 1);
+        a.b_label("tcat_left");
+
+        a.label("tcat_right");
+        a.add_imm(X8, X1, 8); // right bytes
+        a.mov_reg_reg(X10, X3);
+        a.label("tcat_right_loop");
+        a.cmp_reg_reg(X10, XZR);
+        a.bcond_label(CC_EQ, "tcat_done");
+        a.ldrb(X11, X8, 0);
+        a.strb(X11, X9, 0);
+        a.add_imm(X8, X8, 1);
+        a.add_imm(X9, X9, 1);
+        a.sub_imm(X10, X10, 1);
+        a.b_label("tcat_right_loop");
+
+        a.label("tcat_done");
+        a.mov_reg_reg(X0, X6);
+        a.ret();
+    }
+
+    /// `text_compare`: X0 = left, X1 = right. Gives back -1, 0, or 1 in X0,
+    /// comparing byte by byte and then by length (dictionary order).
+    fn emit_text_compare(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("text_compare");
+        a.ldr(X2, X0, 0); // left length
+        a.ldr(X3, X1, 0); // right length
+        a.cmp_reg_reg(X2, X3);
+        a.bcond_label(CC_LE, "tc_min_left");
+        a.mov_reg_reg(X4, X3);
+        a.b_label("tc_min_done");
+        a.label("tc_min_left");
+        a.mov_reg_reg(X4, X2);
+        a.label("tc_min_done");
+
+        a.add_imm(X5, X0, 8);
+        a.add_imm(X6, X1, 8);
+        a.mov_reg_reg(X7, X4);
+        a.label("tc_loop");
+        a.cmp_reg_reg(X7, XZR);
+        a.bcond_label(CC_EQ, "tc_lengths");
+        a.ldrb(X8, X5, 0);
+        a.ldrb(X9, X6, 0);
+        a.cmp_reg_reg(X8, X9);
+        a.bcond_label(CC_LT, "tc_less");
+        a.bcond_label(CC_GT, "tc_greater");
+        a.add_imm(X5, X5, 1);
+        a.add_imm(X6, X6, 1);
+        a.sub_imm(X7, X7, 1);
+        a.b_label("tc_loop");
+
+        a.label("tc_lengths");
+        a.cmp_reg_reg(X2, X3);
+        a.bcond_label(CC_LT, "tc_less");
+        a.bcond_label(CC_GT, "tc_greater");
+        a.movz_reg(X0, 0);
+        a.ret();
+
+        a.label("tc_less");
+        a.mov_imm64(X0, (-1i64) as u64);
+        a.ret();
+
+        a.label("tc_greater");
+        a.movz_reg(X0, 1);
+        a.ret();
+    }
 }
 
 fn frame_offset(slot: u64) -> u32 {
@@ -632,6 +867,8 @@ fn count_slots(stmts: &[Stmt]) -> u64 {
         match stmt {
             Stmt::Let { .. } => n += 1,
             Stmt::Repeat { body, .. } => n += 1 + count_slots(body),
+            Stmt::While { body, .. } => n += count_slots(body),
+            Stmt::ForEach { body, .. } => n += 2 + count_slots(body),
             Stmt::If { then, other, .. } => n += count_slots(then) + count_slots(other),
             _ => {}
         }
@@ -685,7 +922,7 @@ mod tests {
     #[test]
     fn type_errors_name_the_kind() {
         let err = bake("say \"a\" + 1\n").unwrap_err();
-        assert!(err.contains("works on numbers"), "{err}");
+        assert!(err.contains("adds numbers or joins text"), "{err}");
     }
 
     #[test]

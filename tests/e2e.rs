@@ -188,3 +188,112 @@ fn give_back_outside_a_function_is_an_error() {
     assert!(err.contains("inside a function"), "{err}");
 }
 
+// ---- text -------------------------------------------------------------
+
+#[test]
+fn text_joins_with_plus() {
+    let src = "\
+let who be \"world\"
+let greeting be \"Hello, \" + who + \"!\"
+say greeting
+";
+    let (stdout, _) = run("text_join", src);
+    assert_eq!(stdout, "Hello, world!\n");
+}
+
+#[test]
+fn text_compares_like_a_dictionary() {
+    let src = "\
+say \"apple\" is less than \"banana\"
+say \"apple\" is equal to \"apple\"
+say \"b\" is more than \"abc\"
+say \"abc\" is not \"abd\"
+say \"\" is \"\"
+";
+    let (stdout, _) = run("text_cmp", src);
+    assert_eq!(stdout, "true\ntrue\ntrue\ntrue\ntrue\n");
+}
+
+#[test]
+fn a_function_can_build_text() {
+    let src = "\
+to shout with s as text:
+    give back s + \"!\"
+
+to fill with n as a number and word as text:
+    let out be \"\"
+    for each i from 1 to n:
+        set out to out + word
+    give back out
+
+say shout with \"hey\"
+say fill with 3 and \"ha\"
+";
+    let (stdout, _) = run("text_fn", src);
+    assert_eq!(stdout, "hey!\nhahaha\n");
+}
+
+// ---- loops and branches ----------------------------------------------
+
+#[test]
+fn while_repeats_until_the_condition_fails() {
+    let src = "\
+let n be 0
+while n is less than 3:
+    say n
+    set n to n + 1
+";
+    let (stdout, _) = run("while", src);
+    assert_eq!(stdout, "0\n1\n2\n");
+}
+
+#[test]
+fn for_each_counts_up_inclusively() {
+    let src = "\
+for each i from 1 to 3:
+    say i
+";
+    let (stdout, _) = run("for_each", src);
+    assert_eq!(stdout, "1\n2\n3\n");
+}
+
+#[test]
+fn for_each_keeps_its_name_inside_the_loop() {
+    let src = "\
+let i be 10
+for each i from 1 to 2:
+    say i
+say i
+for each j from 3 to 1:
+    say \"never\"
+";
+    let (stdout, _) = run("for_each_scope", src);
+    assert_eq!(stdout, "1\n2\n10\n");
+}
+
+#[test]
+fn otherwise_if_chains() {
+    let src = "\
+to grade with score as a number:
+    if score is at least 90:
+        give back \"A\"
+    otherwise if score is at least 70:
+        give back \"B\"
+    otherwise:
+        give back \"C\"
+
+say grade with 95
+say grade with 75
+say grade with 10
+";
+    let (stdout, _) = run("else_if", src);
+    assert_eq!(stdout, "A\nB\nC\n");
+}
+
+#[test]
+fn bare_is_means_equality() {
+    let (stdout, _) = run("bare_is", "let x be 5\nsay x is 5\n");
+    assert_eq!(stdout, "true\n");
+}
+
+

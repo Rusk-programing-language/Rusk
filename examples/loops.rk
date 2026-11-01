@@ -1,0 +1,24 @@
+# loops.rk — while, for each, and chained otherwise
+
+let n be 0
+say "While:"
+while n is less than 3:
+    say n
+    set n to n + 1
+
+say "For each:"
+for each i from 1 to 3:
+    say i
+
+to grade with score as a number:
+    if score is at least 90:
+        give back "A"
+    otherwise if score is at least 70:
+        give back "B"
+    otherwise:
+        give back "C"
+
+say "Grades:"
+say grade with 95
+say grade with 75
+say grade with 10

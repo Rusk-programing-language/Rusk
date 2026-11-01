@@ -1,15 +1,18 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.1):
+//! Grammar (v0.3):
 //!
 //! ```text
 //! program    := stmt*
-//! stmt       := say_stmt | let_stmt | set_stmt | if_stmt | repeat_stmt | expr_stmt
+//! stmt       := say_stmt | let_stmt | set_stmt | if_stmt | repeat_stmt
+//!             | while_stmt | for_each_stmt | func_def | give_back | expr_stmt
 //! say_stmt   := "say" expr NEWLINE
 //! let_stmt   := "let" NAME "be" expr NEWLINE
 //! set_stmt   := "set" NAME "to" expr NEWLINE
-//! if_stmt    := "if" expr ":" block ("otherwise" ":" block)?
+//! if_stmt    := "if" expr ":" block ("otherwise" ("if" expr ":" block | ":" block))?
 //! repeat_stmt:= "repeat" expr "times" ":" block
+//! while_stmt := "while" expr ":" block
+//! for_each   := "for" "each" NAME "from" expr "to" expr ":" block
 //! func_def   := "to" NAME ("with" param ("and" param)*)? ":" block
 //! param      := NAME "as" ("a"|"an")? TYPE
 //! give_back  := "give" "back" expr NEWLINE
@@ -190,8 +193,14 @@ impl Parser {
             self.need(Tok::Colon, "after the condition,")?;
             let then = self.block("this 'if'")?;
             let other = if self.eat_word("otherwise") {
-                self.need(Tok::Colon, "after 'otherwise',")?;
-                self.block("this 'otherwise'")?
+                // `otherwise if ...:` reads like the English it is, and is
+                // simply an `if` living in the else branch.
+                if self.is_word("if") {
+                    vec![self.stmt()?]
+                } else {
+                    self.need(Tok::Colon, "after 'otherwise',")?;
+                    self.block("this 'otherwise'")?
+                }
             } else {
                 Vec::new()
             };
@@ -205,6 +214,33 @@ impl Parser {
             self.need(Tok::Colon, "after 'times',")?;
             let body = self.block("this 'repeat'")?;
             return Ok(Stmt::Repeat { count, body, line });
+        }
+
+        if self.is_word("while") {
+            self.bump();
+            let cond = self.expr()?;
+            self.need(Tok::Colon, "after the 'while' condition,")?;
+            let body = self.block("this 'while'")?;
+            return Ok(Stmt::While { cond, body, line });
+        }
+
+        if self.is_word("for") {
+            self.bump();
+            self.need_word("each", "after 'for',")?;
+            let name = self.name("after 'for each'")?;
+            self.need_word("from", &format!("after 'for each {name}',"))?;
+            let from = self.expr()?;
+            self.need_word("to", "after the start of the range,")?;
+            let to = self.expr()?;
+            self.need(Tok::Colon, "after the end of the range,")?;
+            let body = self.block("this 'for each'")?;
+            return Ok(Stmt::ForEach {
+                name,
+                from,
+                to,
+                body,
+                line,
+            });
         }
 
         let value = self.expr()?;
@@ -326,11 +362,8 @@ impl Parser {
                     ));
                 }
             } else {
-                return Err(format!(
-                    "line {}: after 'is' I expected 'more than', 'less than', 'equal to', 'not', 'at least', or 'at most' — but found {}",
-                    self.line(),
-                    self.peek().describe()
-                ));
+                // A bare `is` is plain equality: `if name is "Rusk":`.
+                BinOp::Eq
             };
             let right = self.sum()?;
             return Ok(Expr::Binary(op, Box::new(left), Box::new(right)));
@@ -471,5 +504,48 @@ mod tests {
             Stmt::If { other, .. } => assert_eq!(other.len(), 1),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn otherwise_if_is_a_nested_if() {
+        let src = "if x:\n    say \"a\"\notherwise if y:\n    say \"b\"\n";
+        let prog = p(src);
+        match &prog.stmts[0] {
+            Stmt::If { other, .. } => match &other[0] {
+                Stmt::If { .. } => {}
+                other => panic!("expected a nested if, got {other:?}"),
+            },
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn while_parses() {
+        let prog = p("while x is less than 3:\n    say x\n");
+        match &prog.stmts[0] {
+            Stmt::While { body, .. } => assert_eq!(body.len(), 1),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_parses() {
+        let prog = p("for each n from 1 to 3:\n    say n\n");
+        match &prog.stmts[0] {
+            Stmt::ForEach { name, body, .. } => {
+                assert_eq!(name, "n");
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_is_means_equality() {
+        let prog = p("say \"a\" is \"a\"\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Say(Expr::Binary(BinOp::Eq, ..), _)
+        ));
     }
 }
