@@ -1,0 +1,396 @@
+//! Recursive-descent parser for the English surface syntax.
+//!
+//! Grammar (v0.1):
+//!
+//! ```text
+//! program    := stmt*
+//! stmt       := say_stmt | let_stmt | set_stmt | if_stmt | repeat_stmt | expr_stmt
+//! say_stmt   := "say" expr NEWLINE
+//! let_stmt   := "let" NAME "be" expr NEWLINE
+//! set_stmt   := "set" NAME "to" expr NEWLINE
+//! if_stmt    := "if" expr ":" block ("otherwise" ":" block)?
+//! repeat_stmt:= "repeat" expr "times" ":" block
+//! block      := NEWLINE INDENT stmt* DEDENT
+//! expr       := sum (comparison_tail)?
+//! sum        := term (("+" | "-") term)*
+//! term       := unary (("*" | "/") unary)*
+//! unary      := ("-" | "not") unary | primary
+//! primary    := INT | TEXT | "true" | "false" | NAME | "(" expr ")"
+//! ```
+
+use crate::ast::{BinOp, Expr, Program, Stmt, UnOp};
+use crate::lexer::{Tok, Token};
+
+pub struct Parser {
+    toks: Vec<Token>,
+    pos: usize,
+}
+
+pub fn parse(toks: Vec<Token>) -> Result<Program, String> {
+    let mut p = Parser { toks, pos: 0 };
+    let mut stmts = Vec::new();
+    loop {
+        while p.peek() == &Tok::Newline {
+            p.bump();
+        }
+        if p.peek() == &Tok::Eof {
+            break;
+        }
+        stmts.push(p.stmt()?);
+    }
+    Ok(Program { stmts })
+}
+
+impl Parser {
+    fn peek(&self) -> &Tok {
+        &self.toks[self.pos].tok
+    }
+
+    fn line(&self) -> usize {
+        self.toks[self.pos].line
+    }
+
+    fn bump(&mut self) -> Tok {
+        let t = self.toks[self.pos].tok.clone();
+        if self.pos + 1 < self.toks.len() {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn is_word(&self, w: &str) -> bool {
+        matches!(self.peek(), Tok::Ident(s) if s == w)
+    }
+
+    fn eat_word(&mut self, w: &str) -> bool {
+        if self.is_word(w) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn need_word(&mut self, w: &str, after: &str) -> Result<(), String> {
+        if self.eat_word(w) {
+            Ok(())
+        } else {
+            Err(format!(
+                "line {}: {after} I expected '{w}', but found {}",
+                self.line(),
+                self.peek().describe()
+            ))
+        }
+    }
+
+    fn need(&mut self, want: Tok, after: &str) -> Result<(), String> {
+        if self.peek() == &want {
+            self.bump();
+            Ok(())
+        } else {
+            Err(format!(
+                "line {}: {after} I expected {}, but found {}",
+                self.line(),
+                want.describe(),
+                self.peek().describe()
+            ))
+        }
+    }
+
+    fn end_of_line(&mut self) -> Result<(), String> {
+        match self.peek() {
+            Tok::Newline => {
+                self.bump();
+                Ok(())
+            }
+            Tok::Eof => Ok(()),
+            other => Err(format!(
+                "line {}: I expected the end of the line here, but found {}",
+                self.line(),
+                other.describe()
+            )),
+        }
+    }
+
+    fn stmt(&mut self) -> Result<Stmt, String> {
+        let line = self.line();
+
+        if self.is_word("say") {
+            self.bump();
+            let value = self.expr()?;
+            self.end_of_line()?;
+            return Ok(Stmt::Say(value, line));
+        }
+
+        if self.is_word("let") {
+            self.bump();
+            let name = self.name("after 'let'")?;
+            self.need_word("be", &format!("after 'let {name}',"))?;
+            let value = self.expr()?;
+            self.end_of_line()?;
+            return Ok(Stmt::Let { name, value, line });
+        }
+
+        if self.is_word("set") {
+            self.bump();
+            let name = self.name("after 'set'")?;
+            self.need_word("to", &format!("after 'set {name}',"))?;
+            let value = self.expr()?;
+            self.end_of_line()?;
+            return Ok(Stmt::Set { name, value, line });
+        }
+
+        if self.is_word("if") {
+            self.bump();
+            let cond = self.expr()?;
+            self.need(Tok::Colon, "after the condition,")?;
+            let then = self.block("this 'if'")?;
+            let other = if self.eat_word("otherwise") {
+                self.need(Tok::Colon, "after 'otherwise',")?;
+                self.block("this 'otherwise'")?
+            } else {
+                Vec::new()
+            };
+            return Ok(Stmt::If { cond, then, other, line });
+        }
+
+        if self.is_word("repeat") {
+            self.bump();
+            let count = self.expr()?;
+            self.need_word("times", "after the repeat count,")?;
+            self.need(Tok::Colon, "after 'times',")?;
+            let body = self.block("this 'repeat'")?;
+            return Ok(Stmt::Repeat { count, body, line });
+        }
+
+        let value = self.expr()?;
+        self.end_of_line()?;
+        Ok(Stmt::Expr(value, line))
+    }
+
+    fn name(&mut self, after: &str) -> Result<String, String> {
+        match self.peek().clone() {
+            Tok::Ident(s) => {
+                self.bump();
+                Ok(s)
+            }
+            other => Err(format!(
+                "line {}: {after} I expected a name, but found {}",
+                self.line(),
+                other.describe()
+            )),
+        }
+    }
+
+    fn block(&mut self, what: &str) -> Result<Vec<Stmt>, String> {
+        self.need(Tok::Newline, &format!("after the ':' on {what} line,"))?;
+        self.need(Tok::Indent, &format!("to open the body of {what},"))?;
+        let mut stmts = Vec::new();
+        loop {
+            while self.peek() == &Tok::Newline {
+                self.bump();
+            }
+            match self.peek() {
+                Tok::Dedent => {
+                    self.bump();
+                    break;
+                }
+                Tok::Eof => {
+                    return Err(format!(
+                        "line {}: {what} never gets its body — indent the lines under it",
+                        self.line()
+                    ))
+                }
+                _ => stmts.push(self.stmt()?),
+            }
+        }
+        if stmts.is_empty() {
+            return Err(format!("line {}: {what} has an empty body", self.line()));
+        }
+        Ok(stmts)
+    }
+
+    fn expr(&mut self) -> Result<Expr, String> {
+        self.comparison()
+    }
+
+    fn comparison(&mut self) -> Result<Expr, String> {
+        let left = self.sum()?;
+
+        let symbol_op = match self.peek() {
+            Tok::EqEq => Some(BinOp::Eq),
+            Tok::NotEq => Some(BinOp::NotEq),
+            Tok::Lt => Some(BinOp::Lt),
+            Tok::LtEq => Some(BinOp::LtEq),
+            Tok::Gt => Some(BinOp::Gt),
+            Tok::GtEq => Some(BinOp::GtEq),
+            _ => None,
+        };
+        if let Some(op) = symbol_op {
+            self.bump();
+            let right = self.sum()?;
+            return Ok(Expr::Binary(op, Box::new(left), Box::new(right)));
+        }
+
+        if self.eat_word("is") {
+            let op = if self.eat_word("not") {
+                BinOp::NotEq
+            } else if self.eat_word("more") {
+                self.need_word("than", "after 'is more',")?;
+                BinOp::Gt
+            } else if self.eat_word("less") {
+                self.need_word("than", "after 'is less',")?;
+                BinOp::Lt
+            } else if self.eat_word("equal") {
+                self.need_word("to", "after 'is equal',")?;
+                BinOp::Eq
+            } else if self.eat_word("at") {
+                if self.eat_word("least") {
+                    BinOp::GtEq
+                } else if self.eat_word("most") {
+                    BinOp::LtEq
+                } else {
+                    return Err(format!(
+                        "line {}: after 'is at' I expected 'least' or 'most', but found {}",
+                        self.line(),
+                        self.peek().describe()
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "line {}: after 'is' I expected 'more than', 'less than', 'equal to', 'not', 'at least', or 'at most' — but found {}",
+                    self.line(),
+                    self.peek().describe()
+                ));
+            };
+            let right = self.sum()?;
+            return Ok(Expr::Binary(op, Box::new(left), Box::new(right)));
+        }
+
+        Ok(left)
+    }
+
+    fn sum(&mut self) -> Result<Expr, String> {
+        let mut left = self.term()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Plus => BinOp::Add,
+                Tok::Minus => BinOp::Sub,
+                _ => break,
+            };
+            self.bump();
+            let right = self.term()?;
+            left = Expr::Binary(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn term(&mut self) -> Result<Expr, String> {
+        let mut left = self.unary()?;
+        loop {
+            let op = match self.peek() {
+                Tok::Star => BinOp::Mul,
+                Tok::Slash => BinOp::Div,
+                _ => break,
+            };
+            self.bump();
+            let right = self.unary()?;
+            left = Expr::Binary(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn unary(&mut self) -> Result<Expr, String> {
+        if self.peek() == &Tok::Minus {
+            self.bump();
+            let inner = self.unary()?;
+            return Ok(Expr::Unary(UnOp::Neg, Box::new(inner)));
+        }
+        if self.is_word("not") {
+            self.bump();
+            let inner = self.unary()?;
+            return Ok(Expr::Unary(UnOp::Not, Box::new(inner)));
+        }
+        self.primary()
+    }
+
+    fn primary(&mut self) -> Result<Expr, String> {
+        match self.peek().clone() {
+            Tok::Int(n) => {
+                self.bump();
+                Ok(Expr::Int(n))
+            }
+            Tok::Str(s) => {
+                self.bump();
+                Ok(Expr::Str(s))
+            }
+            Tok::LParen => {
+                self.bump();
+                let e = self.expr()?;
+                self.need(Tok::RParen, "to close this '('")?;
+                Ok(e)
+            }
+            Tok::Ident(word) => {
+                self.bump();
+                match word.as_str() {
+                    "true" => Ok(Expr::Bool(true)),
+                    "false" => Ok(Expr::Bool(false)),
+                    _ => Ok(Expr::Var(word)),
+                }
+            }
+            other => Err(format!(
+                "line {}: I expected a value here, but found {}",
+                self.line(),
+                other.describe()
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+
+    fn p(src: &str) -> Program {
+        parse(lex(src).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn say_a_number() {
+        let prog = p("say 42\n");
+        assert_eq!(prog.stmts, vec![Stmt::Say(Expr::Int(42), 1)]);
+    }
+
+    #[test]
+    fn english_comparison() {
+        let prog = p("if x is more than 3:\n    say \"big\"\n");
+        match &prog.stmts[0] {
+            Stmt::If { cond, .. } => match cond {
+                Expr::Binary(BinOp::Gt, _, _) => {}
+                other => panic!("expected a 'more than' comparison, got {other:?}"),
+            },
+            other => panic!("expected an if, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn precedence_is_multiplication_first() {
+        let prog = p("say 1 + 2 * 3\n");
+        match &prog.stmts[0] {
+            Stmt::Say(Expr::Binary(BinOp::Add, _, right), _) => {
+                assert!(matches!(**right, Expr::Binary(BinOp::Mul, _, _)));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otherwise_attaches_to_if() {
+        let prog = p("if x:\n    say \"a\"\notherwise:\n    say \"b\"\n");
+        match &prog.stmts[0] {
+            Stmt::If { other, .. } => assert_eq!(other.len(), 1),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+}

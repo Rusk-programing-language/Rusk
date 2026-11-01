@@ -1,0 +1,14 @@
+[package]
+name = "rusk"
+version = "0.1.0"
+edition = "2021"
+description = "Rusk — an English-like language that bakes ahead of time"
+license = "MIT"
+
+[[bin]]
+name = "rusk"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+lto = true

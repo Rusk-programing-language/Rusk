@@ -1,0 +1,7 @@
+/target
+
+# baked executables
+/examples/*
+!/examples/*.rk
+
+/a.out

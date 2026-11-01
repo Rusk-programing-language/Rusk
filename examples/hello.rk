@@ -1,0 +1,3 @@
+# hello.rk — the smallest Rusk program
+
+say "Hello, world."

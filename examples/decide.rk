@@ -1,0 +1,16 @@
+# decide.rk — English comparisons and blocks
+
+let temperature be 180
+
+say "Baking at:"
+say temperature
+
+if temperature is more than 150:
+    say "Too hot. The crust will burn."
+otherwise:
+    say "Just right."
+
+if temperature is at least 180:
+    say "At least 180."
+if temperature is at most 100:
+    say "At most 100."

@@ -1,0 +1,13 @@
+# numbers.rk — variables and arithmetic
+
+let width be 7
+let height be 6
+let area be width * height
+
+say "A 7 by 6 rectangle has area:"
+say area
+say area + 1
+say 100 / 3
+say 10 - 4 * 2
+say (10 - 4) * 2
+say -15 + 3

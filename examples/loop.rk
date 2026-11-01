@@ -1,0 +1,10 @@
+# loop.rk — repeat a block a number of times
+
+let slices be 3
+
+say "Into the oven:"
+
+repeat slices times:
+    say "  one loaf"
+
+say "Done."
