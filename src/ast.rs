@@ -1,11 +1,42 @@
 //! The shape of a Rusk program, after parsing and before baking.
 
+use std::fmt;
+
+/// The kinds of value Rusk understands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ty {
+    Int,
+    Str,
+    Bool,
+    /// What a function "gives back" when it uses no `give back` at all.
+    Nothing,
+}
+
+impl fmt::Display for Ty {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Ty::Int => write!(f, "a number"),
+            Ty::Str => write!(f, "text"),
+            Ty::Bool => write!(f, "a truth value"),
+            Ty::Nothing => write!(f, "nothing"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    pub name: String,
+    pub ty: Ty,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Int(i64),
     Str(String),
     Bool(bool),
     Var(String),
+    /// A call written `name with arg and arg`.
+    Call(String, Vec<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
@@ -54,6 +85,13 @@ pub enum Stmt {
         body: Vec<Stmt>,
         line: usize,
     },
+    FuncDef {
+        name: String,
+        params: Vec<Param>,
+        body: Vec<Stmt>,
+        line: usize,
+    },
+    GiveBack(Expr, usize),
     Expr(Expr, usize),
 }
 

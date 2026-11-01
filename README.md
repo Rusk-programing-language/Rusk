@@ -23,8 +23,9 @@ kernel through `write(2)` and `exit(2)` syscalls.
 
 ## Status
 
-v0.1 is a working vertical slice: lexer, parser, type checker, AArch64 code
-generator, and ELF writer, with 30 tests. It targets **AArch64 Linux** only.
+v0.2 adds functions: `to ... with ...`, `give back`, recursion, and typed
+parameters. The compiler is a lexer, parser, type checker, AArch64 code
+generator, and ELF writer, with 47 tests. It targets **AArch64 Linux** only.
 
 ## Quick start
 
@@ -61,6 +62,36 @@ say temperature is at least 180
 say not false
 ```
 
+Functions name a piece of work and can hand a value back:
+
+```rusk
+to double with n as a number:
+    give back n * 2
+
+to greet with who as text:
+    say "Hello,"
+    say who
+
+to roll:
+    say "rolling..."
+
+say double with 21        # 42
+greet with "world"
+roll                      # a zero-argument call is just the name
+
+to factorial with n as a number:
+    if n is at most 1:
+        give back 1
+    give back n * factorial with n - 1
+
+say factorial with 5      # 120
+```
+
+Parameters declare their kind (`a number`, `text`, `a truth value`). What a
+function gives back is **inferred** from its `give back` lines, including
+through recursion. A function with no `give back` gives nothing back and
+cannot be used as a value.
+
 Everything is line-based, blocks are colon-plus-indentation, and `#` starts a
 comment. Full reference: [docs/SPEC.md](docs/SPEC.md).
 
@@ -89,15 +120,19 @@ comment. Full reference: [docs/SPEC.md](docs/SPEC.md).
 |---|---|
 | `src/lexer.rs` | Source to tokens; keywords are plain words matched by the parser |
 | `src/parser.rs` | Recursive descent over the English grammar |
-| `src/codegen.rs` | AST to machine code; stack-machine expression evaluation |
+| `src/types.rs` | Type checking and return-kind inference (fixed point) |
+| `src/codegen.rs` | AST to machine code; stack-machine expression evaluation, stack frames |
 | `src/aarch64.rs` | Hand-written instruction encoder and branch/address fixups |
 | `src/elf.rs` | Static ELF64 executable writer |
 | `src/main.rs` | The `rusk` CLI |
 
 Runtime facts worth knowing:
 
-- Code starts at `0x400000 + 0x78`; variables and the number buffer live at
-  `0x410000` in the zero-filled part of the same segment.
+- Code starts at `0x400000 + 0x78`; top-level variables and the number buffer
+  live at `0x410000` in the zero-filled part of the same segment.
+- Function arguments go in `X0..X7`, results come back in `X0`, and the return
+  address rides in `X30`. Each call gets a frame at `X29` holding the saved
+  `X29`/`X30`, its parameters, and its locals.
 - Strings are stored as `[len: u64][bytes...]`, so a string value is just a
   pointer to its length.
 - `say` of a number calls a hand-built itoa loop that divides by ten and writes
@@ -105,17 +140,19 @@ Runtime facts worth knowing:
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.1 doesn't do yet
+## What v0.2 doesn't do yet
 
 Honest list, so the docs don't lie:
 
-- No functions, parameters, or `give back` — they're the next milestone.
 - No text comparison or concatenation (`"a" + "b"` is a type error, not a bug).
+- At most 8 parameters per function, and no closures, anonymous functions, or
+  function values.
 - One loop form (`repeat N times`), one condition form (`if` / `otherwise`).
 - Division by zero traps the process instead of reporting a Rusk error.
 - AArch64 Linux only. The codegen is written so an x86-64 encoder can slot in
   behind the same AST.
 - The single load segment is RWX, which is convenient but not hardened.
+- Deep recursion cannot be caught: it runs into the stack limit and dies.
 
 ## Why the name
 

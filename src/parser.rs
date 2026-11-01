@@ -10,15 +10,22 @@
 //! set_stmt   := "set" NAME "to" expr NEWLINE
 //! if_stmt    := "if" expr ":" block ("otherwise" ":" block)?
 //! repeat_stmt:= "repeat" expr "times" ":" block
+//! func_def   := "to" NAME ("with" param ("and" param)*)? ":" block
+//! param      := NAME "as" ("a"|"an")? TYPE
+//! give_back  := "give" "back" expr NEWLINE
 //! block      := NEWLINE INDENT stmt* DEDENT
 //! expr       := sum (comparison_tail)?
 //! sum        := term (("+" | "-") term)*
 //! term       := unary (("*" | "/") unary)*
 //! unary      := ("-" | "not") unary | primary
-//! primary    := INT | TEXT | "true" | "false" | NAME | "(" expr ")"
+//! primary    := INT | TEXT | "true" | "false" | NAME ("with" expr ("and" expr)*)?
+//!             | "(" expr ")"
+//!
+//! A bare NAME is a variable, or a zero-argument call if no such variable
+//! exists. `with` always introduces arguments, which keeps calls unambiguous.
 //! ```
 
-use crate::ast::{BinOp, Expr, Program, Stmt, UnOp};
+use crate::ast::{BinOp, Expr, Param, Program, Stmt, Ty, UnOp};
 use crate::lexer::{Tok, Token};
 
 pub struct Parser {
@@ -115,6 +122,43 @@ impl Parser {
     fn stmt(&mut self) -> Result<Stmt, String> {
         let line = self.line();
 
+        if self.is_word("to") {
+            self.bump();
+            let name = self.name("after 'to'")?;
+            let mut params = Vec::new();
+            if self.eat_word("with") {
+                loop {
+                    let pname = self.name("after 'with'")?;
+                    self.need_word("as", &format!("after the parameter '{pname}',"))?;
+                    // "a number", "an answer" and bare "number" all read fine.
+                    if !self.eat_word("a") {
+                        self.eat_word("an");
+                    }
+                    let ty = self.type_name(&format!("for the parameter '{pname}',"))?;
+                    params.push(Param { name: pname, ty });
+                    if !self.eat_word("and") {
+                        break;
+                    }
+                }
+            }
+            self.need(Tok::Colon, "after the function header,")?;
+            let body = self.block("this 'to'")?;
+            return Ok(Stmt::FuncDef {
+                name,
+                params,
+                body,
+                line,
+            });
+        }
+
+        if self.is_word("give") {
+            self.bump();
+            self.need_word("back", "after 'give',")?;
+            let value = self.expr()?;
+            self.end_of_line()?;
+            return Ok(Stmt::GiveBack(value, line));
+        }
+
         if self.is_word("say") {
             self.bump();
             let value = self.expr()?;
@@ -166,6 +210,31 @@ impl Parser {
         let value = self.expr()?;
         self.end_of_line()?;
         Ok(Stmt::Expr(value, line))
+    }
+
+    fn type_name(&mut self, after: &str) -> Result<Ty, String> {
+        match self.peek().clone() {
+            Tok::Ident(word) => {
+                let ty = match word.as_str() {
+                    "number" => Ty::Int,
+                    "text" => Ty::Str,
+                    "truth" | "boolean" => Ty::Bool,
+                    _ => {
+                        return Err(format!(
+                            "line {}: {after} I expected 'a number', 'text', or 'a truth value', but found '{word}'",
+                            self.line()
+                        ))
+                    }
+                };
+                self.bump();
+                Ok(ty)
+            }
+            other => Err(format!(
+                "line {}: {after} I expected a kind of value ('a number', 'text', or 'a truth value'), but found {}",
+                self.line(),
+                other.describe()
+            )),
+        }
     }
 
     fn name(&mut self, after: &str) -> Result<String, String> {
@@ -335,6 +404,16 @@ impl Parser {
                 match word.as_str() {
                     "true" => Ok(Expr::Bool(true)),
                     "false" => Ok(Expr::Bool(false)),
+                    _ if self.eat_word("with") => {
+                        let mut args = Vec::new();
+                        loop {
+                            args.push(self.expr()?);
+                            if !self.eat_word("and") {
+                                break;
+                            }
+                        }
+                        Ok(Expr::Call(word, args))
+                    }
                     _ => Ok(Expr::Var(word)),
                 }
             }

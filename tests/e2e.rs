@@ -94,3 +94,97 @@ fn unknown_names_are_explained() {
     let err = rusk::bake("say nope\n").unwrap_err();
     assert!(err.contains("let nope be"), "{err}");
 }
+
+// ---- functions -------------------------------------------------------
+
+#[test]
+fn a_function_gives_back_a_value() {
+    let src = "\
+to double with n as a number:
+    give back n * 2
+say double with 21
+";
+    let (stdout, code) = run("fn_double", src);
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn two_parameters_and_a_local() {
+    let src = "\
+to add with a as a number and b as a number:
+    let sum be a + b
+    give back sum
+say add with 2 and 40
+";
+    let (stdout, _) = run("fn_add", src);
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn a_return_value_can_be_part_of_a_bigger_expression() {
+    let src = "\
+to double with n as a number:
+    give back n * 2
+say (double with 3) + (double with 4)
+";
+    let (stdout, _) = run("fn_expr", src);
+    assert_eq!(stdout, "14\n");
+}
+
+#[test]
+fn recursion_works() {
+    let src = "\
+to factorial with n as a number:
+    if n is at most 1:
+        give back 1
+    give back n * factorial with n - 1
+say factorial with 5
+";
+    let (stdout, _) = run("fn_fact", src);
+    assert_eq!(stdout, "120\n");
+}
+
+#[test]
+fn text_and_zero_argument_calls() {
+    let src = "\
+to greet with who as text:
+    say \"hello,\"
+    say who
+to roll:
+    say \"rolling\"
+greet with \"world\"
+roll
+";
+    let (stdout, _) = run("fn_text", src);
+    assert_eq!(stdout, "hello,\nworld\nrolling\n");
+}
+
+#[test]
+fn a_function_can_be_called_before_it_is_defined() {
+    let src = "\
+say later with 5
+to later with n as a number:
+    give back n + 1
+";
+    let (stdout, _) = run("fn_forward", src);
+    assert_eq!(stdout, "6\n");
+}
+
+#[test]
+fn arity_mismatches_are_explained() {
+    let src = "\
+to double with n as a number:
+    give back n * 2
+say double with 1 and 2
+";
+    let err = rusk::bake(src).unwrap_err();
+    assert!(err.contains("takes 1 thing"), "{err}");
+}
+
+#[test]
+fn give_back_outside_a_function_is_an_error() {
+    let err = rusk::bake("give back 1\n").unwrap_err();
+    assert!(err.contains("inside a function"), "{err}");
+}
+

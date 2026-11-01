@@ -1,0 +1,21 @@
+# functions.rk — naming a piece of work and giving a result back
+
+to double with n as a number:
+    give back n * 2
+
+to greet with who as text:
+    say "Hello,"
+    say who
+
+to roll:
+    say "rolling..."
+
+say "Doubled:"
+say double with 21
+
+greet with "world"
+
+roll
+
+say "Add them:"
+say double with 3 + double with 4

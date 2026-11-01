@@ -1,0 +1,13 @@
+# factorial.rk — recursion, and a function that calls itself
+
+to factorial with n as a number:
+    if n is at most 1:
+        give back 1
+    give back n * factorial with n - 1
+
+to add with a as a number and b as a number:
+    give back a + b
+
+say "5! is"
+say factorial with 5
+say add with 2 and 40

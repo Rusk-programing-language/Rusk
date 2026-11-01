@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.1
+# The Rusk Language — Specification v0.2
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.1
+emits native machine code directly. This document describes exactly what v0.2
 accepts and what it guarantees.
 
-Status: **v0.1, AArch64 Linux**. Everything here is implemented and tested;
+Status: **v0.2, AArch64 Linux**. Everything here is implemented and tested;
 anything not here does not exist yet.
 
 ---
@@ -36,7 +36,7 @@ Blank lines are ignored.
 | Text | `"hello"` | Immutable; escapes `\n`, `\t`, `\r`, `\0`, `\\`, `\"` |
 | Truth | `true`, `false` | The result of comparisons and `not` |
 
-Numbers are integers only. There is no floating point in v0.1.
+Numbers are integers only. There is no floating point in v0.2.
 
 ## 4. Naming things
 
@@ -122,7 +122,7 @@ otherwise:
     say "Just right."
 ```
 
-`otherwise` is optional. There is no `else if` in v0.1; nest an `if` inside an
+`otherwise` is optional. There is no `else if` in v0.2; nest an `if` inside an
 `otherwise` block instead.
 
 The condition must be a truth value. A bare number is not accepted as a
@@ -138,7 +138,58 @@ repeat 3 times:
 The count is evaluated once, before the first iteration. A count of zero or less
 runs the body zero times.
 
-## 10. Whole programs
+## 10. Functions
+
+```rusk
+to double with n as a number:
+    give back n * 2
+
+to greet with who as text:
+    say "Hello,"
+    say who
+
+to roll:
+    say "rolling..."
+```
+
+- `to NAME:` starts a function with no parameters.
+- `to NAME with P as KIND and P as KIND:` declares parameters; `and` separates
+  them. A function may have at most 8 parameters.
+- A function body is an indented block, just like an `if`.
+- `give back VALUE` ends the function and hands `VALUE` to the caller.
+
+Kinds are written `a number`, `text`, and `a truth value` (`a boolean` works
+too). The `a`/`an` is optional: `n as number` reads the same.
+
+Calling uses the same `with ... and ...` shape:
+
+```rusk
+say double with 21          # 42
+say double with 3 + 1       # the argument is the whole expression: 8
+greet with "world"
+roll                        # a zero-argument call is just the name
+```
+
+An argument is a full expression, so `double with 3 + 1` passes `3 + 1`.
+Parenthesize if you mean something else: `(double with 3) + 1`.
+
+**What a function gives back is inferred.** The compiler looks at every
+`give back` in the body; they must all agree on a kind. A function with no
+`give back` gives back *nothing* and cannot be used as a value — call it as a
+statement. Recursion is supported, and the compiler works out the return kind
+from the base case:
+
+```rusk
+to factorial with n as a number:
+    if n is at most 1:
+        give back 1
+    give back n * factorial with n - 1
+```
+
+Functions live at the top level; defining one inside a block is an error. They
+may be called before their definition appears in the file.
+
+## 11. Whole programs
 
 A program is executed top to bottom. When the last statement finishes, the
 program exits with status 0. There is no `main` and no entry-point ceremony.
@@ -148,7 +199,7 @@ program exits with status 0. There is no `main` and no entry-point ceremony.
 say "Hello, world."
 ```
 
-## 11. Errors
+## 12. Errors
 
 The compiler reports problems with a line number and a sentence:
 
@@ -159,7 +210,7 @@ burnt: in broken.rk: line 3: after 'let x,' I expected 'be', but found 'is'
 
 A file that fails to bake produces no output file.
 
-## 12. Compilation model
+## 13. Compilation model
 
 `rusk build file.rk` writes an executable next to the source with the extension
 removed (`-o` overrides the destination).
@@ -176,6 +227,11 @@ The output is a static ELF64 executable:
 Because there is no libc, `say` is a direct `write` syscall (`x8 = 64`) and
 program exit is `exit` (`x8 = 93`).
 
+Function calls use the standard AArch64 shape, assembled by hand: arguments in
+`X0..X7`, the result in `X0`, the return address in `X30`, and the frame pointer
+in `X29`. Each frame stores the caller's `X29`/`X30` at `sp+0`/`sp+8`, then its
+parameters and locals above that, so recursion gets a fresh set of slots.
+
 ### Guarantees
 
 - A program that bakes will not fail to link or load: there are no external
@@ -188,16 +244,20 @@ program exit is `exit` (`x8 = 93`).
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.1, worth relocating later.
+  collide. Fine for v0.2, worth relocating later.
 - Division by zero traps (SIGFPE analogue) rather than producing a Rusk-level
   error.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
+- Recursion depth is bounded only by the process stack; runaway recursion dies
+  rather than reporting an error.
+- At most 8 parameters per function; no function values, closures, or
+  overloading.
 
-## 13. Roadmap (not implemented)
+## 14. Roadmap (not implemented)
 
-- `to NAME with ARG ...:` function definitions and `give back`
 - text comparison and concatenation
 - `while`, `for each`, `otherwise if`
+- function values and closures
 - an x86-64 encoder behind the same AST and codegen
 - a real relocation-aware data layout
 - self-hosting: writing Rusk in Rusk

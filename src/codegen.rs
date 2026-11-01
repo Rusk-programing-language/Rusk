@@ -1,44 +1,48 @@
 //! Walks the AST and emits AArch64 machine code.
 //!
-//! Strategy: a straightforward stack-of-registers expression evaluator.
-//! Every expression leaves its value in `X0`; binary operators push the left
-//! side, evaluate the right side, then pop. Variables live in fixed 8-byte
-//! slots above the file image, which the ELF loader zero-fills for us.
+//! Expressions are evaluated with a stack of temporaries: every expression
+//! leaves its value in `X0`, binary operators push the left side, evaluate the
+//! right side, then pop. Top-level variables live in fixed 8-byte slots above
+//! the file image; a function's parameters and locals live in a stack frame
+//! addressed from `X29`.
+//!
+//! Calling convention: arguments in `X0..X7`, result in `X0`, return address in
+//! `X30`. The frame is:
+//!
+//! ```text
+//! sp+0     saved X29
+//! sp+8     saved X30
+//! sp+16    parameter 0
+//! sp+24    parameter 1 ...
+//! ```
 //!
 //! No libc, no runtime: `say` is a `write(2)` syscall, `print_int` is a
 //! hand-built itoa loop at the end of the text section, and the program ends
 //! with `exit(2)`.
 
 use crate::aarch64::*;
-use crate::ast::{BinOp, Expr, Program, Stmt, UnOp};
+use crate::ast::{BinOp, Expr, Param, Program, Stmt, Ty, UnOp};
 use crate::elf::DATA_BASE;
+use crate::types::Sig;
 use std::collections::HashMap;
-use std::fmt;
 
 /// Offset of the itoa scratch buffer inside the data area.
 const ITOA_OFFSET: u64 = 0x2000;
 const ITOA_CAPACITY: u64 = 32;
+/// Frame slots start after the saved frame pointer and return address.
+const FRAME_HEADER: u64 = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ty {
-    Int,
-    Str,
-    Bool,
-}
-
-impl fmt::Display for Ty {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Ty::Int => write!(f, "a number"),
-            Ty::Str => write!(f, "text"),
-            Ty::Bool => write!(f, "a truth value"),
-        }
-    }
-}
-
+#[derive(Clone)]
 struct Var {
     slot: u64,
     ty: Ty,
+    local: bool,
+}
+
+struct Frame {
+    ret_label: String,
+    ret_ty: Ty,
+    next_slot: u64,
 }
 
 #[derive(Debug)]
@@ -49,15 +53,30 @@ pub struct Baked {
 }
 
 pub fn compile(program: &Program) -> Result<Baked, String> {
-    let mut cg = Codegen::new();
+    let funcs = crate::types::check(program)?;
+    let mut cg = Codegen::new(funcs);
+
     cg.asm.label("_start");
     for stmt in &program.stmts {
+        if matches!(stmt, Stmt::FuncDef { .. }) {
+            continue;
+        }
         cg.stmt(stmt)?;
     }
     // exit(0)
     cg.asm.mov_imm64(X8, SYS_EXIT);
     cg.asm.mov_imm64(X0, 0);
     cg.asm.svc();
+
+    // Functions live after the exit, so top-level execution never falls in.
+    for stmt in &program.stmts {
+        if let Stmt::FuncDef {
+            name, params, body, ..
+        } = stmt
+        {
+            cg.function(name, params, body)?;
+        }
+    }
 
     cg.emit_print_int();
 
@@ -69,19 +88,23 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
 struct Codegen {
     asm: Asm,
     vars: HashMap<String, Var>,
-    strings: HashMap<String, usize>,
-    next_slot: u64,
+    funcs: HashMap<String, Sig>,
+    frame: Option<Frame>,
+    next_global: u64,
     label_counter: u64,
+    strings: HashMap<String, usize>,
 }
 
 impl Codegen {
-    fn new() -> Self {
+    fn new(funcs: HashMap<String, Sig>) -> Self {
         Codegen {
             asm: Asm::new(),
             vars: HashMap::new(),
-            strings: HashMap::new(),
-            next_slot: 0,
+            funcs,
+            frame: None,
+            next_global: 0,
             label_counter: 0,
+            strings: HashMap::new(),
         }
     }
 
@@ -90,18 +113,8 @@ impl Codegen {
         format!("{hint}_{}", self.label_counter)
     }
 
-    fn alloc_slot(&mut self) -> u64 {
-        let slot = self.next_slot;
-        self.next_slot += 1;
-        slot
-    }
-
-    fn slot_addr(slot: u64) -> u64 {
-        DATA_BASE + slot * 8
-    }
-
     fn bss_size(&self) -> u64 {
-        (self.next_slot * 8).max(ITOA_OFFSET + ITOA_CAPACITY)
+        (self.next_global * 8).max(ITOA_OFFSET + ITOA_CAPACITY)
     }
 
     fn intern(&mut self, s: &str) -> usize {
@@ -113,39 +126,62 @@ impl Codegen {
         id
     }
 
+    fn store_var(&mut self, var: &Var) {
+        if var.local {
+            self.asm.str(X0, X29, frame_offset(var.slot));
+        } else {
+            self.asm.mov_imm64(X1, DATA_BASE + var.slot * 8);
+            self.asm.str(X0, X1, 0);
+        }
+    }
+
+    fn load_var(&mut self, var: &Var) {
+        if var.local {
+            self.asm.ldr(X0, X29, frame_offset(var.slot));
+        } else {
+            self.asm.mov_imm64(X1, DATA_BASE + var.slot * 8);
+            self.asm.ldr(X0, X1, 0);
+        }
+    }
+
     // ---- statements ------------------------------------------------------
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
-            Stmt::Say(e, line) => self.say(e).map_err(|m| format!("line {line}: {m}")),
+            Stmt::Say(e, line) => {
+                let ty = self.expr(e).map_err(|m| at(*line, m))?;
+                if ty == Ty::Nothing {
+                    return Err(at(
+                        *line,
+                        "that function doesn't give anything back, so there's nothing to say"
+                            .to_string(),
+                    ));
+                }
+                self.emit_say(ty);
+                Ok(())
+            }
             Stmt::Let { name, value, line } => {
-                self.let_(name, value).map_err(|m| format!("line {line}: {m}"))
+                self.let_(name, value).map_err(|m| at(*line, m))
             }
             Stmt::Set { name, value, line } => {
-                self.set(name, value).map_err(|m| format!("line {line}: {m}"))
+                self.set(name, value).map_err(|m| at(*line, m))
             }
             Stmt::If {
                 cond,
                 then,
                 other,
                 line,
-            } => self
-                .if_(cond, then, other)
-                .map_err(|m| format!("line {line}: {m}")),
-            Stmt::Repeat { count, body, line } => self
-                .repeat(count, body)
-                .map_err(|m| format!("line {line}: {m}")),
-            Stmt::Expr(e, line) => self
-                .expr(e)
-                .map(|_| ())
-                .map_err(|m| format!("line {line}: {m}")),
+            } => self.if_(cond, then, other).map_err(|m| at(*line, m)),
+            Stmt::Repeat { count, body, line } => {
+                self.repeat(count, body).map_err(|m| at(*line, m))
+            }
+            Stmt::GiveBack(e, line) => self.give_back(e).map_err(|m| at(*line, m)),
+            Stmt::Expr(e, line) => self.expr(e).map(|_| ()).map_err(|m| at(*line, m)),
+            Stmt::FuncDef { line, .. } => Err(at(
+                *line,
+                "functions have to live at the top level".to_string(),
+            )),
         }
-    }
-
-    fn say(&mut self, e: &Expr) -> Result<(), String> {
-        let ty = self.expr(e)?;
-        self.emit_say(ty);
-        Ok(())
     }
 
     fn let_(&mut self, name: &str, value: &Expr) -> Result<(), String> {
@@ -155,30 +191,46 @@ impl Codegen {
             ));
         }
         let ty = self.expr(value)?;
-        let slot = self.alloc_slot();
-        self.asm.mov_imm64(X1, Self::slot_addr(slot));
-        self.asm.str(X0, X1, 0);
-        self.vars.insert(name.to_string(), Var { slot, ty });
+        let var = if self.frame.is_some() {
+            let slot = {
+                let frame = self.frame.as_mut().unwrap();
+                let slot = frame.next_slot;
+                frame.next_slot += 1;
+                slot
+            };
+            Var {
+                slot,
+                ty,
+                local: true,
+            }
+        } else {
+            let slot = self.next_global;
+            self.next_global += 1;
+            Var {
+                slot,
+                ty,
+                local: false,
+            }
+        };
+        self.store_var(&var);
+        self.vars.insert(name.to_string(), var);
         Ok(())
     }
 
     fn set(&mut self, name: &str, value: &Expr) -> Result<(), String> {
-        let (slot, old_ty) = match self.vars.get(name) {
-            Some(v) => (v.slot, v.ty),
-            None => {
-                return Err(format!(
-                    "I don't know a thing called '{name}' — declare it with 'let {name} be ...' first"
-                ))
-            }
+        let Some(var) = self.vars.get(name).cloned() else {
+            return Err(format!(
+                "I don't know a thing called '{name}' — declare it with 'let {name} be ...' first"
+            ));
         };
         let ty = self.expr(value)?;
-        if ty != old_ty {
+        if ty != var.ty {
             return Err(format!(
-                "'{name}' holds {old_ty}, but that's {ty} — Rusk won't change a thing's kind"
+                "'{name}' holds {}, but that's {ty} — Rusk won't change a thing's kind",
+                var.ty
             ));
         }
-        self.asm.mov_imm64(X1, Self::slot_addr(slot));
-        self.asm.str(X0, X1, 0);
+        self.store_var(&var);
         Ok(())
     }
 
@@ -210,29 +262,123 @@ impl Codegen {
         if ty != Ty::Int {
             return Err(format!("'repeat' needs a number, but the count is {ty}"));
         }
-        let slot = self.alloc_slot();
-        let addr = Self::slot_addr(slot);
-        self.asm.mov_imm64(X1, addr);
-        self.asm.str(X0, X1, 0);
+        let slot = if self.frame.is_some() {
+            let frame = self.frame.as_mut().unwrap();
+            let slot = frame.next_slot;
+            frame.next_slot += 1;
+            slot
+        } else {
+            let slot = self.next_global;
+            self.next_global += 1;
+            slot
+        };
+        // The counter is local to the current function or to the program.
+        let local = self.frame.is_some();
+        let counter = Var {
+            slot,
+            ty: Ty::Int,
+            local,
+        };
+        self.store_var(&counter);
 
         let l_loop = self.new_label("loop");
         let l_end = self.new_label("after");
         self.asm.label(&l_loop);
-        self.asm.mov_imm64(X1, addr);
-        self.asm.ldr(X0, X1, 0);
+        self.load_var(&counter);
         self.asm.cmp_reg_reg(X0, XZR);
         self.asm.bcond_label(CC_LE, &l_end);
         for s in body {
             self.stmt(s)?;
         }
-        self.asm.mov_imm64(X1, addr);
-        self.asm.ldr(X0, X1, 0);
+        self.load_var(&counter);
         self.asm.mov_imm64(X2, 1);
         self.asm.sub_reg_reg(X0, X0, X2);
-        self.asm.str(X0, X1, 0);
+        self.store_var(&counter);
         self.asm.b_label(&l_loop);
         self.asm.label(&l_end);
         Ok(())
+    }
+
+    fn give_back(&mut self, e: &Expr) -> Result<(), String> {
+        let Some(frame) = &self.frame else {
+            return Err("'give back' only works inside a function".to_string());
+        };
+        let ret_ty = frame.ret_ty;
+        let ret_label = frame.ret_label.clone();
+        let ty = self.expr(e)?;
+        if ty != ret_ty {
+            return Err(format!(
+                "this function gives back {ret_ty}, but here it's {ty}"
+            ));
+        }
+        self.asm.b_label(&ret_label);
+        Ok(())
+    }
+
+    // ---- functions -------------------------------------------------------
+
+    fn function(&mut self, name: &str, params: &[Param], body: &[Stmt]) -> Result<(), String> {
+        let Some(sig) = self.funcs.get(name).cloned() else {
+            return Err(format!("internal: no signature for '{name}'"));
+        };
+        if params.len() > 8 {
+            return Err(format!("'{name}' has too many parameters (8 at most)"));
+        }
+
+        let slots = params.len() as u64 + count_slots(body);
+        let frame_size = FRAME_HEADER + slots * 8;
+        let frame_size = (frame_size + 15) / 16 * 16;
+        if frame_size > 4000 {
+            return Err(format!("'{name}' has too many things to keep track of"));
+        }
+
+        let ret_label = format!("ret_{name}");
+        let saved_vars = std::mem::take(&mut self.vars);
+        let saved_frame = self.frame.take();
+        self.frame = Some(Frame {
+            ret_label: ret_label.clone(),
+            ret_ty: sig.ret,
+            next_slot: params.len() as u64,
+        });
+
+        self.asm.label(&format!("fn_{name}"));
+        self.asm.sub_imm(SP, SP, frame_size as u32);
+        self.asm.str(X29, SP, 0);
+        self.asm.str(X30, SP, 8);
+        self.asm.add_imm(X29, SP, 0);
+
+        for (i, p) in params.iter().enumerate() {
+            self.vars.insert(
+                p.name.clone(),
+                Var {
+                    slot: i as u64,
+                    ty: p.ty,
+                    local: true,
+                },
+            );
+            self.asm.str(i as u8, X29, frame_offset(i as u64));
+        }
+
+        let mut result = Ok(());
+        for stmt in body {
+            if let Err(e) = self.stmt(stmt) {
+                result = Err(e);
+                break;
+            }
+        }
+
+        // Falling off the end gives 0, so a procedure's result is harmless.
+        self.asm.mov_imm64(X0, 0);
+        self.asm.label(&ret_label);
+        self.asm.add_imm(SP, X29, 0);
+        self.asm.ldr(X29, SP, 0);
+        self.asm.ldr(X30, SP, 8);
+        self.asm.add_imm(SP, SP, frame_size as u32);
+        self.asm.ret();
+
+        self.vars = saved_vars;
+        self.frame = saved_frame;
+        result
     }
 
     // ---- expressions -----------------------------------------------------
@@ -253,15 +399,49 @@ impl Codegen {
                 Ok(Ty::Bool)
             }
             Expr::Var(name) => {
-                let var = self.vars.get(name).ok_or_else(|| {
-                    format!(
-                        "I don't know a thing called '{name}' — declare it with 'let {name} be ...'"
-                    )
-                })?;
-                let (slot, ty) = (var.slot, var.ty);
-                self.asm.mov_imm64(X1, Self::slot_addr(slot));
-                self.asm.ldr(X0, X1, 0);
-                Ok(ty)
+                if let Some(var) = self.vars.get(name).cloned() {
+                    self.load_var(&var);
+                    return Ok(var.ty);
+                }
+                if let Some(sig) = self.funcs.get(name).cloned() {
+                    if sig.params.is_empty() {
+                        self.asm.bl_label(&format!("fn_{name}"));
+                        return Ok(sig.ret);
+                    }
+                    return Err(format!(
+                        "'{name}' needs {} thing{} — call it with 'with ...'",
+                        sig.params.len(),
+                        if sig.params.len() == 1 { "" } else { "s" }
+                    ));
+                }
+                Err(format!(
+                    "I don't know a thing called '{name}' — declare it with 'let {name} be ...'"
+                ))
+            }
+            Expr::Call(name, args) => {
+                let Some(sig) = self.funcs.get(name).cloned() else {
+                    return Err(format!("I don't know a function called '{name}'"));
+                };
+                if args.len() != sig.params.len() {
+                    return Err(format!(
+                        "'{name}' takes {} thing{}, but got {}",
+                        sig.params.len(),
+                        if sig.params.len() == 1 { "" } else { "s" },
+                        args.len()
+                    ));
+                }
+                if args.len() > 8 {
+                    return Err("a call can pass at most 8 things".to_string());
+                }
+                for arg in args {
+                    self.expr(arg)?;
+                    self.asm.push_reg(X0);
+                }
+                for i in (0..args.len()).rev() {
+                    self.asm.pop_reg(i as u8);
+                }
+                self.asm.bl_label(&format!("fn_{name}"));
+                Ok(sig.ret)
             }
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
@@ -305,7 +485,6 @@ impl Codegen {
                         op_name(op)
                     ));
                 }
-                // X1 = left, X0 = right.
                 match op {
                     Add => self.asm.add_reg_reg(X0, X1, X0),
                     Sub => self.asm.sub_reg_reg(X0, X1, X0),
@@ -364,6 +543,7 @@ impl Codegen {
                 self.asm.label(&l_done);
                 self.emit_print_text();
             }
+            Ty::Nothing => {}
         }
     }
 
@@ -440,6 +620,25 @@ impl Codegen {
     }
 }
 
+fn frame_offset(slot: u64) -> u32 {
+    (FRAME_HEADER + slot * 8) as u32
+}
+
+/// How many stack slots a function body needs: one per `let`, one per
+/// `repeat` counter, including nested blocks.
+fn count_slots(stmts: &[Stmt]) -> u64 {
+    let mut n = 0;
+    for stmt in stmts {
+        match stmt {
+            Stmt::Let { .. } => n += 1,
+            Stmt::Repeat { body, .. } => n += 1 + count_slots(body),
+            Stmt::If { then, other, .. } => n += count_slots(then) + count_slots(other),
+            _ => {}
+        }
+    }
+    n
+}
+
 fn op_name(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
@@ -453,6 +652,10 @@ fn op_name(op: BinOp) -> &'static str {
         BinOp::Gt => "is more than",
         BinOp::GtEq => "is at least",
     }
+}
+
+fn at(line: usize, msg: String) -> String {
+    format!("line {line}: {msg}")
 }
 
 #[cfg(test)]
@@ -489,5 +692,25 @@ mod tests {
     fn redeclaring_needs_set() {
         let err = bake("let x be 1\nlet x be 2\n").unwrap_err();
         assert!(err.contains("already exists"), "{err}");
+    }
+
+    #[test]
+    fn functions_bake() {
+        let src = "\
+to double with n as a number:
+    give back n * 2
+say double with 21
+";
+        let baked = bake(src).unwrap();
+        assert!(baked.text.len() > 40);
+    }
+
+    #[test]
+    fn too_many_parameters() {
+        let src = "\
+to wide with a as a number and b as a number and c as a number and d as a number and e as a number and f as a number and g as a number and h as a number and i as a number:
+    give back a
+";
+        assert!(bake(src).is_err());
     }
 }

@@ -21,6 +21,8 @@ pub const X6: u8 = 6;
 pub const X7: u8 = 7;
 pub const X8: u8 = 8;
 pub const X19: u8 = 19;
+pub const X29: u8 = 29;
+pub const X30: u8 = 30;
 pub const XZR: u8 = 31;
 pub const SP: u8 = 31;
 
