@@ -21,7 +21,7 @@
 //! with `exit(2)`.
 
 use crate::aarch64::*;
-use crate::ast::{BinOp, Expr, Param, Program, Stmt, Ty, UnOp};
+use crate::ast::{BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
 use crate::elf::DATA_BASE;
 use crate::types::Sig;
 use std::collections::HashMap;
@@ -41,6 +41,7 @@ struct Var {
     slot: u64,
     ty: Ty,
     local: bool,
+    constant: bool,
 }
 
 struct Frame {
@@ -93,6 +94,8 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     cg.emit_text_compare();
     cg.emit_text_letter();
     cg.emit_text_part();
+    cg.emit_array_get();
+    cg.emit_array_set();
     cg.emit_runtime_fail();
 
     if cg.next_global * 8 > HEAP_PTR_OFFSET {
@@ -141,26 +144,32 @@ impl Codegen {
             .max(HEAP_START_OFFSET + HEAP_SIZE)
     }
 
-    /// Reserve an 8-byte number slot, in the current frame or at top level.
-    fn alloc_int_slot(&mut self) -> Var {
+    /// Reserve an 8-byte slot, in the current frame or at top level.
+    fn alloc_var(&mut self, ty: Ty, constant: bool) -> Var {
         if self.frame.is_some() {
             let frame = self.frame.as_mut().unwrap();
             let slot = frame.next_slot;
             frame.next_slot += 1;
             Var {
                 slot,
-                ty: Ty::Int,
+                ty,
                 local: true,
+                constant,
             }
         } else {
             let slot = self.next_global;
             self.next_global += 1;
             Var {
                 slot,
-                ty: Ty::Int,
+                ty,
                 local: false,
+                constant,
             }
         }
+    }
+
+    fn alloc_int_slot(&mut self) -> Var {
+        self.alloc_var(Ty::Int, false)
     }
 
     fn intern(&mut self, s: &str) -> usize {
@@ -213,11 +222,22 @@ impl Codegen {
                 Ok(())
             }
             Stmt::Let { name, value, line } => {
-                self.let_(name, value).map_err(|m| at(*line, m))
+                self.declare(name, value, false).map_err(|m| at(*line, m))
+            }
+            Stmt::Const { name, value, line } => {
+                self.declare(name, value, true).map_err(|m| at(*line, m))
             }
             Stmt::Set { name, value, line } => {
                 self.set(name, value).map_err(|m| at(*line, m))
             }
+            Stmt::SetItem {
+                index,
+                array,
+                value,
+                line,
+            } => self
+                .set_item(index, array, value)
+                .map_err(|m| at(*line, m)),
             Stmt::If {
                 cond,
                 then,
@@ -239,43 +259,35 @@ impl Codegen {
             } => self
                 .for_each(name, from, to, body)
                 .map_err(|m| at(*line, m)),
+            Stmt::ForEachIn {
+                name,
+                array,
+                body,
+                line,
+            } => self
+                .for_each_in(name, array, body)
+                .map_err(|m| at(*line, m)),
             Stmt::GiveBack(e, line) => self.give_back(e).map_err(|m| at(*line, m)),
             Stmt::Expr(e, line) => self.expr(e).map(|_| ()).map_err(|m| at(*line, m)),
             Stmt::FuncDef { line, .. } => Err(at(
                 *line,
                 "functions have to live at the top level".to_string(),
             )),
+            Stmt::Import { line, .. } => Err(at(
+                *line,
+                "this import wasn't resolved — imports only work at the top level".to_string(),
+            )),
         }
     }
 
-    fn let_(&mut self, name: &str, value: &Expr) -> Result<(), String> {
+    fn declare(&mut self, name: &str, value: &Expr, constant: bool) -> Result<(), String> {
         if self.vars.contains_key(name) {
             return Err(format!(
                 "'{name}' already exists — use 'set {name} to ...' to change it"
             ));
         }
         let ty = self.expr(value)?;
-        let var = if self.frame.is_some() {
-            let slot = {
-                let frame = self.frame.as_mut().unwrap();
-                let slot = frame.next_slot;
-                frame.next_slot += 1;
-                slot
-            };
-            Var {
-                slot,
-                ty,
-                local: true,
-            }
-        } else {
-            let slot = self.next_global;
-            self.next_global += 1;
-            Var {
-                slot,
-                ty,
-                local: false,
-            }
-        };
+        let var = self.alloc_var(ty, constant);
         self.store_var(&var);
         self.vars.insert(name.to_string(), var);
         Ok(())
@@ -287,6 +299,11 @@ impl Codegen {
                 "I don't know a thing called '{name}' — declare it with 'let {name} be ...' first"
             ));
         };
+        if var.constant {
+            return Err(format!(
+                "'{name}' is a constant — it can't be changed with 'set'"
+            ));
+        }
         let ty = self.expr(value)?;
         if ty != var.ty {
             return Err(format!(
@@ -295,6 +312,37 @@ impl Codegen {
             ));
         }
         self.store_var(&var);
+        Ok(())
+    }
+
+    fn set_item(&mut self, index: &Expr, array: &Expr, value: &Expr) -> Result<(), String> {
+        let it = self.expr(index)?;
+        if it != Ty::Int {
+            return Err(format!(
+                "the item number must be a number, but this is {it}"
+            ));
+        }
+        self.asm.push_reg(X0);
+        let at = self.expr(array)?;
+        let Some(elem) = at.elem() else {
+            return Err(format!("'set item' needs a list, but this is {at}"));
+        };
+        self.asm.push_reg(X0);
+        let vt = self.expr(value)?;
+        if vt != elem.ty() {
+            return Err(format!(
+                "this list holds {}, but the new item is {vt}",
+                elem.ty()
+            ));
+        }
+        self.asm.push_reg(X0);
+        self.asm.pop_reg(X2); // value
+        self.asm.pop_reg(X1); // array
+        self.asm.pop_reg(X0); // index
+        let msg = self.runtime_message("an item outside the list");
+        let id = self.intern(&msg);
+        self.asm.mov_abs(X4, id);
+        self.asm.bl_label("array_set");
         Ok(())
     }
 
@@ -426,6 +474,68 @@ impl Codegen {
         Ok(())
     }
 
+    fn for_each_in(&mut self, name: &str, array: &Expr, body: &[Stmt]) -> Result<(), String> {
+        let at = self.expr(array)?;
+        let Some(elem) = at.elem() else {
+            return Err(format!("'for each ... in' needs a list, but this is {at}"));
+        };
+
+        let array_var = self.alloc_var(at, false);
+        self.store_var(&array_var);
+        let index = self.alloc_int_slot();
+        self.asm.mov_imm64(X0, 0);
+        self.store_var(&index);
+        let item = self.alloc_var(elem.ty(), false);
+
+        let previous = self.vars.insert(name.to_string(), item.clone());
+
+        let l_loop = self.new_label("each_in");
+        let l_end = self.new_label("after");
+        self.asm.label(&l_loop);
+        self.load_var(&index);
+        self.asm.mov_reg_reg(X2, X0);
+        self.load_var(&array_var);
+        self.asm.ldr(X3, X0, 0); // length
+        self.asm.cmp_reg_reg(X2, X3);
+        self.asm.bcond_label(CC_GE, &l_end);
+
+        // array_get takes a 1-based index; array_get is used even though the
+        // loop index is always valid, which keeps one bounds check in one place.
+        // Keep the index in X2: loading a variable may use X0 and X1.
+        self.load_var(&index);
+        self.asm.mov_imm64(X2, 1);
+        self.asm.add_reg_reg(X2, X0, X2);
+        self.load_var(&array_var);
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.mov_reg_reg(X0, X2);
+        let msg = self.runtime_message("an item outside the list");
+        let id = self.intern(&msg);
+        self.asm.mov_abs(X4, id);
+        self.asm.bl_label("array_get");
+        self.store_var(&item);
+
+        for s in body {
+            self.stmt(s)?;
+        }
+
+        self.load_var(&index);
+        self.asm.mov_imm64(X2, 1);
+        self.asm.add_reg_reg(X0, X0, X2);
+        self.store_var(&index);
+        self.asm.b_label(&l_loop);
+        self.asm.label(&l_end);
+
+        match previous {
+            Some(var) => {
+                self.vars.insert(name.to_string(), var);
+            }
+            None => {
+                self.vars.remove(name);
+            }
+        }
+        Ok(())
+    }
+
     fn give_back(&mut self, e: &Expr) -> Result<(), String> {
         let Some(frame) = &self.frame else {
             return Err("'give back' only works inside a function".to_string());
@@ -481,6 +591,7 @@ impl Codegen {
                     slot: i as u64,
                     ty: p.ty,
                     local: true,
+                    constant: false,
                 },
             );
             self.asm.str(i as u8, X29, frame_offset(i as u64));
@@ -572,9 +683,9 @@ impl Codegen {
             }
             Expr::Length(inner) => {
                 let ty = self.expr(inner)?;
-                if ty != Ty::Str {
+                if ty != Ty::Str && ty.elem().is_none() {
                     return Err(format!(
-                        "'length of' counts the letters in text, but this is {ty}"
+                        "'length of' counts the letters in text or the items in a list, but this is {ty}"
                     ));
                 }
                 self.asm.ldr(X0, X0, 0);
@@ -629,6 +740,93 @@ impl Codegen {
                 self.asm.mov_abs(X4, id);
                 self.asm.bl_label("text_part");
                 Ok(Ty::Str)
+            }
+            Expr::Array(items) => {
+                if items.is_empty() {
+                    return Err(
+                        "an empty list needs a kind — write 'an empty list of numbers', 'an empty list of text', or 'an empty list of truth values'"
+                            .to_string(),
+                    );
+                }
+                let mut elem: Option<Elem> = None;
+                for item in items {
+                    let t = self.expr(item)?;
+                    let this = match t {
+                        Ty::Int => Elem::Int,
+                        Ty::Str => Elem::Str,
+                        Ty::Bool => Elem::Bool,
+                        Ty::Array(_) => {
+                            return Err(
+                                "a list can hold numbers, text, or truth values, not other lists"
+                                    .to_string(),
+                            )
+                        }
+                        Ty::Nothing => {
+                            return Err("nothing can go in a list".to_string());
+                        }
+                    };
+                    if let Some(old) = elem {
+                        if old != this {
+                            return Err(format!(
+                                "this list mixes {} and {} — a list holds one kind of thing",
+                                old.ty(),
+                                this.ty()
+                            ));
+                        }
+                    }
+                    elem = Some(this);
+                    self.asm.push_reg(X0);
+                }
+
+                let n = items.len() as u64;
+                if n * 8 + 8 >= 4096 * 8 {
+                    return Err("this list literal is too long".to_string());
+                }
+                let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+                self.asm.mov_imm64(X5, heap_ptr);
+                self.asm.ldr(X6, X5, 0);
+                self.asm.mov_imm64(X7, n * 8 + 8);
+                self.asm.add_reg_reg(X7, X6, X7);
+                self.asm.str(X7, X5, 0);
+                self.asm.mov_imm64(X7, n);
+                self.asm.str(X7, X6, 0);
+                for i in (0..n).rev() {
+                    self.asm.pop_reg(X0);
+                    self.asm.str(X0, X6, (i * 8 + 8) as u32);
+                }
+                self.asm.mov_reg_reg(X0, X6);
+                Ok(Ty::Array(elem.unwrap()))
+            }
+            Expr::EmptyArray(elem) => {
+                let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+                self.asm.mov_imm64(X5, heap_ptr);
+                self.asm.ldr(X6, X5, 0);
+                self.asm.add_imm(X7, X6, 8);
+                self.asm.str(X7, X5, 0);
+                self.asm.movz_reg(X7, 0);
+                self.asm.str(X7, X6, 0);
+                self.asm.mov_reg_reg(X0, X6);
+                Ok(Ty::Array(*elem))
+            }
+            Expr::Item(index, array) => {
+                let it = self.expr(index)?;
+                if it != Ty::Int {
+                    return Err(format!(
+                        "the item number must be a number, but this is {it}"
+                    ));
+                }
+                self.asm.push_reg(X0);
+                let at = self.expr(array)?;
+                let Some(elem) = at.elem() else {
+                    return Err(format!("'item ... of' needs a list, but this is {at}"));
+                };
+                self.asm.mov_reg_reg(X1, X0);
+                self.asm.pop_reg(X0);
+                let msg = self.runtime_message("an item outside the list");
+                let id = self.intern(&msg);
+                self.asm.mov_abs(X4, id);
+                self.asm.bl_label("array_get");
+                Ok(elem.ty())
             }
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
@@ -750,17 +948,91 @@ impl Codegen {
                 self.asm.label(&l_done);
                 self.emit_print_text();
             }
+            Ty::Array(elem) => self.emit_say_array(elem),
             Ty::Nothing => {}
         }
     }
 
     /// X0 points at a length-prefixed string: `[len: u64][bytes...]`.
-    fn emit_print_text(&mut self) {
+    fn emit_write_text_value(&mut self) {
         self.asm.ldr(X2, X0, 0); // len
         self.asm.add_imm(X1, X0, 8); // bytes
         self.asm.mov_imm64(X0, 1); // fd = stdout
         self.asm.mov_imm64(X8, SYS_WRITE);
         self.asm.svc();
+    }
+
+    fn emit_print_text(&mut self) {
+        self.emit_write_text_value();
+        self.emit_newline();
+    }
+
+    /// Write an interned literal without a newline.
+    fn emit_write_literal(&mut self, s: &str) {
+        let id = self.intern(s);
+        self.asm.mov_abs(X1, id);
+        self.asm.add_imm(X1, X1, 8);
+        self.asm.mov_imm64(X2, s.len() as u64);
+        self.asm.mov_imm64(X0, 1);
+        self.asm.mov_imm64(X8, SYS_WRITE);
+        self.asm.svc();
+    }
+
+    /// X0 points at a list: `[len: u64][item: i64]...`. Print `[a, b, c]`.
+    fn emit_say_array(&mut self, elem: Elem) {
+        self.asm.sub_imm(SP, SP, 32);
+        self.asm.str(X19, SP, 0);
+        self.asm.str(X20, SP, 8);
+        self.asm.str(X21, SP, 16);
+
+        self.asm.mov_reg_reg(X19, X0); // list
+        self.asm.ldr(X20, X19, 0); // length
+        self.asm.add_imm(X19, X19, 8); // items
+        self.emit_write_literal("[");
+
+        self.asm.movz_reg(X21, 0); // index
+        let l_loop = self.new_label("say_list");
+        let l_first = self.new_label("say_first");
+        let l_done = self.new_label("say_done");
+
+        self.asm.label(&l_loop);
+        self.asm.cmp_reg_reg(X21, X20);
+        self.asm.bcond_label(CC_GE, &l_done);
+        self.asm.cmp_reg_reg(X21, XZR);
+        self.asm.bcond_label(CC_EQ, &l_first);
+        self.emit_write_literal(", ");
+        self.asm.label(&l_first);
+
+        self.asm.ldr(X0, X19, 0);
+        match elem {
+            Elem::Int => self.asm.bl_label("print_int"),
+            Elem::Str => self.emit_write_text_value(),
+            Elem::Bool => {
+                let l_false = self.new_label("say_item_false");
+                let l_after = self.new_label("say_item_after");
+                self.asm.cmp_reg_reg(X0, XZR);
+                self.asm.bcond_label(CC_EQ, &l_false);
+                let t = self.intern("true");
+                self.asm.mov_abs(X0, t);
+                self.asm.b_label(&l_after);
+                self.asm.label(&l_false);
+                let f = self.intern("false");
+                self.asm.mov_abs(X0, f);
+                self.asm.label(&l_after);
+                self.emit_write_text_value();
+            }
+        }
+
+        self.asm.add_imm(X19, X19, 8);
+        self.asm.add_imm(X21, X21, 1);
+        self.asm.b_label(&l_loop);
+
+        self.asm.label(&l_done);
+        self.emit_write_literal("]");
+        self.asm.ldr(X19, SP, 0);
+        self.asm.ldr(X20, SP, 8);
+        self.asm.ldr(X21, SP, 16);
+        self.asm.add_imm(SP, SP, 32);
         self.emit_newline();
     }
 
@@ -1027,6 +1299,60 @@ impl Codegen {
         a.b_label("runtime_fail");
     }
 
+    /// `array_get`: X0 = index (1-based), X1 = list, X4 = runtime error.
+    /// Result in X0.
+    fn emit_array_get(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("array_get");
+        a.ldr(X2, X1, 0); // length
+        a.movz_reg(X3, 1);
+        a.cmp_reg_reg(X0, X3);
+        a.bcond_label(CC_LT, "array_get_fail");
+        a.cmp_reg_reg(X0, X2);
+        a.bcond_label(CC_GT, "array_get_fail");
+
+        a.sub_imm(X0, X0, 1);
+        a.add_reg_reg(X0, X0, X0); // *2
+        a.add_reg_reg(X0, X0, X0); // *4
+        a.add_reg_reg(X0, X0, X0); // *8
+        a.add_imm(X0, X0, 8); // skip the length
+        a.add_reg_reg(X0, X1, X0);
+        a.ldr(X0, X0, 0);
+        a.ret();
+
+        a.label("array_get_fail");
+        a.mov_reg_reg(X0, X4);
+        a.b_label("runtime_fail");
+    }
+
+    /// `array_set`: X0 = index (1-based), X1 = list, X2 = value,
+    /// X4 = runtime error. Writes in place.
+    fn emit_array_set(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("array_set");
+        a.ldr(X3, X1, 0); // length
+        a.movz_reg(X5, 1);
+        a.cmp_reg_reg(X0, X5);
+        a.bcond_label(CC_LT, "array_set_fail");
+        a.cmp_reg_reg(X0, X3);
+        a.bcond_label(CC_GT, "array_set_fail");
+
+        a.sub_imm(X0, X0, 1);
+        a.add_reg_reg(X0, X0, X0); // *2
+        a.add_reg_reg(X0, X0, X0); // *4
+        a.add_reg_reg(X0, X0, X0); // *8
+        a.add_imm(X0, X0, 8);
+        a.add_reg_reg(X0, X1, X0);
+        a.str(X2, X0, 0);
+        a.ret();
+
+        a.label("array_set_fail");
+        a.mov_reg_reg(X0, X4);
+        a.b_label("runtime_fail");
+    }
+
     /// `runtime_fail`: X0 points at a length-prefixed sentence. Write it to
     /// stderr and leave with status 1.
     fn emit_runtime_fail(&mut self) {
@@ -1055,10 +1381,11 @@ fn count_slots(stmts: &[Stmt]) -> u64 {
     let mut n = 0;
     for stmt in stmts {
         match stmt {
-            Stmt::Let { .. } => n += 1,
+            Stmt::Let { .. } | Stmt::Const { .. } => n += 1,
             Stmt::Repeat { body, .. } => n += 1 + count_slots(body),
             Stmt::While { body, .. } => n += count_slots(body),
             Stmt::ForEach { body, .. } => n += 2 + count_slots(body),
+            Stmt::ForEachIn { body, .. } => n += 3 + count_slots(body),
             Stmt::If { then, other, .. } => n += count_slots(then) + count_slots(other),
             _ => {}
         }

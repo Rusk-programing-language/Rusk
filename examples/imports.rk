@@ -1,0 +1,10 @@
+# Imports are resolved before type checking. A file is included at most once,
+# even when several modules import the same helper.
+
+import "lib/greetings"
+import "../ruskmods/math"
+
+say greeting with "world"
+say farewell with "oven"
+say math_square with 12
+say math_sum_to with 10

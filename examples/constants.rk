@@ -1,0 +1,10 @@
+# A constant is a name whose value cannot be replaced with `set`.
+constant batch_size be 12
+constant bakery be "The Corner Oven"
+
+say bakery
+say batch_size * 2
+say batch_size is 12
+
+# This would be an error:
+# set batch_size to 13

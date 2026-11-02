@@ -2,14 +2,52 @@
 
 use std::fmt;
 
+/// The kinds a list can hold. Lists are homogeneous and hold one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Elem {
+    Int,
+    Str,
+    Bool,
+}
+
+impl Elem {
+    pub fn ty(self) -> Ty {
+        match self {
+            Elem::Int => Ty::Int,
+            Elem::Str => Ty::Str,
+            Elem::Bool => Ty::Bool,
+        }
+    }
+
+    /// The plural used after "a list of".
+    pub fn plural(self) -> &'static str {
+        match self {
+            Elem::Int => "numbers",
+            Elem::Str => "text",
+            Elem::Bool => "truth values",
+        }
+    }
+}
+
 /// The kinds of value Rusk understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {
     Int,
     Str,
     Bool,
+    /// A homogeneous list: a pointer to `[len][item...]` at runtime.
+    Array(Elem),
     /// What a function "gives back" when it uses no `give back` at all.
     Nothing,
+}
+
+impl Ty {
+    pub fn elem(self) -> Option<Elem> {
+        match self {
+            Ty::Array(elem) => Some(elem),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for Ty {
@@ -18,6 +56,7 @@ impl fmt::Display for Ty {
             Ty::Int => write!(f, "a number"),
             Ty::Str => write!(f, "text"),
             Ty::Bool => write!(f, "a truth value"),
+            Ty::Array(elem) => write!(f, "a list of {}", elem.plural()),
             Ty::Nothing => write!(f, "nothing"),
         }
     }
@@ -47,6 +86,12 @@ pub enum Expr {
         from: Box<Expr>,
         to: Box<Expr>,
     },
+    /// `[a, b, c]` — a new list whose kind comes from its items.
+    Array(Vec<Expr>),
+    /// `an empty list of numbers` — a list whose kind must be written down.
+    EmptyArray(Elem),
+    /// `item N of LIST` — one item, counting from 1.
+    Item(Box<Expr>, Box<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
@@ -79,8 +124,21 @@ pub enum Stmt {
         value: Expr,
         line: usize,
     },
+    /// `constant NAME be VALUE` — a name that cannot be changed with `set`.
+    Const {
+        name: String,
+        value: Expr,
+        line: usize,
+    },
     Set {
         name: String,
+        value: Expr,
+        line: usize,
+    },
+    /// `set item N of LIST to VALUE`.
+    SetItem {
+        index: Expr,
+        array: Expr,
         value: Expr,
         line: usize,
     },
@@ -109,6 +167,18 @@ pub enum Stmt {
         body: Vec<Stmt>,
         line: usize,
     },
+    /// `for each NAME in LIST:` — visits each item in order.
+    ForEachIn {
+        name: String,
+        array: Expr,
+        body: Vec<Stmt>,
+        line: usize,
+    },
+    /// `import "file.rk"` — expanded before type checking.
+    Import {
+        path: String,
+        line: usize,
+    },
     FuncDef {
         name: String,
         params: Vec<Param>,
@@ -130,12 +200,16 @@ impl Stmt {
         match self {
             Stmt::Say(_, line)
             | Stmt::Let { line, .. }
+            | Stmt::Const { line, .. }
             | Stmt::Set { line, .. }
+            | Stmt::SetItem { line, .. }
             | Stmt::If { line, .. }
             | Stmt::Repeat { line, .. }
             | Stmt::While { line, .. }
             | Stmt::ForEach { line, .. }
+            | Stmt::ForEachIn { line, .. }
             | Stmt::FuncDef { line, .. }
+            | Stmt::Import { line, .. }
             | Stmt::GiveBack(_, line)
             | Stmt::Expr(_, line) => *line,
         }

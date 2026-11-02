@@ -23,10 +23,12 @@ kernel through `write(2)` and `exit(2)` syscalls.
 
 ## Status
 
-v0.4 adds text measurement, indexing, and slicing (`length of`, `letter N of`,
-`part A to B of`) and an interactive session with a Python/IRB-shaped prompt.
-The compiler is a lexer, parser, type checker, AArch64 code generator, and ELF
-writer, with 75 tests. It targets **AArch64 Linux** only.
+v0.5 adds constants (`constant NAME be VALUE`), homogeneous lists (`[a, b]`,
+`an empty list of numbers`, `item N of`, `set item N of`, `for each ... in`),
+and recursive `import` statements that can pull in several files. It keeps the
+text operations and interactive session from v0.4. The compiler is a lexer,
+parser, import expander, type checker, AArch64 code generator, and ELF writer,
+with 102 tests. It targets **AArch64 Linux** only.
 
 ## Quick start
 
@@ -83,6 +85,35 @@ say part 2 to 3 of name       # us
 say "Hello, " + letter 1 of "world" + "!"
 ```
 
+Lists hold one kind of thing, count from 1, and can be walked directly:
+
+```rusk
+constant batch_size be 12
+
+let loaves be [3, 6, 9]
+say length of loaves          # 3
+say item 2 of loaves          # 6
+set item 2 of loaves to batch_size
+say loaves                    # [3, 12, 9]
+
+let names be ["rye", "wheat"]
+for each name in names:
+    say "one " + name + " loaf"
+
+let empty be an empty list of numbers
+say empty                     # []
+```
+
+A file can pull in several modules; each file is included at most once:
+
+```rusk
+import "lib/greetings"
+import "../ruskmods/math"
+
+say greeting with "world"
+say math_square with 12
+```
+
 Functions name a piece of work and can hand a value back:
 
 ```rusk
@@ -122,7 +153,7 @@ Run `rusk` with no arguments (or `rusk repl`) to work interactively:
 
 ```console
 $ rusk
-Rusk 0.4.0 — an English-like language
+Rusk 0.5.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -158,6 +189,9 @@ Piped input skips the banner and prompts, so `rusk < program.rk` works too.
 .rk source
    │
    ▼
+ imports    expand each file once, recursively
+   │
+   ▼
  lexer      tokens (+ Indent/Dedent markers)
    │
    ▼
@@ -175,6 +209,7 @@ Piped input skips the banner and prompts, so `rusk < program.rk` works too.
 
 | File | Job |
 |---|---|
+| `src/imports.rs` | Find files, expand imports recursively, detect cycles, include once |
 | `src/lexer.rs` | Source to tokens; keywords are plain words matched by the parser |
 | `src/parser.rs` | Recursive descent over the English grammar |
 | `src/types.rs` | Type checking and return-kind inference (fixed point) |
@@ -194,19 +229,29 @@ Runtime facts worth knowing:
 - Strings are stored as `[len: u64][bytes...]`, so a string value is just a
   pointer to its length. Joining two strings bumps a 1 MiB heap in the data
   area and copies both byte blobs into it.
+- Lists are stored as `[len: u64][item: i64]...` in the same bump heap. A list
+  value is a pointer, so `let b be a` gives two names for one list. Item and
+  bounds checks happen in the runtime helper `array_get` / `array_set`.
 - Text compares byte by byte (unsigned), then by length, so `"b"` is more than
-  `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order.
+  `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order. Lists do
+  not compare yet.
 - `say` of a number calls a hand-built itoa loop that divides by ten and writes
   digits backwards into a 32-byte buffer.
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.4 doesn't do yet
+## What v0.5 doesn't do yet
 
 Honest list, so the docs don't lie:
 
 - Text is immutable. Joining allocates from a fixed 1 MiB heap with no bound
   check, and nothing is reclaimed.
+- Lists are homogeneous and flat: no nested lists, and no `push`, `pop`, or
+  `remove`. Their contents can be replaced with `set item`, but the list itself
+  has a fixed length.
+- Imports are textual inclusion with one global namespace. There are no module
+  namespaces, selective imports, or aliases, so modules prefix their names
+  (`text_`, `math_`).
 - Text positions count bytes, not Unicode characters.
 - At most 8 parameters per function, and no closures, anonymous functions, or
   function values.

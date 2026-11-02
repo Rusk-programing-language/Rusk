@@ -3,5 +3,7 @@
 # baked executables
 /examples/*
 !/examples/*.rk
+!/examples/lib/
+!/examples/lib/*.rk
 
 /a.out

@@ -1,0 +1,56 @@
+# text.rk — text helpers written in Rusk.
+#
+# Load it with `:load ruskmods/text.rk` in the REPL, or include this file in a
+# program before calling anything from it. Every name starts with `text_`
+# because Rusk has one global namespace for functions.
+
+# Is this text empty?
+to text_is_empty with s as text:
+    give back length of s is 0
+
+# The first letter. Empty text is a runtime error, just like `letter 1 of ""`.
+to text_first with s as text:
+    give back letter 1 of s
+
+# The last letter. Empty text is a runtime error.
+to text_last with s as text:
+    give back letter (length of s) of s
+
+# Write `s` next to itself `n` times. A count of zero or less gives "".
+to text_repeat with s as text and n as a number:
+    let out be ""
+    let i be 0
+    while i is less than n:
+        set out to out + s
+        set i to i + 1
+    give back out
+
+# Turn text around, one letter at a time.
+to text_reverse with s as text:
+    let out be ""
+    let i be length of s
+    while i is at least 1:
+        set out to out + letter i of s
+        set i to i - 1
+    give back out
+
+# Add an exclamation mark.
+to text_shout with s as text:
+    give back s + "!"
+
+# The first letters of a given name and a family name.
+to text_initials with given as text and family as text:
+    give back letter 1 of given + letter 1 of family
+
+# Does `haystack` contain `needle`? The empty needle is always found.
+to text_contains with haystack as text and needle as text:
+    let n be length of needle
+    let last be length of haystack - n + 1
+    if last is less than 1:
+        give back false
+    let i be 1
+    while i is at most last:
+        if part i to (i + n - 1) of haystack is needle:
+            give back true
+        set i to i + 1
+    give back false

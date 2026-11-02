@@ -1,0 +1,7 @@
+# A reusable module, written in Rusk. Import it with `import "lib/greetings"`.
+
+to greeting with who as text:
+    give back "Hello, " + who + "!"
+
+to farewell with who as text:
+    give back "Goodbye, " + who + "."

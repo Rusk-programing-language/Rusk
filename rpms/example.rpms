@@ -1,0 +1,15 @@
+# package.rpms — example manifest for the rpms package manager.
+#
+# This file is documentation, not an installable package. It shows the format
+# described in rpms/README.md.
+
+name: text-tools
+version: 0.1.0
+summary: Text helpers written in Rusk
+license: MIT
+kind: module
+entry: ruskmods/text.rk
+
+# A package that ships a runnable program would use:
+# kind: program
+# entry: src/main.rk

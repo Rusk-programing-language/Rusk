@@ -1,0 +1,22 @@
+# Lists hold one kind of thing, and positions count from 1.
+
+let loaves be [3, 6, 9]
+say length of loaves        # 3
+say item 2 of loaves        # 6
+
+set item 2 of loaves to 12
+say loaves                  # [3, 12, 9]
+
+# A list is shared by handle: both names see the same items.
+let same be loaves
+set item 1 of same to 0
+say loaves                  # [0, 12, 9]
+
+let names be ["rye", "wheat", "spelt"]
+for each name in names:
+    say "one " + name + " loaf"
+
+# An empty list needs its kind written down.
+let empty be an empty list of numbers
+say length of empty         # 0
+say empty                   # []

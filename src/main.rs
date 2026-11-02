@@ -143,11 +143,8 @@ fn default_output(input: &Path) -> PathBuf {
 }
 
 fn bake_bytes(input: &Path) -> Result<Vec<u8>, String> {
-    let src = std::fs::read_to_string(input)
-        .map_err(|e| format!("can't read {}: {e}", input.display()))?;
-    rusk::bake(&src)
+    rusk::bake_path(input)
         .map(|(bytes, _)| bytes)
-        .map_err(|e| format!("in {}: {e}", input.display()))
 }
 
 fn size(bytes: usize) -> String {

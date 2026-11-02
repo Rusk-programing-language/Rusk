@@ -20,6 +20,8 @@ pub enum Tok {
     Comma,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Plus,
     Minus,
     Star,
@@ -49,6 +51,8 @@ impl Tok {
             Tok::Comma => "','".to_string(),
             Tok::LParen => "'('".to_string(),
             Tok::RParen => "')'".to_string(),
+            Tok::LBracket => "'['".to_string(),
+            Tok::RBracket => "']'".to_string(),
             Tok::Plus => "'+'".to_string(),
             Tok::Minus => "'-'".to_string(),
             Tok::Star => "'*'".to_string(),
@@ -217,6 +221,14 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             }
             ')' => {
                 toks.push(Token { tok: Tok::RParen, line });
+                i += 1;
+            }
+            '[' => {
+                toks.push(Token { tok: Tok::LBracket, line });
+                i += 1;
+            }
+            ']' => {
+                toks.push(Token { tok: Tok::RBracket, line });
                 i += 1;
             }
             '+' => {

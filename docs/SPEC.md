@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.4
+# The Rusk Language — Specification v0.5
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.4
+emits native machine code directly. This document describes exactly what v0.5
 accepts and what it guarantees.
 
-Status: **v0.4, AArch64 Linux**. Everything here is implemented and tested;
+Status: **v0.5, AArch64 Linux**. Everything here is implemented and tested;
 anything not here does not exist yet.
 
 ---
@@ -35,18 +35,25 @@ Blank lines are ignored.
 | Number | `42`, `-7` | Signed 64-bit integer (two's complement) |
 | Text | `"hello"` | Immutable; escapes `\n`, `\t`, `\r`, `\0`, `\\`, `\"` |
 | Truth | `true`, `false` | The result of comparisons and `not` |
+| List | `[1, 2, 3]`, `["a", "b"]`, `[true, false]` | Fixed length, one kind of item, positions count from 1 |
 
-Numbers are integers only. There is no floating point in v0.4.
+Numbers are integers only. There is no floating point in v0.5.
 
 ## 4. Naming things
 
 ```rusk
 let slices be 8
 set slices to slices + 1
+
+constant batch_size be 12
+variable loaves be 3          # exactly the same as: let loaves be 3
 ```
 
 - `let NAME be VALUE` declares a new thing. Declaring a name twice is an error;
   use `set` to change it.
+- `variable NAME be VALUE` is another spelling of `let`.
+- `constant NAME be VALUE` declares a name that can never be replaced with
+  `set`. Its value is fixed when the line runs.
 - `set NAME to VALUE` assigns to an existing thing. The new value must be the
   same kind as the old one; Rusk will not change a thing's kind.
 
@@ -76,7 +83,7 @@ Operator precedence, loosest first:
 | Sum | `+`, `-` | left |
 | Product | `*`, `/` | left |
 | Unary | `-`, `not` | right |
-| Primary | number, text, `true`, `false`, name, call, text in pieces, `( ... )` | — |
+| Primary | number, text, truth, list, name, call, text in pieces, list item, `( ... )` | — |
 
 `+` adds two numbers or joins two pieces of text. `-`, `*`, and `/` are numbers
 only. A bare `is` means `is equal to`: `if name is "Rusk":`.
@@ -156,6 +163,63 @@ Rules:
 Because these forms are ordinary primaries, joining and comparing compose
 naturally: `letter 1 of a + letter 1 of b`, `part 2 to 4 of a is "ell"`.
 
+### Lists
+
+A list is a fixed-length, homogeneous sequence. Write one with square brackets:
+
+```rusk
+let loaves be [3, 6, 9]
+let names be ["rye", "wheat"]
+let flags be [true, false, true]
+```
+
+Every item must have the same kind: a list holds numbers, text, or truth
+values, never a mixture and never other lists. An empty list cannot guess its
+kind, so write it down:
+
+```rusk
+let empty_numbers be an empty list of numbers
+let empty_names be an empty list of text
+let empty_flags be an empty list of truth values
+```
+
+`an` is optional: `empty list of text` reads the same. The kind is also written
+in function parameters as `a list of numbers`, `a list of text`, or
+`a list of truth values`.
+
+Three forms work on lists, all counting from **1**:
+
+| Form | Gives back | Meaning |
+|---|---|---|
+| `length of LIST` | a number | how many items the list holds |
+| `item N of LIST` | the item kind | the item at position `N` |
+| `set item N of LIST to VALUE` | — | replace the item at position `N` |
+
+```rusk
+let xs be [10, 20, 30]
+say length of xs          # 3
+say item 2 of xs          # 20
+set item 2 of xs to 99
+say xs                    # [10, 99, 30]
+```
+
+Rules:
+
+- `length of` accepts text or a list. On a list it counts items, not bytes.
+- The item number must be a number, evaluated before the list.
+- `item N of` and `set item N of` need a list; the new value's kind must match
+  the list's item kind.
+- Asking for an item outside the list is a **runtime error**:
+
+  ```console
+  burnt: line 4: an item outside the list
+  ```
+
+- A list value is a handle. `let ys be xs` makes `ys` another name for the same
+  items, so `set item 1 of ys to 0` is visible through `xs` too. The list itself
+  cannot grow or shrink.
+- Lists do not compare with `is` or the ordering operators yet.
+
 ## 7. Blocks
 
 `if`, `repeat`, `while`, and `for each` introduce a block: a colon, then an
@@ -232,6 +296,19 @@ The start is evaluated first, then the end. If the start is greater than the
 end, the body runs zero times. The loop name only exists inside the body; after
 the loop, the name means whatever it meant before (or nothing).
 
+`for each ... in` walks a list instead of a range:
+
+```rusk
+let names be ["rye", "wheat", "spelt"]
+for each name in names:
+    say "one " + name + " loaf"
+```
+
+The list is evaluated once. Items are visited in order, counting from 1, and
+the loop name has the list's item kind. The name only exists inside the body,
+just like the range form. Changing an item inside the loop is visible on the
+next iteration, because the loop reads from the same list.
+
 ## 10. Functions
 
 ```rusk
@@ -252,8 +329,9 @@ to roll:
 - A function body is an indented block, just like an `if`.
 - `give back VALUE` ends the function and hands `VALUE` to the caller.
 
-Kinds are written `a number`, `text`, and `a truth value` (`a boolean` works
-too). The `a`/`an` is optional: `n as number` reads the same.
+Kinds are written `a number`, `text`, `a truth value` (`a boolean` works too),
+and `a list of numbers` / `a list of text` / `a list of truth values`. The
+`a`/`an` is optional: `n as number` reads the same.
 
 Calling uses the same `with ... and ...` shape:
 
@@ -283,7 +361,41 @@ to factorial with n as a number:
 Functions live at the top level; defining one inside a block is an error. They
 may be called before their definition appears in the file.
 
-## 11. Whole programs
+## 11. Imports
+
+`import` pulls another file into the program before type checking:
+
+```rusk
+import "lib/greetings"
+import "../ruskmods/math"
+```
+
+The name is either text in quotes or a bare name; the `.rk` extension is
+optional, so `import "lib/greetings"` and `import "lib/greetings.rk"` are the
+same. Several imports may appear at the top of one file.
+
+Resolution order, for a relative path:
+
+1. next to the file that wrote the import;
+2. inside a `ruskmods/` folder next to that file;
+3. relative to the current directory;
+4. inside a `ruskmods/` folder in the current directory.
+
+An absolute path is used as written. A file is expanded **at most once** per
+bake, so several modules can import the same helper without defining it twice.
+Imports are recursive: an imported file may import others. A cycle is an error
+and names the chain:
+
+```console
+burnt: in lib/b.rk: line 1: this import makes a cycle: main.rk -> lib/a.rk -> lib/b.rk -> lib/a.rk
+```
+
+`import` only works at the top level, not inside a block. Imported definitions
+join one global namespace, so functions should use a prefix (`text_`, `math_`)
+until namespaces exist. A missing file, an unreadable file, or a syntax error
+inside an imported file names the file it came from.
+
+## 12. Whole programs
 
 A program is executed top to bottom. When the last statement finishes, the
 program exits with status 0. There is no `main` and no entry-point ceremony.
@@ -293,13 +405,13 @@ program exits with status 0. There is no `main` and no entry-point ceremony.
 say "Hello, world."
 ```
 
-## 12. The interactive session
+## 13. The interactive session
 
 `rusk` with no arguments, or `rusk repl`, starts an interactive session:
 
 ```console
 $ rusk
-Rusk 0.4.0 — an English-like language
+Rusk 0.5.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -329,14 +441,16 @@ finishes it.
 The session is a tree-walking evaluator over the same AST, not the AArch64
 backend. Every submission is still lexed, parsed, and type checked against the
 whole session before any of it runs, so a session accepts the same programs the
-compiler does. Text operations use byte positions here too, matching the baked
-behavior.
+compiler does. Text operations use byte positions here too, and lists share
+their items between names, matching the baked behavior. `import` works at the
+prompt (relative to the current directory); inside `:load`, relative imports
+resolve from the loaded file's directory.
 
 When stdin is not a terminal, the banner and prompts are omitted, so
 `rusk < program.rk` works as a pipe. The session is not a `.rk` file compiler:
 it does not write an executable.
 
-## 13. Errors
+## 14. Errors
 
 The compiler reports problems with a line number and a sentence:
 
@@ -355,7 +469,7 @@ exit with status 1:
 burnt: line 3: a letter outside the text
 ```
 
-## 14. Compilation model
+## 15. Compilation model
 
 `rusk build file.rk` writes an executable next to the source with the extension
 removed (`-o` overrides the destination).
@@ -365,7 +479,7 @@ The output is a static ELF64 executable:
 - machine: AArch64 (`EM_AARCH64`), Linux syscall ABI;
 - one `PT_LOAD` segment mapping the whole image read/write/execute;
 - code at virtual address `0x400000 + 0x78`;
-- writable data (variables, number buffer, text heap) at `0x410000`,
+- writable data (variables, number buffer, text and list heap) at `0x410000`,
   zero-filled by the kernel;
 - no interpreter, no dynamic section, no relocations, no libc.
 
@@ -376,6 +490,11 @@ Function calls use the standard AArch64 shape, assembled by hand: arguments in
 `X0..X7`, the result in `X0`, the return address in `X30`, and the frame pointer
 in `X29`. Each frame stores the caller's `X29`/`X30` at `sp+0`/`sp+8`, then its
 parameters and locals above that, so recursion gets a fresh set of slots.
+
+A list is a pointer to `[len: u64][item: i64]...`, allocated from the same bump
+heap as joined text. Assigning a list copies the pointer, which is why two names
+can share one list. `array_get` and `array_set` check the 1-based index against
+the stored length and report `an item outside the list` on failure.
 
 ### Guarantees
 
@@ -389,19 +508,24 @@ parameters and locals above that, so recursion gets a fresh set of slots.
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.4, worth relocating later.
+  collide. Fine for v0.5, worth relocating later.
 - Division by zero traps (SIGFPE analogue) rather than producing a Rusk-level
   error.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
-- Joined text comes from a 1 MiB bump-allocated heap. Nothing is reclaimed, and
-  running past the end of the heap is not detected.
+- Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
+  is reclaimed, and running past the end of the heap is not detected.
+- Lists have a fixed length: there is no append, insert, or remove.
 - Recursion depth is bounded only by the process stack; runaway recursion dies
   rather than reporting an error.
 - At most 8 parameters per function; no function values, closures, or
   overloading.
+- Imports are textual inclusion in one global namespace; there are no module
+  namespaces or selective imports.
 
-## 15. Roadmap (not implemented)
+## 16. Roadmap (not implemented)
 
+- growing lists (append, insert, remove) and nested lists
+- module namespaces and selective imports
 - function values and closures
 - an x86-64 encoder behind the same AST and codegen
 - a real relocation-aware data layout

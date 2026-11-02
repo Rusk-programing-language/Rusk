@@ -23,7 +23,14 @@ struct SigInfer {
 }
 
 type Sigs = HashMap<String, SigInfer>;
-type Scope = HashMap<String, Option<Ty>>;
+
+#[derive(Clone, Copy)]
+struct Scoped {
+    ty: Option<Ty>,
+    constant: bool,
+}
+
+type Scope = HashMap<String, Scoped>;
 
 pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
     // Collect top-level definitions first, so calls can appear before them.
@@ -60,7 +67,13 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
         for (name, params, body, _line) in &defs {
             let mut scope: Scope = HashMap::new();
             for p in params.iter() {
-                scope.insert(p.name.clone(), Some(p.ty));
+                scope.insert(
+                    p.name.clone(),
+                    Scoped {
+                        ty: Some(p.ty),
+                        constant: false,
+                    },
+                );
             }
             let mut fresh: Option<Ty> = None;
             infer_stmts(body, &mut scope, &sigs, &mut fresh, true)?;
@@ -156,15 +169,40 @@ fn infer_stmts(
                     ));
                 }
                 let t = type_of(value, scope, sigs).map_err(|m| at(*line, m))?;
-                scope.insert(name.clone(), t);
+                scope.insert(
+                    name.clone(),
+                    Scoped {
+                        ty: t,
+                        constant: false,
+                    },
+                );
+            }
+            Stmt::Const { name, value, line } => {
+                if scope.contains_key(name) {
+                    return Err(at(*line, format!("'{name}' already exists")));
+                }
+                let t = type_of(value, scope, sigs).map_err(|m| at(*line, m))?;
+                scope.insert(
+                    name.clone(),
+                    Scoped {
+                        ty: t,
+                        constant: true,
+                    },
+                );
             }
             Stmt::Set { name, value, line } => {
                 let old = scope
                     .get(name)
                     .copied()
                     .ok_or_else(|| at(*line, format!("I don't know a thing called '{name}'")))?;
+                if old.constant {
+                    return Err(at(
+                        *line,
+                        format!("'{name}' is a constant — it can't be changed with 'set'"),
+                    ));
+                }
                 let t = type_of(value, scope, sigs).map_err(|m| at(*line, m))?;
-                if let (Some(a), Some(b)) = (old, t) {
+                if let (Some(a), Some(b)) = (old.ty, t) {
                     if a != b {
                         return Err(at(
                             *line,
@@ -172,8 +210,51 @@ fn infer_stmts(
                         ));
                     }
                 }
-                if t.is_some() {
-                    scope.insert(name.clone(), t);
+                scope.insert(
+                    name.clone(),
+                    Scoped {
+                        ty: t.or(old.ty),
+                        constant: false,
+                    },
+                );
+            }
+            Stmt::SetItem {
+                index,
+                array,
+                value,
+                line,
+            } => {
+                let it = type_of(index, scope, sigs).map_err(|m| at(*line, m))?;
+                if let Some(t) = it {
+                    if t != Ty::Int {
+                        return Err(at(
+                            *line,
+                            format!("the item number must be a number, but this is {t}"),
+                        ));
+                    }
+                }
+                let at_ = type_of(array, scope, sigs).map_err(|m| at(*line, m))?;
+                let elem = match at_ {
+                    Some(Ty::Array(elem)) => Some(elem),
+                    Some(t) => {
+                        return Err(at(
+                            *line,
+                            format!("'set item' needs a list, but this is {t}"),
+                        ))
+                    }
+                    None => None,
+                };
+                let vt = type_of(value, scope, sigs).map_err(|m| at(*line, m))?;
+                if let (Some(elem), Some(vt)) = (elem, vt) {
+                    if vt != elem.ty() {
+                        return Err(at(
+                            *line,
+                            format!(
+                                "this list holds {}, but the new item is {vt}",
+                                elem.ty()
+                            ),
+                        ));
+                    }
                 }
             }
             Stmt::Expr(e, line) => {
@@ -241,7 +322,47 @@ fn infer_stmts(
                         }
                     }
                 }
-                let previous = scope.insert(name.clone(), Some(Ty::Int));
+                let previous = scope.insert(
+                    name.clone(),
+                    Scoped {
+                        ty: Some(Ty::Int),
+                        constant: false,
+                    },
+                );
+                infer_stmts(body, scope, sigs, out, allow_return)?;
+                match previous {
+                    Some(t) => {
+                        scope.insert(name.clone(), t);
+                    }
+                    None => {
+                        scope.remove(name);
+                    }
+                }
+            }
+            Stmt::ForEachIn {
+                name,
+                array,
+                body,
+                line,
+            } => {
+                let t = type_of(array, scope, sigs).map_err(|m| at(*line, m))?;
+                let elem = match t {
+                    Some(Ty::Array(elem)) => Some(elem),
+                    Some(t) => {
+                        return Err(at(
+                            *line,
+                            format!("'for each ... in' needs a list, but this is {t}"),
+                        ))
+                    }
+                    None => None,
+                };
+                let previous = scope.insert(
+                    name.clone(),
+                    Scoped {
+                        ty: elem.map(|e| e.ty()),
+                        constant: false,
+                    },
+                );
                 infer_stmts(body, scope, sigs, out, allow_return)?;
                 match previous {
                     Some(t) => {
@@ -278,6 +399,12 @@ fn infer_stmts(
                     "functions have to live at the top level, not inside a block".to_string(),
                 ))
             }
+            Stmt::Import { line, .. } => {
+                return Err(at(
+                    *line,
+                    "this import wasn't resolved — imports only work at the top level".to_string(),
+                ))
+            }
         }
     }
     Ok(())
@@ -290,7 +417,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
         Expr::Bool(_) => Ok(Some(Ty::Bool)),
         Expr::Var(name) => {
             if let Some(t) = scope.get(name) {
-                return Ok(*t);
+                return Ok(t.ty);
             }
             if let Some(sig) = sigs.get(name) {
                 if !sig.params.is_empty() {
@@ -336,9 +463,9 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             let t = type_of(inner, scope, sigs)?;
             match t {
                 None => Ok(None),
-                Some(Ty::Str) => Ok(Some(Ty::Int)),
+                Some(Ty::Str) | Some(Ty::Array(_)) => Ok(Some(Ty::Int)),
                 Some(t) => Err(format!(
-                    "'length of' counts the letters in text, but this is {t}"
+                    "'length of' counts the letters in text or the items in a list, but this is {t}"
                 )),
             }
         }
@@ -387,6 +514,66 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }
             Ok(Some(Ty::Str))
         }
+        Expr::Array(items) => {
+            if items.is_empty() {
+                return Err(
+                    "an empty list needs a kind — write 'an empty list of numbers', 'an empty list of text', or 'an empty list of truth values'"
+                        .to_string(),
+                );
+            }
+            let mut elem: Option<Elem> = None;
+            let mut unknown = false;
+            for item in items {
+                match type_of(item, scope, sigs)? {
+                    None => unknown = true,
+                    Some(Ty::Array(_)) => {
+                        return Err(
+                            "a list can hold numbers, text, or truth values, not other lists"
+                                .to_string(),
+                        )
+                    }
+                    Some(t) => {
+                        let this = match t {
+                            Ty::Int => Elem::Int,
+                            Ty::Str => Elem::Str,
+                            Ty::Bool => Elem::Bool,
+                            _ => unreachable!(),
+                        };
+                        match elem {
+                            Some(old) if old != this => {
+                                return Err(format!(
+                                    "this list mixes {} and {} — a list holds one kind of thing",
+                                    old.ty(),
+                                    this.ty()
+                                ))
+                            }
+                            _ => elem = Some(this),
+                        }
+                    }
+                }
+            }
+            if unknown {
+                return Ok(None);
+            }
+            Ok(elem.map(|e| Ty::Array(e)))
+        }
+        Expr::EmptyArray(elem) => Ok(Some(Ty::Array(*elem))),
+        Expr::Item(index, array) => {
+            let it = type_of(index, scope, sigs)?;
+            if let Some(t) = it {
+                if t != Ty::Int {
+                    return Err(format!(
+                        "the item number must be a number, but this is {t}"
+                    ));
+                }
+            }
+            let at = type_of(array, scope, sigs)?;
+            match at {
+                None => Ok(None),
+                Some(Ty::Array(elem)) => Ok(Some(elem.ty())),
+                Some(t) => Err(format!("'item ... of' needs a list, but this is {t}")),
+            }
+        }
         Expr::Unary(op, inner) => {
             let t = type_of(inner, scope, sigs)?;
             match (op, t) {
@@ -405,6 +592,11 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             let (Some(lt), Some(rt)) = (lt, rt) else {
                 return Ok(None);
             };
+            if matches!(lt, Ty::Array(_)) || matches!(rt, Ty::Array(_)) {
+                return Err(
+                    "lists don't compare yet — compare their items one at a time".to_string(),
+                );
+            }
             match op {
                 BinOp::Add => {
                     if lt == Ty::Int && rt == Ty::Int {
@@ -589,5 +781,69 @@ say c + middle
 
         let err = check_src("say part 1 to 2 of 5\n").unwrap_err();
         assert!(err.contains("'part ... of' needs text"), "{err}");
+    }
+
+    #[test]
+    fn a_constant_cannot_be_changed() {
+        let err = check_src("constant pi be 3\nset pi to 4\n").unwrap_err();
+        assert!(err.contains("constant"), "{err}");
+    }
+
+    #[test]
+    fn lists_are_homogeneous() {
+        check_src("let xs be [1, 2, 3]\n").unwrap();
+
+        let err = check_src("let xs be [1, \"two\"]\n").unwrap_err();
+        assert!(err.contains("mixes"), "{err}");
+
+        let err = check_src("let xs be [1, [2]]\n").unwrap_err();
+        assert!(err.contains("not other lists"), "{err}");
+
+        let err = check_src("let xs be []\n").unwrap_err();
+        assert!(err.contains("empty list needs a kind"), "{err}");
+
+        check_src("let xs be an empty list of truth values\n").unwrap();
+    }
+
+    #[test]
+    fn items_have_the_list_kind() {
+        let src = "\
+let xs be [\"a\", \"b\"]
+let s be item 1 of xs
+say s + \"!\"
+";
+        check_src(src).unwrap();
+
+        let err = check_src("let xs be [1, 2]\nset item 1 of xs to \"one\"\n").unwrap_err();
+        assert!(err.contains("list holds a number"), "{err}");
+
+        let err = check_src("say item 1 of 5\n").unwrap_err();
+        assert!(err.contains("needs a list"), "{err}");
+    }
+
+    #[test]
+    fn for_each_in_scopes_its_name_and_uses_the_item_kind() {
+        let src = "\
+let xs be [1, 2]
+for each x in xs:
+    say x * 2
+say x
+";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("don't know a thing called 'x'"), "{err}");
+
+        let err = check_src("for each x in 5:\n    say x\n").unwrap_err();
+        assert!(err.contains("needs a list"), "{err}");
+    }
+
+    #[test]
+    fn lists_can_be_parameters_and_returns() {
+        let src = "\
+to first_text with xs as a list of text:
+    give back item 1 of xs
+
+say first_text with [\"a\", \"b\"]
+";
+        check_src(src).unwrap();
     }
 }

@@ -11,11 +11,11 @@
 //! bytes, not Unicode scalars, or the REPL would disagree with a baked program.
 
 use crate::ast::*;
-use crate::lexer::lex;
-use crate::parser::parse;
 use crate::types::{self, Sig};
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::Path;
 use std::rc::Rc;
 
 const MAX_DEPTH: usize = 2000;
@@ -25,6 +25,9 @@ enum Value {
     Int(i64),
     Str(Vec<u8>),
     Bool(bool),
+    /// A list is shared by handle: `let b be a` makes two names for one list,
+    /// just as copying a pointer does in a baked program.
+    Array(Rc<RefCell<Vec<Value>>>),
     Nothing,
 }
 
@@ -34,20 +37,27 @@ impl Value {
         match self {
             Value::Int(n) => n.to_string(),
             Value::Bool(b) => b.to_string(),
-            Value::Str(bytes) => {
-                let text = String::from_utf8_lossy(bytes);
-                let mut out = String::from("\"");
-                for ch in text.chars() {
-                    for escaped in ch.escape_default() {
-                        out.push(escaped);
-                    }
-                }
-                out.push('"');
-                out
+            Value::Str(bytes) => quote(bytes),
+            Value::Array(items) => {
+                let items = items.borrow();
+                let parts: Vec<String> = items.iter().map(Value::display).collect();
+                format!("[{}]", parts.join(", "))
             }
             Value::Nothing => "nothing".to_string(),
         }
     }
+}
+
+fn quote(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        for escaped in ch.escape_default() {
+            out.push(escaped);
+        }
+    }
+    out.push('"');
+    out
 }
 
 enum Flow {
@@ -63,6 +73,7 @@ struct Func {
 struct Session {
     stmts: Vec<Stmt>,
     globals: HashMap<String, Value>,
+    constants: HashSet<String>,
     funcs: HashMap<String, Rc<Func>>,
     sigs: HashMap<String, Sig>,
     line: usize,
@@ -74,6 +85,7 @@ impl Session {
         Session {
             stmts: Vec::new(),
             globals: HashMap::new(),
+            constants: HashSet::new(),
             funcs: HashMap::new(),
             sigs: HashMap::new(),
             line: 0,
@@ -84,6 +96,7 @@ impl Session {
     fn reset(&mut self) {
         self.stmts.clear();
         self.globals.clear();
+        self.constants.clear();
         self.funcs.clear();
         self.sigs.clear();
     }
@@ -92,7 +105,12 @@ impl Session {
     /// statement. Statements that run are remembered; a failing statement and
     /// everything after it are dropped.
     fn submit(&mut self, src: &str) -> Result<(), String> {
-        let program = parse(lex(src)?)?;
+        self.submit_at(src, None)
+    }
+
+    /// Like `submit`, but resolves `import` paths relative to `base` first.
+    fn submit_at(&mut self, src: &str, base: Option<&Path>) -> Result<(), String> {
+        let program = crate::imports::expand(src, base)?;
         if program.stmts.is_empty() {
             return Ok(());
         }
@@ -147,9 +165,22 @@ impl Session {
             Stmt::Let { name, value, .. } => {
                 let v = self.eval(value, env)?;
                 env.insert(name.clone(), v);
+                self.constants.remove(name);
+                Ok(Flow::Normal)
+            }
+            Stmt::Const { name, value, .. } => {
+                let v = self.eval(value, env)?;
+                env.insert(name.clone(), v);
+                self.constants.insert(name.clone());
                 Ok(Flow::Normal)
             }
             Stmt::Set { name, value, .. } => {
+                if self.constants.contains(name) {
+                    return Err(format!(
+                        "line {}: '{name}' is a constant — it can't be changed with 'set'",
+                        self.line
+                    ));
+                }
                 let v = self.eval(value, env)?;
                 match env.get_mut(name) {
                     Some(slot) => {
@@ -161,6 +192,31 @@ impl Session {
                         self.line
                     )),
                 }
+            }
+            Stmt::SetItem {
+                index,
+                array,
+                value,
+                ..
+            } => {
+                let index = self.eval_int(index, env)?;
+                let items = match self.eval(array, env)? {
+                    Value::Array(items) => items,
+                    other => {
+                        return Err(format!(
+                            "line {}: 'set item' needs a list, but this is {}",
+                            self.line,
+                            kind_name(&other)
+                        ))
+                    }
+                };
+                let v = self.eval(value, env)?;
+                let mut items = items.borrow_mut();
+                if index < 1 || index as usize > items.len() {
+                    return Err(format!("line {}: an item outside the list", self.line));
+                }
+                items[index as usize - 1] = v;
+                Ok(Flow::Normal)
             }
             Stmt::If {
                 cond, then, other, ..
@@ -215,6 +271,12 @@ impl Session {
                 body,
                 ..
             } => self.exec_for_each(name, from, to, body, env),
+            Stmt::ForEachIn {
+                name,
+                array,
+                body,
+                ..
+            } => self.exec_for_each_in(name, array, body, env),
             Stmt::FuncDef {
                 name, params, body, ..
             } => {
@@ -227,6 +289,10 @@ impl Session {
                 );
                 Ok(Flow::Normal)
             }
+            Stmt::Import { .. } => Err(format!(
+                "line {}: this import wasn't resolved — imports only work at the top level",
+                self.line
+            )),
             Stmt::GiveBack(e, _) => Ok(Flow::Return(self.eval(e, env)?)),
             Stmt::Expr(e, _) => {
                 let value = self.eval(e, env)?;
@@ -294,6 +360,52 @@ impl Session {
         Ok(flow)
     }
 
+    fn exec_for_each_in(
+        &mut self,
+        name: &str,
+        array: &Expr,
+        body: &[Stmt],
+        env: &mut HashMap<String, Value>,
+    ) -> Result<Flow, String> {
+        let items = match self.eval(array, env)? {
+            Value::Array(items) => items,
+            other => {
+                return Err(format!(
+                    "line {}: 'for each ... in' needs a list, but this is {}",
+                    self.line,
+                    kind_name(&other)
+                ))
+            }
+        };
+
+        // The loop name lives only inside the body; put back what it meant.
+        let previous = env.insert(name.to_string(), Value::Nothing);
+        let mut i = 0usize;
+        let mut flow = Flow::Normal;
+        loop {
+            let len = items.borrow().len();
+            if i >= len {
+                break;
+            }
+            let value = items.borrow()[i].clone();
+            env.insert(name.to_string(), value);
+            match self.exec_block(body, env) {
+                Ok(Flow::Normal) => {}
+                Ok(f) => {
+                    flow = f;
+                    break;
+                }
+                Err(e) => {
+                    restore(env, name, previous);
+                    return Err(e);
+                }
+            }
+            i += 1;
+        }
+        restore(env, name, previous);
+        Ok(flow)
+    }
+
     // ---- expressions -----------------------------------------------------
 
     fn eval(
@@ -334,8 +446,9 @@ impl Session {
             }
             Expr::Length(inner) => match self.eval(inner, env)? {
                 Value::Str(bytes) => Ok(Value::Int(bytes.len() as i64)),
+                Value::Array(items) => Ok(Value::Int(items.borrow().len() as i64)),
                 other => Err(format!(
-                    "line {}: 'length of' counts the letters in text, but this is {}",
+                    "line {}: 'length of' counts the letters in text or the items in a list, but this is {}",
                     self.line,
                     kind_name(&other)
                 )),
@@ -380,6 +493,38 @@ impl Session {
                     return Ok(Value::Str(Vec::new()));
                 }
                 Ok(Value::Str(bytes[(start - 1) as usize..end as usize].to_vec()))
+            }
+            Expr::Array(items) => {
+                if items.is_empty() {
+                    return Err(
+                        "an empty list needs a kind — write 'an empty list of numbers', 'an empty list of text', or 'an empty list of truth values'"
+                            .to_string(),
+                    );
+                }
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.eval(item, env)?);
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(values))))
+            }
+            Expr::EmptyArray(_) => Ok(Value::Array(Rc::new(RefCell::new(Vec::new())))),
+            Expr::Item(index, array) => {
+                let index = self.eval_int(index, env)?;
+                let items = match self.eval(array, env)? {
+                    Value::Array(items) => items,
+                    other => {
+                        return Err(format!(
+                            "line {}: 'item ... of' needs a list, but this is {}",
+                            self.line,
+                            kind_name(&other)
+                        ))
+                    }
+                };
+                let items = items.borrow();
+                if index < 1 || index as usize > items.len() {
+                    return Err(format!("line {}: an item outside the list", self.line));
+                }
+                Ok(items[index as usize - 1].clone())
             }
             Expr::Unary(op, inner) => {
                 let value = self.eval(inner, env)?;
@@ -563,9 +708,11 @@ impl Session {
                 if rest.is_empty() {
                     return Err("':load' needs a file name".to_string());
                 }
-                let src = std::fs::read_to_string(rest)
+                let path = Path::new(rest);
+                let src = std::fs::read_to_string(path)
                     .map_err(|e| format!("can't read {rest}: {e}"))?;
-                self.submit(&src).map_err(|e| format!("in {rest}: {e}"))?;
+                self.submit_at(&src, path.parent())
+                    .map_err(|e| format!("in {rest}: {e}"))?;
                 Ok(true)
             }
             other => Err(format!(
@@ -631,6 +778,7 @@ fn kind_name(value: &Value) -> &'static str {
         Value::Int(_) => "a number",
         Value::Str(_) => "text",
         Value::Bool(_) => "a truth value",
+        Value::Array(_) => "a list",
         Value::Nothing => "nothing",
     }
 }
@@ -657,12 +805,42 @@ fn write_value(value: &Value, newline: bool) -> io::Result<()> {
         Value::Int(n) => write!(out, "{n}")?,
         Value::Str(bytes) => out.write_all(bytes)?,
         Value::Bool(b) => write!(out, "{}", if *b { "true" } else { "false" })?,
+        Value::Array(items) => {
+            out.write_all(b"[")?;
+            for (i, item) in items.borrow().iter().enumerate() {
+                if i > 0 {
+                    out.write_all(b", ")?;
+                }
+                write_value_to(&mut out, item)?;
+            }
+            out.write_all(b"]")?;
+        }
         Value::Nothing => {}
     }
     if newline {
         out.write_all(b"\n")?;
     }
     out.flush()
+}
+
+fn write_value_to<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {
+    match value {
+        Value::Int(n) => write!(out, "{n}")?,
+        Value::Str(bytes) => out.write_all(bytes)?,
+        Value::Bool(b) => write!(out, "{}", if *b { "true" } else { "false" })?,
+        Value::Array(items) => {
+            out.write_all(b"[")?;
+            for (i, item) in items.borrow().iter().enumerate() {
+                if i > 0 {
+                    out.write_all(b", ")?;
+                }
+                write_value_to(out, item)?;
+            }
+            out.write_all(b"]")?;
+        }
+        Value::Nothing => {}
+    }
+    Ok(())
 }
 
 /// True when the line opens an indented block, ignoring colons inside text and
@@ -845,5 +1023,75 @@ mod tests {
         assert!(!opens_block("say \"ready:\""));
         assert!(!opens_block("say 1  # a note:"));
         assert!(starts_indented("    say 1"));
+    }
+
+    #[test]
+    fn lists_persist_and_share_their_items() {
+        let mut session = Session::new();
+        session.submit("let xs be [1, 2, 3]\n").unwrap();
+        session.submit("set item 2 of xs to 9\n").unwrap();
+        session.submit("let ys be xs\n").unwrap();
+        session.submit("set item 1 of ys to 7\n").unwrap();
+        assert_eq!(session.globals["xs"].display(), "[7, 9, 3]");
+        assert_eq!(session.globals["ys"].display(), "[7, 9, 3]");
+
+        session
+            .submit("let empty be an empty list of text\n")
+            .unwrap();
+        assert_eq!(session.globals["empty"].display(), "[]");
+    }
+
+    #[test]
+    fn for_each_in_visits_every_item() {
+        let mut session = Session::new();
+        session.submit("let xs be [1, 2, 3]\n").unwrap();
+        session.submit("let total be 0\n").unwrap();
+        session
+            .submit("for each x in xs:\n    set total to total + x\n")
+            .unwrap();
+        assert_eq!(session.globals["total"], Value::Int(6));
+        assert!(!session.globals.contains_key("x"));
+    }
+
+    #[test]
+    fn a_constant_survives_a_refused_change() {
+        let mut session = Session::new();
+        session.submit("constant pi be 3\n").unwrap();
+        let err = session.submit("set pi to 4\n").unwrap_err();
+        assert!(err.contains("constant"), "{err}");
+        assert_eq!(session.globals["pi"], Value::Int(3));
+    }
+
+    #[test]
+    fn list_bounds_errors_keep_the_session_alive() {
+        let mut session = Session::new();
+        session.submit("let xs be [1, 2]\n").unwrap();
+        let err = session.submit("say item 3 of xs\n").unwrap_err();
+        assert!(err.contains("outside the list"), "{err}");
+        session.submit("set item 2 of xs to 5\n").unwrap();
+        assert_eq!(session.globals["xs"].display(), "[1, 5]");
+    }
+
+    #[test]
+    fn load_resolves_imports_next_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("rusk-repl-load-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("helper.rk"),
+            "to helper with n as a number:\n    give back n * 3\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("program.rk"),
+            "import \"helper\"\nlet loaded be helper with 2\n",
+        )
+        .unwrap();
+
+        let mut session = Session::new();
+        session
+            .command(&format!("load {}", dir.join("program.rk").display()))
+            .unwrap();
+        assert_eq!(session.globals["loaded"], Value::Int(6));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,18 +1,22 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.4):
+//! Grammar (v0.5):
 //!
 //! ```text
-//! program    := stmt*
-//! stmt       := say_stmt | let_stmt | set_stmt | if_stmt | repeat_stmt
-//!             | while_stmt | for_each_stmt | func_def | give_back | expr_stmt
+//! program    := (import_stmt | stmt)*
+//! import_stmt:= "import" (TEXT | NAME) NEWLINE
+//! stmt       := say_stmt | let_stmt | const_stmt | set_stmt | if_stmt
+//!             | repeat_stmt | while_stmt | for_each_stmt | func_def
+//!             | give_back | expr_stmt
 //! say_stmt   := "say" expr NEWLINE
-//! let_stmt   := "let" NAME "be" expr NEWLINE
+//! let_stmt   := ("let" | "variable") NAME "be" expr NEWLINE
+//! const_stmt := "constant" NAME "be" expr NEWLINE
 //! set_stmt   := "set" NAME "to" expr NEWLINE
+//!             | "set" "item" expr "of" primary "to" expr NEWLINE
 //! if_stmt    := "if" expr ":" block ("otherwise" ("if" expr ":" block | ":" block))?
 //! repeat_stmt:= "repeat" expr "times" ":" block
 //! while_stmt := "while" expr ":" block
-//! for_each   := "for" "each" NAME "from" expr "to" expr ":" block
+//! for_each   := "for" "each" NAME ("from" expr "to" expr | "in" expr) ":" block
 //! func_def   := "to" NAME ("with" param ("and" param)*)? ":" block
 //! param      := NAME "as" ("a"|"an")? TYPE
 //! give_back  := "give" "back" expr NEWLINE
@@ -25,15 +29,20 @@
 //!             | "length" "of" primary
 //!             | "letter" expr "of" primary
 //!             | "part" expr "to" expr "of" primary
+//!             | "item" expr "of" primary
+//!             | "[" (expr ("," expr)*)? "]"
+//!             | ("an")? "empty" "list" "of" TYPE
 //!             | "(" expr ")"
+//! TYPE       := "a number" | "text" | "a truth value"
+//!             | "a list of" ("numbers" | "text" | "truth values")
 //!
 //! A bare NAME is a variable, or a zero-argument call if no such variable
 //! exists. `with` always introduces arguments, which keeps calls unambiguous.
-//! `length`, `letter`, and `part` are contextual: they only act as words when
-//! the sentence around them fits, so they can still be ordinary names.
+//! `length`, `letter`, `part`, `item`, and `empty` are contextual: they only act
+//! as words when the sentence around them fits, so they can still be names.
 //! ```
 
-use crate::ast::{BinOp, Expr, Param, Program, Stmt, Ty, UnOp};
+use crate::ast::{BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
 use crate::lexer::{Tok, Token};
 
 pub struct Parser {
@@ -51,7 +60,11 @@ pub fn parse(toks: Vec<Token>) -> Result<Program, String> {
         if p.peek() == &Tok::Eof {
             break;
         }
-        stmts.push(p.stmt()?);
+        if p.is_word("import") {
+            stmts.push(p.import_stmt()?);
+        } else {
+            stmts.push(p.stmt()?);
+        }
     }
     Ok(Program { stmts })
 }
@@ -149,8 +162,39 @@ impl Parser {
         }
     }
 
+    fn import_stmt(&mut self) -> Result<Stmt, String> {
+        let line = self.line();
+        self.bump(); // "import"
+        let path = match self.peek().clone() {
+            Tok::Str(s) => {
+                self.bump();
+                s
+            }
+            Tok::Ident(s) => {
+                self.bump();
+                s
+            }
+            other => {
+                return Err(format!(
+                    "line {}: after 'import' I expected a file name in quotes, but found {}",
+                    self.line(),
+                    other.describe()
+                ))
+            }
+        };
+        self.end_of_line()?;
+        Ok(Stmt::Import { path, line })
+    }
+
     fn stmt(&mut self) -> Result<Stmt, String> {
         let line = self.line();
+
+        if self.is_word("import") {
+            return Err(format!(
+                "line {}: 'import' only works at the top level, not inside a block",
+                self.line()
+            ));
+        }
 
         if self.is_word("to") {
             self.bump();
@@ -196,17 +240,42 @@ impl Parser {
             return Ok(Stmt::Say(value, line));
         }
 
-        if self.is_word("let") {
+        if self.is_word("let") || self.is_word("variable") {
+            let word = if self.is_word("let") { "let" } else { "variable" };
             self.bump();
-            let name = self.name("after 'let'")?;
-            self.need_word("be", &format!("after 'let {name}',"))?;
+            let name = self.name(&format!("after '{word}'"))?;
+            self.need_word("be", &format!("after '{word} {name}',"))?;
             let value = self.expr()?;
             self.end_of_line()?;
             return Ok(Stmt::Let { name, value, line });
         }
 
+        if self.is_word("constant") {
+            self.bump();
+            let name = self.name("after 'constant'")?;
+            self.need_word("be", &format!("after 'constant {name}',"))?;
+            let value = self.expr()?;
+            self.end_of_line()?;
+            return Ok(Stmt::Const { name, value, line });
+        }
+
         if self.is_word("set") {
             self.bump();
+            if self.is_word("item") && self.starts_index() {
+                self.bump(); // "item"
+                let index = self.expr()?;
+                self.need_word("of", "after the item number,")?;
+                let array = self.primary()?;
+                self.need_word("to", "after the list in 'set item',")?;
+                let value = self.expr()?;
+                self.end_of_line()?;
+                return Ok(Stmt::SetItem {
+                    index,
+                    array,
+                    value,
+                    line,
+                });
+            }
             let name = self.name("after 'set'")?;
             self.need_word("to", &format!("after 'set {name}',"))?;
             let value = self.expr()?;
@@ -255,6 +324,17 @@ impl Parser {
             self.bump();
             self.need_word("each", "after 'for',")?;
             let name = self.name("after 'for each'")?;
+            if self.eat_word("in") {
+                let array = self.expr()?;
+                self.need(Tok::Colon, "after the list in 'for each',")?;
+                let body = self.block("this 'for each'")?;
+                return Ok(Stmt::ForEachIn {
+                    name,
+                    array,
+                    body,
+                    line,
+                });
+            }
             self.need_word("from", &format!("after 'for each {name}',"))?;
             let from = self.expr()?;
             self.need_word("to", "after the start of the range,")?;
@@ -278,13 +358,35 @@ impl Parser {
     fn type_name(&mut self, after: &str) -> Result<Ty, String> {
         match self.peek().clone() {
             Tok::Ident(word) => {
+                if word == "list" {
+                    self.bump();
+                    self.need_word("of", "after 'list',")?;
+                    let inner = self.type_name("after 'list of',")?;
+                    let elem = match inner {
+                        Ty::Int => Elem::Int,
+                        Ty::Str => Elem::Str,
+                        Ty::Bool => Elem::Bool,
+                        other => {
+                            return Err(format!(
+                                "line {}: {after} a list can hold numbers, text, or truth values, not {other}",
+                                self.line()
+                            ))
+                        }
+                    };
+                    return Ok(Ty::Array(elem));
+                }
+                if word == "truth" {
+                    self.bump();
+                    self.eat_word("values");
+                    return Ok(Ty::Bool);
+                }
                 let ty = match word.as_str() {
-                    "number" => Ty::Int,
+                    "number" | "numbers" => Ty::Int,
                     "text" => Ty::Str,
-                    "truth" | "boolean" => Ty::Bool,
+                    "boolean" | "booleans" => Ty::Bool,
                     _ => {
                         return Err(format!(
-                            "line {}: {after} I expected 'a number', 'text', or 'a truth value', but found '{word}'",
+                            "line {}: {after} I expected 'a number', 'text', 'a truth value', or 'a list of ...', but found '{word}'",
                             self.line()
                         ))
                     }
@@ -293,7 +395,7 @@ impl Parser {
                 Ok(ty)
             }
             other => Err(format!(
-                "line {}: {after} I expected a kind of value ('a number', 'text', or 'a truth value'), but found {}",
+                "line {}: {after} I expected a kind of value ('a number', 'text', 'a truth value', or 'a list of ...'), but found {}",
                 self.line(),
                 other.describe()
             )),
@@ -459,7 +561,45 @@ impl Parser {
                 self.need(Tok::RParen, "to close this '('")?;
                 Ok(e)
             }
+            Tok::LBracket => {
+                self.bump();
+                let mut items = Vec::new();
+                while self.peek() != &Tok::RBracket {
+                    items.push(self.expr()?);
+                    if self.peek() == &Tok::Comma {
+                        self.bump();
+                    } else {
+                        break;
+                    }
+                }
+                self.need(Tok::RBracket, "to close this '['")?;
+                Ok(Expr::Array(items))
+            }
             Tok::Ident(word) => {
+                if (word == "empty"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "list"))
+                    || (word == "an"
+                        && matches!(self.peek_at(1), Tok::Ident(s) if s == "empty")
+                        && matches!(self.peek_at(2), Tok::Ident(s) if s == "list"))
+                {
+                    self.eat_word("an");
+                    self.bump(); // "empty"
+                    self.need_word("list", "after 'empty',")?;
+                    self.need_word("of", "after 'empty list',")?;
+                    let inner = self.type_name("after 'empty list of',")?;
+                    let elem = match inner {
+                        Ty::Int => Elem::Int,
+                        Ty::Str => Elem::Str,
+                        Ty::Bool => Elem::Bool,
+                        other => {
+                            return Err(format!(
+                                "line {}: an empty list can hold numbers, text, or truth values, not {other}",
+                                self.line()
+                            ))
+                        }
+                    };
+                    return Ok(Expr::EmptyArray(elem));
+                }
                 if word == "length" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
                     self.bump(); // "length"
                     self.bump(); // "of"
@@ -485,6 +625,13 @@ impl Parser {
                     self.need_word("of", "after the letter number,")?;
                     let text = self.primary()?;
                     return Ok(Expr::Letter(Box::new(n), Box::new(text)));
+                }
+                if word == "item" && self.starts_index() {
+                    self.bump(); // "item"
+                    let index = self.expr()?;
+                    self.need_word("of", "after the item number,")?;
+                    let array = self.primary()?;
+                    return Ok(Expr::Item(Box::new(index), Box::new(array)));
                 }
 
                 self.bump();
@@ -622,5 +769,74 @@ mod tests {
 
         let prog = p("say letter + 1\n");
         assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Binary(BinOp::Add, ..), _)));
+    }
+
+    #[test]
+    fn lists_and_items_parse() {
+        let prog = p("let xs be [1, 2, 3]\n");
+        match &prog.stmts[0] {
+            Stmt::Let {
+                value: Expr::Array(items),
+                ..
+            } => assert_eq!(items.len(), 3),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let prog = p("let empty be an empty list of text\n");
+        match &prog.stmts[0] {
+            Stmt::Let {
+                value: Expr::EmptyArray(Elem::Str),
+                ..
+            } => {}
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let prog = p("say item 2 of xs\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Item(..), _)));
+
+        let prog = p("set item 2 of xs to 9\n");
+        assert!(matches!(&prog.stmts[0], Stmt::SetItem { .. }));
+
+        let prog = p("for each x in xs:\n    say x\n");
+        match &prog.stmts[0] {
+            Stmt::ForEachIn { name, body, .. } => {
+                assert_eq!(name, "x");
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let prog = p("to takes with xs as a list of numbers:\n    give back length of xs\n");
+        match &prog.stmts[0] {
+            Stmt::FuncDef { params, .. } => assert_eq!(params[0].ty, Ty::Array(Elem::Int)),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn constants_and_imports_parse() {
+        let prog = p("constant pi be 3\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Const { name, .. } if name == "pi"));
+
+        let prog = p("variable x be 1\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Let { name, .. } if name == "x"));
+
+        let prog = p("import \"lib/helpers\"\n");
+        match &prog.stmts[0] {
+            Stmt::Import { path, line } => {
+                assert_eq!(path, "lib/helpers");
+                assert_eq!(*line, 1);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_can_still_be_a_variable_name() {
+        let prog = p("let empty be 0\nsay empty + 1\n");
+        assert!(matches!(
+            &prog.stmts[1],
+            Stmt::Say(Expr::Binary(BinOp::Add, ..), _)
+        ));
     }
 }

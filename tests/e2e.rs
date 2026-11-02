@@ -385,3 +385,134 @@ double with 21
 }
 
 
+
+// ---- lists and constants ---------------------------------------------
+
+#[test]
+fn lists_hold_items_and_share_their_storage() {
+    let src = "\
+let xs be [10, 20, 30]
+say length of xs
+say item 2 of xs
+set item 2 of xs to 99
+say xs
+let ys be xs
+set item 1 of ys to 7
+say xs
+say an empty list of numbers
+let flags be [true, false]
+say flags
+let words be [\"a\", \"b\"]
+say words
+";
+    let (stdout, code) = run("lists", src);
+    assert_eq!(
+        stdout,
+        "3\n20\n[10, 99, 30]\n[7, 99, 30]\n[]\n[true, false]\n[a, b]\n"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_list_can_be_a_parameter_and_be_walked_with_for_each() {
+    let src = "\
+to sum with xs as a list of numbers:
+    let total be 0
+    for each x in xs:
+        set total to total + x
+    give back total
+
+say sum with [1, 2, 3, 4]
+say sum with an empty list of numbers
+";
+    let (stdout, code) = run("list_sum", src);
+    assert_eq!(stdout, "10\n0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_list_index_outside_the_list_stops_the_program() {
+    let src = "say \"start\"\nsay item 5 of [1, 2]\n";
+    let (stdout, stderr, code) = run_full("list_bounds", src);
+    assert_eq!(stdout, "start\n");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("line 2: an item outside the list"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn set_item_checks_its_bounds_too() {
+    let src = "let xs be [1]\nset item 2 of xs to 9\n";
+    let (_, stderr, code) = run_full("set_bounds", src);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("line 2: an item outside the list"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_constant_cannot_be_set() {
+    let err = rusk::bake("constant pi be 3\nset pi to 4\n").unwrap_err();
+    assert!(err.contains("constant"), "{err}");
+}
+
+#[test]
+fn lists_are_homogeneous_and_empty_lists_need_a_kind() {
+    let err = rusk::bake("let xs be [1, \"two\"]\n").unwrap_err();
+    assert!(err.contains("mixes"), "{err}");
+
+    let err = rusk::bake("let xs be []\n").unwrap_err();
+    assert!(err.contains("empty list needs a kind"), "{err}");
+}
+
+// ---- imports ---------------------------------------------------------
+
+#[test]
+fn a_program_can_import_several_modules() {
+    let dir = std::env::temp_dir().join(format!("rusk-e2e-imports-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("lib")).unwrap();
+    std::fs::write(
+        dir.join("lib/base.rk"),
+        "to base_add with a as a number and b as a number:\n    give back a + b\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib/extra.rk"),
+        "import \"base\"\nto extra_twice with n as a number:\n    give back base_add with n and n\n",
+    )
+    .unwrap();
+    let main = dir.join("main.rk");
+    std::fs::write(
+        &main,
+        "import \"lib/base\"\nimport \"lib/extra\"\nsay base_add with 2 and 3\nsay extra_twice with 4\n",
+    )
+    .unwrap();
+
+    let (bytes, _) = rusk::bake_path(&main).unwrap();
+    let out = dir.join("main");
+    rusk::elf::write(&out, &bytes).unwrap();
+    let result = Command::new(&out).output().expect("imported program should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n8\n");
+    assert_eq!(result.status.code(), Some(0));
+}
+
+#[test]
+fn a_function_can_give_back_a_list() {
+    let src = "\
+to pair with n as a number:
+    give back [n, n + 1]
+
+say pair with 5
+say item 2 of pair with 5
+let xs be pair with 7
+say length of xs
+";
+    let (stdout, code) = run("list_return", src);
+    assert_eq!(stdout, "[5, 6]\n6\n2\n");
+    assert_eq!(code, 0);
+}

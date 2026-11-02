@@ -1,0 +1,53 @@
+# math.rk — number helpers written in Rusk.
+#
+# Load it with `:load ruskmods/math.rk` in the REPL, or include this file in a
+# program before calling anything from it. Every name starts with `math_`
+# because Rusk has one global namespace for functions.
+
+# A number times itself.
+to math_square with n as a number:
+    give back n * n
+
+# The distance from zero, without a minus sign.
+to math_absolute with n as a number:
+    if n is less than 0:
+        give back 0 - n
+    give back n
+
+# The smaller of two numbers.
+to math_min with a as a number and b as a number:
+    if a is less than b:
+        give back a
+    give back b
+
+# The larger of two numbers.
+to math_max with a as a number and b as a number:
+    if a is more than b:
+        give back a
+    give back b
+
+# 1 + 2 + ... + n. Zero or less gives 0.
+to math_sum_to with n as a number:
+    let total be 0
+    let i be 1
+    while i is at most n:
+        set total to total + i
+        set i to i + 1
+    give back total
+
+# `base` multiplied by itself `exponent` times. A negative exponent gives 1.
+to math_power with base as a number and exponent as a number:
+    let result be 1
+    let i be 0
+    while i is less than exponent:
+        set result to result * base
+        set i to i + 1
+    give back result
+
+# True when the number leaves no remainder after dividing by two.
+to math_is_even with n as a number:
+    give back n / 2 * 2 is n
+
+# True when the number leaves a remainder after dividing by two.
+to math_is_odd with n as a number:
+    give back not math_is_even with n
