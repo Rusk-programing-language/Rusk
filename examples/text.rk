@@ -1,4 +1,4 @@
-# text.rk — joining and comparing text
+# text.rk — joining, comparing, measuring, indexing, and slicing text
 
 let first be "Hello"
 let second be "world"
@@ -15,8 +15,28 @@ say "apple" is equal to "apple"
 say "b" is more than "abc"
 say "abc" is not "abd"
 
+# `length of` counts the bytes in a piece of text.
+say length of greeting
+say length of ""
+
+# `letter N of` counts from 1.
+say letter 1 of "Rusk"
+say letter 4 of "Rusk"
+
+# `part A to B of` is inclusive, and counts from 1.
+say part 2 to 3 of "Rusk"
+say part 2 to 1 of "Rusk"       # empty
+
+# These read as ordinary expressions, so text pieces compose.
+say "Hello, " + letter 1 of second + part 2 to 5 of second + "!"
+
+# A function can take names apart and put them back together.
+to initials with given as text and family as text:
+    give back letter 1 of given + letter 1 of family
+
 # A function can build text too.
 to shout with s as text:
     give back s + "!"
 
+say initials with "Rusk" and "Lang"
 say shout with greeting

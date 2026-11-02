@@ -1,6 +1,8 @@
 //! `rusk` — the command line for the Rusk language.
 //!
 //! ```text
+//! rusk                              start the interactive session
+//! rusk repl                         start the interactive session
 //! rusk build <file.rk> [-o <out>]   bake a native executable
 //! rusk run   <file.rk>              bake and run it
 //! rusk check <file.rk>              bake without writing anything
@@ -26,11 +28,11 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Result<(), String> {
     let Some(command) = args.first().map(String::as_str) else {
-        print_help();
-        return Ok(());
+        return rusk::repl::run();
     };
 
     match command {
+        "repl" | "console" => rusk::repl::run(),
         "build" => {
             let (input, output) = parse_targets(&args[1..])?;
             let bytes = bake_bytes(&input)?;
@@ -87,6 +89,8 @@ fn print_help() {
         "rusk {VERSION} — code, baked ahead of time
 
 USAGE
+  rusk                              start the interactive session
+  rusk repl                         start the interactive session
   rusk build <file.rk> [-o <out>]   bake a native executable
   rusk run   <file.rk>              bake it and run it
   rusk check <file.rk>              bake without writing an executable
@@ -94,7 +98,8 @@ USAGE
   rusk help
 
 Rusk bakes straight to AArch64 machine code in an ELF file.
-No C, no assembler, no linker, no libc — just syscalls."
+No C, no assembler, no linker, no libc — just syscalls.
+The REPL is a tree-walking session over the same syntax and type checker."
     );
 }
 

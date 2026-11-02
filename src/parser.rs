@@ -1,6 +1,6 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.3):
+//! Grammar (v0.4):
 //!
 //! ```text
 //! program    := stmt*
@@ -22,10 +22,15 @@
 //! term       := unary (("*" | "/") unary)*
 //! unary      := ("-" | "not") unary | primary
 //! primary    := INT | TEXT | "true" | "false" | NAME ("with" expr ("and" expr)*)?
+//!             | "length" "of" primary
+//!             | "letter" expr "of" primary
+//!             | "part" expr "to" expr "of" primary
 //!             | "(" expr ")"
 //!
 //! A bare NAME is a variable, or a zero-argument call if no such variable
 //! exists. `with` always introduces arguments, which keeps calls unambiguous.
+//! `length`, `letter`, and `part` are contextual: they only act as words when
+//! the sentence around them fits, so they can still be ordinary names.
 //! ```
 
 use crate::ast::{BinOp, Expr, Param, Program, Stmt, Ty, UnOp};
@@ -70,6 +75,28 @@ impl Parser {
 
     fn is_word(&self, w: &str) -> bool {
         matches!(self.peek(), Tok::Ident(s) if s == w)
+    }
+
+    /// Look `n` tokens ahead, clamped to the end of the stream.
+    fn peek_at(&self, n: usize) -> &Tok {
+        let at = (self.pos + n).min(self.toks.len() - 1);
+        &self.toks[at].tok
+    }
+
+    /// Does the token after `letter` begin the index expression?
+    ///
+    /// This keeps a variable called `letter` usable: `say letter` and
+    /// `say letter + 1` still mean the variable, because neither is followed by
+    /// something that could be an index.
+    fn starts_index(&self) -> bool {
+        match self.peek_at(1) {
+            Tok::Int(_) | Tok::Str(_) | Tok::LParen | Tok::Minus => true,
+            Tok::Ident(w) => !matches!(
+                w.as_str(),
+                "is" | "and" | "to" | "from" | "of" | "otherwise"
+            ),
+            _ => false,
+        }
     }
 
     fn eat_word(&mut self, w: &str) -> bool {
@@ -433,6 +460,33 @@ impl Parser {
                 Ok(e)
             }
             Tok::Ident(word) => {
+                if word == "length" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
+                    self.bump(); // "length"
+                    self.bump(); // "of"
+                    let inner = self.primary()?;
+                    return Ok(Expr::Length(Box::new(inner)));
+                }
+                if word == "part" && self.starts_index() {
+                    self.bump(); // "part"
+                    let from = self.expr()?;
+                    self.need_word("to", "after the start of the part,")?;
+                    let to = self.expr()?;
+                    self.need_word("of", "after the end of the part,")?;
+                    let text = self.primary()?;
+                    return Ok(Expr::Part {
+                        text: Box::new(text),
+                        from: Box::new(from),
+                        to: Box::new(to),
+                    });
+                }
+                if word == "letter" && self.starts_index() {
+                    self.bump(); // "letter"
+                    let n = self.expr()?;
+                    self.need_word("of", "after the letter number,")?;
+                    let text = self.primary()?;
+                    return Ok(Expr::Letter(Box::new(n), Box::new(text)));
+                }
+
                 self.bump();
                 match word.as_str() {
                     "true" => Ok(Expr::Bool(true)),
@@ -547,5 +601,26 @@ mod tests {
             &prog.stmts[0],
             Stmt::Say(Expr::Binary(BinOp::Eq, ..), _)
         ));
+    }
+
+    #[test]
+    fn text_operations_parse() {
+        let prog = p("say length of \"hello\"\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Length(_), _)));
+
+        let prog = p("say letter 2 of \"hello\"\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Letter(..), _)));
+
+        let prog = p("say part 2 to 4 of \"hello\"\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Part { .. }, _)));
+    }
+
+    #[test]
+    fn letter_can_still_be_a_variable_name() {
+        let prog = p("say letter\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Var(name), _) if name == "letter"));
+
+        let prog = p("say letter + 1\n");
+        assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Binary(BinOp::Add, ..), _)));
     }
 }

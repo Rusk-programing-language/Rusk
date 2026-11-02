@@ -23,17 +23,19 @@ kernel through `write(2)` and `exit(2)` syscalls.
 
 ## Status
 
-v0.3 adds text joining and comparison, plus `while`, `for each`, and chained
-`otherwise if`. The compiler is a lexer, parser, type checker, AArch64 code
-generator, and ELF writer, with 63 tests. It targets **AArch64 Linux** only.
+v0.4 adds text measurement, indexing, and slicing (`length of`, `letter N of`,
+`part A to B of`) and an interactive session with a Python/IRB-shaped prompt.
+The compiler is a lexer, parser, type checker, AArch64 code generator, and ELF
+writer, with 75 tests. It targets **AArch64 Linux** only.
 
 ## Quick start
 
 ```console
 cargo build --release
-cargo run -- run examples/hello.rk      # bake and run
-cargo run -- build examples/loop.rk     # write ./examples/loop
-cargo run -- check examples/numbers.rk  # bake without writing anything
+cargo run --                              # start the interactive session
+cargo run -- run examples/hello.rk       # bake and run
+cargo run -- build examples/loop.rk      # write ./examples/loop
+cargo run -- check examples/numbers.rk   # bake without writing anything
 ```
 
 Or install the `rusk` binary from `target/release/` somewhere on your `PATH`.
@@ -73,6 +75,12 @@ let name be "Rusk"
 say "Hello, " + name + "!"
 if name is "Rusk":
     say "the crust is on"
+
+# measure, index, and slice text; positions count from 1
+say length of name            # 4
+say letter 1 of name          # R
+say part 2 to 3 of name       # us
+say "Hello, " + letter 1 of "world" + "!"
 ```
 
 Functions name a piece of work and can hand a value back:
@@ -108,6 +116,42 @@ cannot be used as a value.
 Everything is line-based, blocks are colon-plus-indentation, and `#` starts a
 comment. Full reference: [docs/SPEC.md](docs/SPEC.md).
 
+## The prompt
+
+Run `rusk` with no arguments (or `rusk repl`) to work interactively:
+
+```console
+$ rusk
+Rusk 0.4.0 — an English-like language
+Type :help for commands, :quit to leave.
+
+rusk> let who be "world"
+rusk> "Hello, " + who + "!"
+Hello, world!
+rusk> to double with n as a number:
+...       give back n * 2
+...
+rusk> double with 21
+42
+```
+
+Names and functions survive between lines. A bare expression shows its value,
+the way Python's prompt does; `let`, `set`, `say`, and definitions stay quiet.
+A line ending in `:` opens a block, and a blank line closes it. The session
+uses the same lexer, parser, and type checker as the compiler, and text
+positions count bytes just like a baked program.
+
+```text
+:help            show the commands
+:quit            leave the session
+:reset           forget every name and function
+:vars            show the names the session remembers
+:functions       show the functions the session remembers
+:load <file.rk>  run a file in the session
+```
+
+Piped input skips the banner and prompts, so `rusk < program.rk` works too.
+
 ## How it works
 
 ```text
@@ -137,6 +181,7 @@ comment. Full reference: [docs/SPEC.md](docs/SPEC.md).
 | `src/codegen.rs` | AST to machine code; stack-machine expression evaluation, stack frames |
 | `src/aarch64.rs` | Hand-written instruction encoder and branch/address fixups |
 | `src/elf.rs` | Static ELF64 executable writer |
+| `src/repl.rs` | Interactive session: tree-walking evaluator over the same AST |
 | `src/main.rs` | The `rusk` CLI |
 
 Runtime facts worth knowing:
@@ -156,12 +201,13 @@ Runtime facts worth knowing:
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.3 doesn't do yet
+## What v0.4 doesn't do yet
 
 Honest list, so the docs don't lie:
 
-- Text is immutable and append-only via `+`; there is no indexing, slicing, or
-  `length of`. Joining allocates from a fixed 1 MiB heap with no bound check.
+- Text is immutable. Joining allocates from a fixed 1 MiB heap with no bound
+  check, and nothing is reclaimed.
+- Text positions count bytes, not Unicode characters.
 - At most 8 parameters per function, and no closures, anonymous functions, or
   function values.
 - Division by zero traps the process instead of reporting a Rusk error.

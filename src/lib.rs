@@ -16,6 +16,7 @@ pub mod codegen;
 pub mod elf;
 pub mod lexer;
 pub mod parser;
+pub mod repl;
 pub mod types;
 
 use std::path::Path;

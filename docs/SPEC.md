@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.3
+# The Rusk Language — Specification v0.4
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.3
+emits native machine code directly. This document describes exactly what v0.4
 accepts and what it guarantees.
 
-Status: **v0.3, AArch64 Linux**. Everything here is implemented and tested;
+Status: **v0.4, AArch64 Linux**. Everything here is implemented and tested;
 anything not here does not exist yet.
 
 ---
@@ -36,7 +36,7 @@ Blank lines are ignored.
 | Text | `"hello"` | Immutable; escapes `\n`, `\t`, `\r`, `\0`, `\\`, `\"` |
 | Truth | `true`, `false` | The result of comparisons and `not` |
 
-Numbers are integers only. There is no floating point in v0.3.
+Numbers are integers only. There is no floating point in v0.4.
 
 ## 4. Naming things
 
@@ -76,7 +76,7 @@ Operator precedence, loosest first:
 | Sum | `+`, `-` | left |
 | Product | `*`, `/` | left |
 | Unary | `-`, `not` | right |
-| Primary | number, text, `true`, `false`, name, call, `( ... )` | — |
+| Primary | number, text, `true`, `false`, name, call, text in pieces, `( ... )` | — |
 
 `+` adds two numbers or joins two pieces of text. `-`, `*`, and `/` are numbers
 only. A bare `is` means `is equal to`: `if name is "Rusk":`.
@@ -113,6 +113,48 @@ inside the program's data area, copies both byte blobs into it, and hands back
 the new value. Nothing is freed: this language is small and programs are short,
 but a long-running loop that keeps joining text will eventually run out of heap
 (and there is no runtime error for that yet).
+
+### Measuring, indexing, and slicing text
+
+Three forms take text apart. They are primaries, so they bind tightly:
+
+| Form | Gives back | Meaning |
+|---|---|---|
+| `length of TEXT` | a number | how many bytes `TEXT` holds |
+| `letter N of TEXT` | text | the byte at position `N`, counting from 1 |
+| `part A to B of TEXT` | text | bytes `A` through `B`, inclusive, counting from 1 |
+
+```rusk
+let name be "Rusk"
+say length of name          # 4
+say letter 1 of name        # R
+say letter 4 of name        # k
+say part 2 to 3 of name     # us
+say "Hello, " + letter 1 of "world" + "!"   # Hello, w!
+```
+
+Rules:
+
+- `length of` needs text and gives a number. It counts bytes, which matches
+  every letter in ASCII. Text literals may contain UTF-8, so a non-ASCII
+  character can count as more than one.
+- `letter N of` and `part A to B of` need a number index and text. Indexes start
+  at **1**; there is no zero position.
+- A part is inclusive at both ends. `part 2 to 1 of "Rusk"` is empty text.
+- `part` may start one past the end when the part is empty, so
+  `part 5 to 4 of "Rusk"` is allowed and empty.
+- Asking for a letter or part outside the text is a **runtime error**. The
+  program writes a sentence to standard error and exits with status 1:
+
+  ```console
+  burnt: line 3: a letter outside the text
+  ```
+
+- The text operand is a single primary. Parenthesize a larger expression:
+  `length of (a + b)`, `part 2 to (length of s - 1) of s`.
+
+Because these forms are ordinary primaries, joining and comparing compose
+naturally: `letter 1 of a + letter 1 of b`, `part 2 to 4 of a is "ell"`.
 
 ## 7. Blocks
 
@@ -251,7 +293,50 @@ program exits with status 0. There is no `main` and no entry-point ceremony.
 say "Hello, world."
 ```
 
-## 12. Errors
+## 12. The interactive session
+
+`rusk` with no arguments, or `rusk repl`, starts an interactive session:
+
+```console
+$ rusk
+Rusk 0.4.0 — an English-like language
+Type :help for commands, :quit to leave.
+
+rusk> let who be "world"
+rusk> "Hello, " + who + "!"
+Hello, world!
+rusk> to double with n as a number:
+...       give back n * 2
+...
+rusk> double with 21
+42
+```
+
+The prompt remembers names and functions between lines. An expression typed on
+its own line shows its value, the way Python's prompt does; `let`, `set`, `say`,
+and definitions stay quiet. A line ending in `:` opens a block, and a blank line
+finishes it.
+
+```text
+:help            show the commands
+:quit            leave the session
+:reset           forget every name and function
+:vars            show the names the session remembers
+:functions       show the functions the session remembers
+:load <file.rk>  run a file in the session
+```
+
+The session is a tree-walking evaluator over the same AST, not the AArch64
+backend. Every submission is still lexed, parsed, and type checked against the
+whole session before any of it runs, so a session accepts the same programs the
+compiler does. Text operations use byte positions here too, matching the baked
+behavior.
+
+When stdin is not a terminal, the banner and prompts are omitted, so
+`rusk < program.rk` works as a pipe. The session is not a `.rk` file compiler:
+it does not write an executable.
+
+## 13. Errors
 
 The compiler reports problems with a line number and a sentence:
 
@@ -262,7 +347,15 @@ burnt: in broken.rk: line 3: after 'let x,' I expected 'be', but found 'is'
 
 A file that fails to bake produces no output file.
 
-## 13. Compilation model
+Some mistakes can only be caught while the program runs, such as asking for a
+letter past the end of a string. Those print a sentence to standard error and
+exit with status 1:
+
+```console
+burnt: line 3: a letter outside the text
+```
+
+## 14. Compilation model
 
 `rusk build file.rk` writes an executable next to the source with the extension
 removed (`-o` overrides the destination).
@@ -296,7 +389,7 @@ parameters and locals above that, so recursion gets a fresh set of slots.
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.3, worth relocating later.
+  collide. Fine for v0.4, worth relocating later.
 - Division by zero traps (SIGFPE analogue) rather than producing a Rusk-level
   error.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
@@ -307,9 +400,8 @@ parameters and locals above that, so recursion gets a fresh set of slots.
 - At most 8 parameters per function; no function values, closures, or
   overloading.
 
-## 14. Roadmap (not implemented)
+## 15. Roadmap (not implemented)
 
-- text indexing, slicing, and `length of`
 - function values and closures
 - an x86-64 encoder behind the same AST and codegen
 - a real relocation-aware data layout

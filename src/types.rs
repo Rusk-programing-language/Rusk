@@ -332,6 +332,61 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }
             Ok(sig.ret)
         }
+        Expr::Length(inner) => {
+            let t = type_of(inner, scope, sigs)?;
+            match t {
+                None => Ok(None),
+                Some(Ty::Str) => Ok(Some(Ty::Int)),
+                Some(t) => Err(format!(
+                    "'length of' counts the letters in text, but this is {t}"
+                )),
+            }
+        }
+        Expr::Letter(index, text) => {
+            let it = type_of(index, scope, sigs)?;
+            let tt = type_of(text, scope, sigs)?;
+            if let Some(t) = it {
+                if t != Ty::Int {
+                    return Err(format!(
+                        "the letter number must be a number, but this is {t}"
+                    ));
+                }
+            }
+            if let Some(t) = tt {
+                if t != Ty::Str {
+                    return Err(format!("'letter ... of' needs text, but this is {t}"));
+                }
+            }
+            if it.is_none() || tt.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(Ty::Str))
+        }
+        Expr::Part { text, from, to } => {
+            let tt = type_of(text, scope, sigs)?;
+            if let Some(t) = tt {
+                if t != Ty::Str {
+                    return Err(format!("'part ... of' needs text, but this is {t}"));
+                }
+            }
+            let mut unknown = tt.is_none();
+            for (what, e) in [("start", from), ("end", to)] {
+                let t = type_of(e, scope, sigs)?;
+                if let Some(t) = t {
+                    if t != Ty::Int {
+                        return Err(format!(
+                            "the {what} of a 'part ... of' must be a number, but this is {t}"
+                        ));
+                    }
+                } else {
+                    unknown = true;
+                }
+            }
+            if unknown {
+                return Ok(None);
+            }
+            Ok(Some(Ty::Str))
+        }
         Expr::Unary(op, inner) => {
             let t = type_of(inner, scope, sigs)?;
             match (op, t) {
@@ -514,5 +569,25 @@ say n
 
         let err = check_src("for each n from \"a\" to 3:\n    say n\n").unwrap_err();
         assert!(err.contains("start of a 'for each' range"), "{err}");
+    }
+
+    #[test]
+    fn text_operations_have_the_right_kinds() {
+        let src = "\
+let n be length of \"hello\"
+let c be letter 1 of \"hello\"
+let middle be part 2 to 4 of \"hello\"
+say c + middle
+";
+        check_src(src).unwrap();
+
+        let err = check_src("say length of 5\n").unwrap_err();
+        assert!(err.contains("counts the letters in text"), "{err}");
+
+        let err = check_src("say letter \"a\" of \"abc\"\n").unwrap_err();
+        assert!(err.contains("letter number must be a number"), "{err}");
+
+        let err = check_src("say part 1 to 2 of 5\n").unwrap_err();
+        assert!(err.contains("'part ... of' needs text"), "{err}");
     }
 }

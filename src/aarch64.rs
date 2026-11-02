@@ -23,6 +23,7 @@ pub const X8: u8 = 8;
 pub const X9: u8 = 9;
 pub const X10: u8 = 10;
 pub const X11: u8 = 11;
+pub const X12: u8 = 12;
 pub const X19: u8 = 19;
 pub const X29: u8 = 29;
 pub const X30: u8 = 30;

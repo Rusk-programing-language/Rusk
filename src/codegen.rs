@@ -91,6 +91,9 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     cg.emit_print_int();
     cg.emit_text_concat();
     cg.emit_text_compare();
+    cg.emit_text_letter();
+    cg.emit_text_part();
+    cg.emit_runtime_fail();
 
     if cg.next_global * 8 > HEAP_PTR_OFFSET {
         return Err("this program has too many top-level things to keep track of".to_string());
@@ -109,6 +112,8 @@ struct Codegen {
     next_global: u64,
     label_counter: u64,
     strings: HashMap<String, usize>,
+    /// The source line of the statement being compiled, for runtime errors.
+    line: usize,
 }
 
 impl Codegen {
@@ -121,6 +126,7 @@ impl Codegen {
             next_global: 0,
             label_counter: 0,
             strings: HashMap::new(),
+            line: 0,
         }
     }
 
@@ -166,6 +172,11 @@ impl Codegen {
         id
     }
 
+    /// The sentence a runtime failure should print, tied to the current line.
+    fn runtime_message(&self, what: &str) -> String {
+        format!("burnt: line {}: {what}\n", self.line)
+    }
+
     fn store_var(&mut self, var: &Var) {
         if var.local {
             self.asm.str(X0, X29, frame_offset(var.slot));
@@ -187,6 +198,7 @@ impl Codegen {
     // ---- statements ------------------------------------------------------
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
+        self.line = stmt.line();
         match stmt {
             Stmt::Say(e, line) => {
                 let ty = self.expr(e).map_err(|m| at(*line, m))?;
@@ -558,6 +570,66 @@ impl Codegen {
                 self.asm.bl_label(&format!("fn_{name}"));
                 Ok(sig.ret)
             }
+            Expr::Length(inner) => {
+                let ty = self.expr(inner)?;
+                if ty != Ty::Str {
+                    return Err(format!(
+                        "'length of' counts the letters in text, but this is {ty}"
+                    ));
+                }
+                self.asm.ldr(X0, X0, 0);
+                Ok(Ty::Int)
+            }
+            Expr::Letter(index, text) => {
+                let it = self.expr(index)?;
+                if it != Ty::Int {
+                    return Err(format!(
+                        "the letter number must be a number, but this is {it}"
+                    ));
+                }
+                self.asm.push_reg(X0);
+                let tt = self.expr(text)?;
+                if tt != Ty::Str {
+                    return Err(format!("'letter ... of' needs text, but this is {tt}"));
+                }
+                // text_letter wants the index in X0 and the text in X1.
+                self.asm.mov_reg_reg(X1, X0);
+                self.asm.pop_reg(X0);
+                let msg = self.runtime_message("a letter outside the text");
+                let id = self.intern(&msg);
+                self.asm.mov_abs(X4, id);
+                self.asm.bl_label("text_letter");
+                Ok(Ty::Str)
+            }
+            Expr::Part { text, from, to } => {
+                let tt = self.expr(text)?;
+                if tt != Ty::Str {
+                    return Err(format!("'part ... of' needs text, but this is {tt}"));
+                }
+                self.asm.push_reg(X0);
+                let ft = self.expr(from)?;
+                if ft != Ty::Int {
+                    return Err(format!(
+                        "the start of a 'part ... of' must be a number, but this is {ft}"
+                    ));
+                }
+                self.asm.push_reg(X0);
+                let et = self.expr(to)?;
+                if et != Ty::Int {
+                    return Err(format!(
+                        "the end of a 'part ... of' must be a number, but this is {et}"
+                    ));
+                }
+                // text_part wants start in X0, end in X1, text in X2.
+                self.asm.mov_reg_reg(X1, X0);
+                self.asm.pop_reg(X0);
+                self.asm.pop_reg(X2);
+                let msg = self.runtime_message("a part outside the text");
+                let id = self.intern(&msg);
+                self.asm.mov_abs(X4, id);
+                self.asm.bl_label("text_part");
+                Ok(Ty::Str)
+            }
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
                 match op {
@@ -851,6 +923,124 @@ impl Codegen {
 
         a.label("tc_greater");
         a.movz_reg(X0, 1);
+        a.ret();
+    }
+
+    /// `text_letter`: X0 = index (1-based), X1 = text, result in X0.
+    ///
+    /// Allocates a fresh one-byte string on the heap. X4 holds the
+    /// length-prefixed runtime error to print if the index falls outside.
+    fn emit_text_letter(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("text_letter");
+        a.ldr(X2, X1, 0); // length
+        a.movz_reg(X3, 1);
+        a.cmp_reg_reg(X0, X3);
+        a.bcond_label(CC_LT, "letter_fail");
+        a.cmp_reg_reg(X0, X2);
+        a.bcond_label(CC_GT, "letter_fail");
+
+        // A one-byte string is [len = 1][byte], nine bytes in all.
+        a.mov_imm64(X5, heap_ptr);
+        a.ldr(X6, X5, 0);
+        a.add_imm(X7, X6, 9);
+        a.str(X7, X5, 0);
+        a.movz_reg(X3, 1);
+        a.str(X3, X6, 0);
+
+        a.add_imm(X1, X1, 8);
+        a.sub_imm(X0, X0, 1);
+        a.add_reg_reg(X1, X1, X0);
+        a.ldrb(X3, X1, 0);
+        a.strb(X3, X6, 8);
+        a.mov_reg_reg(X0, X6);
+        a.ret();
+
+        a.label("letter_fail");
+        a.mov_reg_reg(X0, X4);
+        a.b_label("runtime_fail");
+    }
+
+    /// `text_part`: X0 = start, X1 = end (both 1-based and inclusive),
+    /// X2 = text, result in X0. X4 holds the runtime error.
+    fn emit_text_part(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("text_part");
+        a.ldr(X5, X2, 0); // length
+        a.movz_reg(X6, 1);
+        a.cmp_reg_reg(X0, X6);
+        a.bcond_label(CC_LT, "part_fail");
+        a.add_reg_reg(X9, X5, X6); // len + 1: an empty part may start here
+        a.cmp_reg_reg(X0, X9);
+        a.bcond_label(CC_GT, "part_fail");
+        a.cmp_reg_reg(X1, X5);
+        a.bcond_label(CC_GT, "part_fail");
+        a.cmp_reg_reg(X1, X0);
+        a.bcond_label(CC_LT, "part_empty");
+
+        // count = end - start + 1
+        a.sub_reg_reg(X6, X1, X0);
+        a.add_imm(X6, X6, 1);
+
+        a.mov_imm64(X7, heap_ptr);
+        a.ldr(X8, X7, 0);
+        a.add_reg_reg(X9, X8, X6);
+        a.add_imm(X9, X9, 8);
+        a.str(X9, X7, 0);
+        a.str(X6, X8, 0);
+
+        // Source bytes start at text + 8 + (start - 1).
+        a.sub_imm(X10, X0, 1);
+        a.add_reg_reg(X10, X2, X10);
+        a.add_imm(X10, X10, 8);
+        a.add_imm(X11, X8, 8);
+        a.label("part_copy");
+        a.cmp_reg_reg(X6, XZR);
+        a.bcond_label(CC_EQ, "part_done");
+        a.ldrb(X12, X10, 0);
+        a.strb(X12, X11, 0);
+        a.add_imm(X10, X10, 1);
+        a.add_imm(X11, X11, 1);
+        a.sub_imm(X6, X6, 1);
+        a.b_label("part_copy");
+
+        a.label("part_done");
+        a.mov_reg_reg(X0, X8);
+        a.ret();
+
+        a.label("part_empty");
+        a.mov_imm64(X7, heap_ptr);
+        a.ldr(X8, X7, 0);
+        a.add_imm(X9, X8, 8);
+        a.str(X9, X7, 0);
+        a.movz_reg(X9, 0);
+        a.str(X9, X8, 0);
+        a.mov_reg_reg(X0, X8);
+        a.ret();
+
+        a.label("part_fail");
+        a.mov_reg_reg(X0, X4);
+        a.b_label("runtime_fail");
+    }
+
+    /// `runtime_fail`: X0 points at a length-prefixed sentence. Write it to
+    /// stderr and leave with status 1.
+    fn emit_runtime_fail(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("runtime_fail");
+        a.ldr(X2, X0, 0);
+        a.add_imm(X1, X0, 8);
+        a.mov_imm64(X0, 2); // fd = stderr
+        a.mov_imm64(X8, SYS_WRITE);
+        a.svc();
+        a.mov_imm64(X8, SYS_EXIT);
+        a.mov_imm64(X0, 1);
+        a.svc();
         a.ret();
     }
 }

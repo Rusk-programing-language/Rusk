@@ -37,6 +37,16 @@ pub enum Expr {
     Var(String),
     /// A call written `name with arg and arg`.
     Call(String, Vec<Expr>),
+    /// `length of TEXT` — how many bytes the text holds.
+    Length(Box<Expr>),
+    /// `letter N of TEXT` — one piece of text, counting from 1.
+    Letter(Box<Expr>, Box<Expr>),
+    /// `part START to END of TEXT` — inclusive, counting from 1.
+    Part {
+        text: Box<Expr>,
+        from: Box<Expr>,
+        to: Box<Expr>,
+    },
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
@@ -112,4 +122,22 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub stmts: Vec<Stmt>,
+}
+
+impl Stmt {
+    /// The source line this statement starts on.
+    pub fn line(&self) -> usize {
+        match self {
+            Stmt::Say(_, line)
+            | Stmt::Let { line, .. }
+            | Stmt::Set { line, .. }
+            | Stmt::If { line, .. }
+            | Stmt::Repeat { line, .. }
+            | Stmt::While { line, .. }
+            | Stmt::ForEach { line, .. }
+            | Stmt::FuncDef { line, .. }
+            | Stmt::GiveBack(_, line)
+            | Stmt::Expr(_, line) => *line,
+        }
+    }
 }

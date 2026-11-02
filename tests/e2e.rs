@@ -12,11 +12,17 @@ fn bake_to_disk(name: &str, src: &str) -> std::path::PathBuf {
 }
 
 fn run(name: &str, src: &str) -> (String, i32) {
+    let (stdout, _, code) = run_full(name, src);
+    (stdout, code)
+}
+
+fn run_full(name: &str, src: &str) -> (String, String, i32) {
     let path = bake_to_disk(name, src);
     let out = Command::new(&path).output().expect("program should start");
     let _ = std::fs::remove_file(&path);
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
         out.status.code().unwrap_or(-1),
     )
 }
@@ -294,6 +300,88 @@ say grade with 10
 fn bare_is_means_equality() {
     let (stdout, _) = run("bare_is", "let x be 5\nsay x is 5\n");
     assert_eq!(stdout, "true\n");
+}
+
+// ---- text length, indexing, and slicing ------------------------------
+
+#[test]
+fn text_can_be_measured_indexed_and_sliced() {
+    let src = "\
+let s be \"hello\"
+say length of s
+say letter 1 of s
+say letter 5 of s
+say part 2 to 4 of s
+say part 2 to 1 of s
+say part 6 to 5 of s
+say \"Hello, \" + letter 1 of \"world\" + part 2 to 5 of \"world\" + \"!\"
+
+to middle with t as text:
+    give back part 2 to (length of t - 1) of t
+
+say middle with \"Rusk\"
+";
+    let (stdout, code) = run("text_ops", src);
+    assert_eq!(stdout, "5\nh\no\nell\n\n\nHello, world!\nus\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn text_index_errors_stop_the_program() {
+    let src = "say \"start\"\nsay letter 9 of \"abc\"\n";
+    let (stdout, stderr, code) = run_full("letter_bounds", src);
+    assert_eq!(stdout, "start\n");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("line 2: a letter outside the text"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn text_part_errors_stop_the_program() {
+    let (_, stderr, code) = run_full("part_bounds", "say part 1 to 9 of \"abc\"\n");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("line 1: a part outside the text"),
+        "{stderr}"
+    );
+}
+
+// ---- the interactive session -----------------------------------------
+
+#[test]
+fn the_repl_remembers_state_and_echoes_values() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rusk"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the repl should start");
+
+    let input = "\
+let x be 40
+x + 2
+to double with n as a number:
+    give back n * 2
+
+double with 21
+:quit
+";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout, "42\n42\n");
+    assert!(out.status.success());
 }
 
 
