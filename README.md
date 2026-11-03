@@ -31,7 +31,7 @@ division by zero, heap exhaustion, and runaway recursion as Rusk errors
 instead of crashing. Everything from v0.5 — constants, homogeneous lists,
 `import`, text operations, and the interactive session — still works. The
 compiler is a lexer, parser, import expander, type checker, ownership checker,
-AArch64 code generator, and ELF writer, with 138 tests. It targets
+AArch64 code generator, and ELF writer, with 142 tests. It targets
 **AArch64 Linux** only.
 
 ## Quick start
@@ -83,6 +83,8 @@ say (10 - 4) * 2
 say 100 / 3
 say temperature is at least 180
 say not false
+say true and not false
+say 1 is less than 2 or 2 is less than 1
 
 # text joins with `+` and compares like a dictionary
 let name be "Rusk"

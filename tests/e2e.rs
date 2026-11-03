@@ -77,6 +77,52 @@ fn strings_are_values_too() {
 }
 
 #[test]
+fn and_or_short_circuit() {
+    let src = "\
+to noisy with value as a truth value:
+    say \"checked\"
+    give back value
+
+say false and noisy with true
+say true or noisy with false
+say true and noisy with true
+say false or noisy with true
+";
+    let (stdout, _) = run("and_or", src);
+    assert_eq!(stdout, "false\ntrue\nchecked\ntrue\nchecked\ntrue\n");
+}
+
+#[test]
+fn and_binds_tighter_than_or() {
+    let src = "\
+say true and false or true
+say false or false and true
+say not false and not false
+";
+    let (stdout, _) = run("and_or_precedence", src);
+    assert_eq!(stdout, "true\nfalse\ntrue\n");
+}
+
+#[test]
+fn and_still_separates_call_arguments() {
+    let src = "\
+to both with a as a truth value and b as a truth value:
+    give back a and b
+
+say both with true and true
+say both with true and false
+";
+    let (stdout, _) = run("and_args", src);
+    assert_eq!(stdout, "true\nfalse\n");
+}
+
+#[test]
+fn and_needs_truth_values() {
+    let err = rusk::bake("say 1 and 2\n").unwrap_err();
+    assert!(err.contains("joins truth values"), "{err}");
+}
+
+#[test]
 fn booleans_print_as_words() {
     let (stdout, _) = run("bools", "say 1 is less than 2\nsay not true\n");
     assert_eq!(stdout, "true\nfalse\n");

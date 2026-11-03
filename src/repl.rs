@@ -578,6 +578,34 @@ impl Session {
                     )),
                 }
             }
+            Expr::Binary(op @ (BinOp::And | BinOp::Or), left, right) => {
+                let left = self.eval(left, env)?;
+                let short = matches!(
+                    (op, &left),
+                    (BinOp::And, Value::Bool(false)) | (BinOp::Or, Value::Bool(true))
+                );
+                if short {
+                    return Ok(left);
+                }
+                if !matches!(left, Value::Bool(_)) {
+                    return Err(format!(
+                        "line {}: '{}' joins truth values, but the left side is {}",
+                        self.line,
+                        op_word(*op),
+                        kind_name(&left)
+                    ));
+                }
+                let right = self.eval(right, env)?;
+                match right {
+                    Value::Bool(_) => Ok(right),
+                    other => Err(format!(
+                        "line {}: '{}' joins truth values, but the right side is {}",
+                        self.line,
+                        op_word(*op),
+                        kind_name(&other)
+                    )),
+                }
+            }
             Expr::Binary(op, left, right) => {
                 let left = self.eval(left, env)?;
                 let right = self.eval(right, env)?;
@@ -659,6 +687,7 @@ impl Session {
                 };
                 Ok(Value::Bool(yes))
             }
+            And | Or => unreachable!("and/or are short-circuited before binary"),
         }
     }
 
@@ -852,6 +881,8 @@ fn op_word(op: BinOp) -> &'static str {
         BinOp::LtEq => "is at most",
         BinOp::Gt => "is more than",
         BinOp::GtEq => "is at least",
+        BinOp::And => "and",
+        BinOp::Or => "or",
     }
 }
 

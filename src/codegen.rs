@@ -975,6 +975,30 @@ impl Codegen {
                     }
                 }
             }
+            Expr::Binary(op @ (BinOp::And | BinOp::Or), left, right) => {
+                let lt = self.expr(left)?;
+                if lt != Ty::Bool {
+                    return Err(format!(
+                        "'{}' joins truth values, but the left side is {lt}",
+                        op_name(*op)
+                    ));
+                }
+                let done = self.new_label("short_circuit");
+                let cc = if *op == BinOp::And { CC_EQ } else { CC_NE };
+                // Leaving X0 alone on the short path gives back the left value:
+                // false for `and`, true for `or`.
+                self.asm.cmp_reg_reg(X0, XZR);
+                self.asm.bcond_label(cc, &done);
+                let rt = self.expr(right)?;
+                if rt != Ty::Bool {
+                    return Err(format!(
+                        "'{}' joins truth values, but the right side is {rt}",
+                        op_name(*op)
+                    ));
+                }
+                self.asm.label(&done);
+                Ok(Ty::Bool)
+            }
             Expr::Binary(op, left, right) => {
                 let lt = self.expr(left)?;
                 self.asm.push_reg(X0);
@@ -1057,6 +1081,7 @@ impl Codegen {
                 self.asm.cset(X0, cc);
                 Ok(Ty::Bool)
             }
+            And | Or => unreachable!("and/or are short-circuited before binary"),
         }
     }
 
@@ -1701,6 +1726,8 @@ fn op_name(op: BinOp) -> &'static str {
         BinOp::LtEq => "is at most",
         BinOp::Gt => "is more than",
         BinOp::GtEq => "is at least",
+        BinOp::And => "and",
+        BinOp::Or => "or",
     }
 }
 

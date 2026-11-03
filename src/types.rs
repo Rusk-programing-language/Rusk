@@ -640,6 +640,15 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                     }
                     Ok(Some(Ty::Int))
                 }
+                BinOp::And | BinOp::Or => {
+                    if lt != Ty::Bool || rt != Ty::Bool {
+                        return Err(format!(
+                            "'{}' joins truth values, but this has {lt} and {rt}",
+                            op_word(*op)
+                        ));
+                    }
+                    Ok(Some(Ty::Bool))
+                }
                 _ => {
                     if lt != rt {
                         return Err(format!(
@@ -703,6 +712,8 @@ fn op_word(op: BinOp) -> &'static str {
         BinOp::LtEq => "is at most",
         BinOp::Gt => "is more than",
         BinOp::GtEq => "is at least",
+        BinOp::And => "and",
+        BinOp::Or => "or",
     }
 }
 

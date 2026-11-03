@@ -21,7 +21,12 @@
 //! param      := NAME "as" ("a"|"an")? TYPE
 //! give_back  := "give" "back" expr NEWLINE
 //! block      := NEWLINE INDENT stmt* DEDENT
-//! expr       := sum (comparison_tail)?
+//! expr       := or_expr
+//! or_expr    := and_expr ("or" and_expr)*
+//! and_expr   := comparison ("and" comparison)*
+//! comparison := sum (("=" | "!=" | "<" | "<=" | ">" | ">=") sum
+//!             | "is" ("not" | "more than" | "less than" | "equal to"
+//!                     | "at least" | "at most")? sum)?
 //! sum        := term (("+" | "-") term)*
 //! term       := unary (("*" | "/") unary)*
 //! unary      := ("-" | "not") unary | primary
@@ -229,14 +234,14 @@ impl Parser {
         if self.is_word("give") {
             self.bump();
             self.need_word("back", "after 'give',")?;
-            let value = self.expr()?;
+            let value = self.expr(true)?;
             self.end_of_line()?;
             return Ok(Stmt::GiveBack(value, line));
         }
 
         if self.is_word("say") {
             self.bump();
-            let value = self.expr()?;
+            let value = self.expr(true)?;
             self.end_of_line()?;
             return Ok(Stmt::Say(value, line));
         }
@@ -258,7 +263,7 @@ impl Parser {
             self.bump();
             let name = self.name(&format!("after '{word}'"))?;
             self.need_word("be", &format!("after '{word} {name}',"))?;
-            let value = self.expr()?;
+            let value = self.expr(true)?;
             self.end_of_line()?;
             return Ok(Stmt::Let { name, value, line });
         }
@@ -267,7 +272,7 @@ impl Parser {
             self.bump();
             let name = self.name("after 'constant'")?;
             self.need_word("be", &format!("after 'constant {name}',"))?;
-            let value = self.expr()?;
+            let value = self.expr(true)?;
             self.end_of_line()?;
             return Ok(Stmt::Const { name, value, line });
         }
@@ -276,11 +281,11 @@ impl Parser {
             self.bump();
             if self.is_word("item") && self.starts_index() {
                 self.bump(); // "item"
-                let index = self.expr()?;
+                let index = self.expr(true)?;
                 self.need_word("of", "after the item number,")?;
                 let array = self.primary()?;
                 self.need_word("to", "after the list in 'set item',")?;
-                let value = self.expr()?;
+                let value = self.expr(true)?;
                 self.end_of_line()?;
                 return Ok(Stmt::SetItem {
                     index,
@@ -291,14 +296,14 @@ impl Parser {
             }
             let name = self.name("after 'set'")?;
             self.need_word("to", &format!("after 'set {name}',"))?;
-            let value = self.expr()?;
+            let value = self.expr(true)?;
             self.end_of_line()?;
             return Ok(Stmt::Set { name, value, line });
         }
 
         if self.is_word("if") {
             self.bump();
-            let cond = self.expr()?;
+            let cond = self.expr(true)?;
             self.need(Tok::Colon, "after the condition,")?;
             let then = self.block("this 'if'")?;
             let other = if self.eat_word("otherwise") {
@@ -318,7 +323,7 @@ impl Parser {
 
         if self.is_word("repeat") {
             self.bump();
-            let count = self.expr()?;
+            let count = self.expr(true)?;
             self.need_word("times", "after the repeat count,")?;
             self.need(Tok::Colon, "after 'times',")?;
             let body = self.block("this 'repeat'")?;
@@ -327,7 +332,7 @@ impl Parser {
 
         if self.is_word("while") {
             self.bump();
-            let cond = self.expr()?;
+            let cond = self.expr(true)?;
             self.need(Tok::Colon, "after the 'while' condition,")?;
             let body = self.block("this 'while'")?;
             return Ok(Stmt::While { cond, body, line });
@@ -338,7 +343,7 @@ impl Parser {
             self.need_word("each", "after 'for',")?;
             let name = self.name("after 'for each'")?;
             if self.eat_word("in") {
-                let array = self.expr()?;
+                let array = self.expr(true)?;
                 self.need(Tok::Colon, "after the list in 'for each',")?;
                 let body = self.block("this 'for each'")?;
                 return Ok(Stmt::ForEachIn {
@@ -349,9 +354,9 @@ impl Parser {
                 });
             }
             self.need_word("from", &format!("after 'for each {name}',"))?;
-            let from = self.expr()?;
+            let from = self.expr(true)?;
             self.need_word("to", "after the start of the range,")?;
-            let to = self.expr()?;
+            let to = self.expr(true)?;
             self.need(Tok::Colon, "after the end of the range,")?;
             let body = self.block("this 'for each'")?;
             return Ok(Stmt::ForEach {
@@ -363,7 +368,7 @@ impl Parser {
             });
         }
 
-        let value = self.expr()?;
+        let value = self.expr(true)?;
         self.end_of_line()?;
         Ok(Stmt::Expr(value, line))
     }
@@ -459,8 +464,26 @@ impl Parser {
         Ok(stmts)
     }
 
-    fn expr(&mut self) -> Result<Expr, String> {
-        self.comparison()
+    fn expr(&mut self, allow_and: bool) -> Result<Expr, String> {
+        self.or_expr(allow_and)
+    }
+
+    fn or_expr(&mut self, allow_and: bool) -> Result<Expr, String> {
+        let mut left = self.and_expr(allow_and)?;
+        while self.eat_word("or") {
+            let right = self.and_expr(allow_and)?;
+            left = Expr::Binary(BinOp::Or, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn and_expr(&mut self, allow_and: bool) -> Result<Expr, String> {
+        let mut left = self.comparison()?;
+        while allow_and && self.eat_word("and") {
+            let right = self.comparison()?;
+            left = Expr::Binary(BinOp::And, Box::new(left), Box::new(right));
+        }
+        Ok(left)
     }
 
     fn comparison(&mut self) -> Result<Expr, String> {
@@ -572,7 +595,7 @@ impl Parser {
             }
             Tok::LParen => {
                 self.bump();
-                let e = self.expr()?;
+                let e = self.expr(true)?;
                 self.need(Tok::RParen, "to close this '('")?;
                 Ok(e)
             }
@@ -580,7 +603,7 @@ impl Parser {
                 self.bump();
                 let mut items = Vec::new();
                 while self.peek() != &Tok::RBracket {
-                    items.push(self.expr()?);
+                    items.push(self.expr(true)?);
                     if self.peek() == &Tok::Comma {
                         self.bump();
                     } else {
@@ -629,9 +652,9 @@ impl Parser {
                 }
                 if word == "part" && self.starts_index() {
                     self.bump(); // "part"
-                    let from = self.expr()?;
+                    let from = self.expr(true)?;
                     self.need_word("to", "after the start of the part,")?;
-                    let to = self.expr()?;
+                    let to = self.expr(true)?;
                     self.need_word("of", "after the end of the part,")?;
                     let text = self.primary()?;
                     return Ok(Expr::Part {
@@ -642,14 +665,14 @@ impl Parser {
                 }
                 if word == "letter" && self.starts_index() {
                     self.bump(); // "letter"
-                    let n = self.expr()?;
+                    let n = self.expr(true)?;
                     self.need_word("of", "after the letter number,")?;
                     let text = self.primary()?;
                     return Ok(Expr::Letter(Box::new(n), Box::new(text)));
                 }
                 if word == "item" && self.starts_index() {
                     self.bump(); // "item"
-                    let index = self.expr()?;
+                    let index = self.expr(true)?;
                     self.need_word("of", "after the item number,")?;
                     let array = self.primary()?;
                     return Ok(Expr::Item(Box::new(index), Box::new(array)));
@@ -662,7 +685,7 @@ impl Parser {
                     _ if self.eat_word("with") => {
                         let mut args = Vec::new();
                         loop {
-                            args.push(self.expr()?);
+                            args.push(self.expr(false)?);
                             if !self.eat_word("and") {
                                 break;
                             }

@@ -116,6 +116,9 @@ pub enum BinOp {
     LtEq,
     Gt,
     GtEq,
+    /// `and` / `or`: logical conjunction and disjunction.
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, PartialEq)]

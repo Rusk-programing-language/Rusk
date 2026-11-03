@@ -123,6 +123,8 @@ Operator precedence, loosest first:
 
 | Level | Operators | Associativity |
 |---|---|---|
+| Or | `or` | left |
+| And | `and` | left |
 | Comparison | `is`, `is more than`, `is less than`, `is equal to`, `is not`, `is at least`, `is at most`, `>`, `<`, `==`, `!=`, `>=`, `<=` | one comparison per expression |
 | Sum | `+`, `-` | left |
 | Product | `*`, `/` | left |
@@ -131,6 +133,13 @@ Operator precedence, loosest first:
 
 `+` adds two numbers or joins two pieces of text. `-`, `*`, and `/` are numbers
 only. A bare `is` means `is equal to`: `if name is "Rusk":`.
+
+`and` and `or` take truth values on both sides and give one back. They
+short-circuit: the right side is not evaluated when the left side already
+decides the answer. `and` binds tighter than `or`, so
+`a or b and c` means `a or (b and c)`. Inside a call's `with ... and ...`
+argument list, a top-level `and` separates arguments; put parentheses around a
+conjunction you mean as one argument: `check with (a and b)`.
 
 Examples:
 
@@ -142,6 +151,9 @@ say 100 / -7             # -14
 say 5 is more than 3     # true
 say 5 is at most 5       # true
 say not (1 is equal to 2)  # true
+say true and false       # false
+say false or true        # true
+say 5 is more than 3 and 2 is less than 4  # true
 say "Hello, " + "world"  # Hello, world
 say "apple" < "banana"   # true
 say "b" is more than "abc"  # true
@@ -155,6 +167,7 @@ Rules:
   compare directly; text compares byte by byte (unsigned), then by length, so
   `"ab"` is less than `"abc"` and `"b"` is more than `"abc"`.
 - `not` requires a truth value.
+- `and` and `or` require truth values on both sides.
 - Unary `-` requires a number.
 
 ### Joining text
@@ -163,7 +176,7 @@ Text is immutable. `left + right` allocates a new string in a fixed 1 MiB heap
 inside the program's data area, copies both byte blobs into it, and hands back
 the new value. Nothing is freed: this language is small and programs are short,
 but a long-running loop that keeps joining text will eventually run out of heap
-(and there is no runtime error for that yet).
+and stop with `burnt: the program ran out of memory`.
 
 ### Measuring, indexing, and slicing text
 
