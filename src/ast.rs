@@ -147,6 +147,12 @@ pub enum Stmt {
         value: Expr,
         line: usize,
     },
+    /// `add VALUE to LIST` — append one item, growing the list.
+    AddTo {
+        value: Expr,
+        name: String,
+        line: usize,
+    },
     If {
         cond: Expr,
         then: Vec<Stmt>,
@@ -212,6 +218,7 @@ impl Stmt {
             | Stmt::Const { line, .. }
             | Stmt::Set { line, .. }
             | Stmt::SetItem { line, .. }
+            | Stmt::AddTo { line, .. }
             | Stmt::If { line, .. }
             | Stmt::Repeat { line, .. }
             | Stmt::While { line, .. }

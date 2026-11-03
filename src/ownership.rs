@@ -166,6 +166,10 @@ impl<'a> Checker<'a> {
                 Self::line_at(*line, self.expr(array, scope, Use::Read))?;
                 Self::line_at(*line, self.expr(value, scope, Use::Move))?;
             }
+            Stmt::AddTo { value, name, line } => {
+                Self::line_at(*line, self.expr(value, scope, Use::Move))?;
+                Self::line_at(*line, self.expr(&Expr::Var(name.clone()), scope, Use::Read))?;
+            }
             Stmt::If {
                 cond,
                 then,

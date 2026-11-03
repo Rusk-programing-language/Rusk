@@ -259,6 +259,40 @@ fn infer_stmts(
                     }
                 }
             }
+            Stmt::AddTo { value, name, line } => {
+                let old = scope
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| at(*line, format!("I don't know a thing called '{name}'")))?;
+                if old.constant {
+                    return Err(at(
+                        *line,
+                        format!("'{name}' is a constant — it can't be grown"),
+                    ));
+                }
+                let elem = match old.ty {
+                    Some(Ty::Array(elem)) => Some(elem),
+                    Some(t) => {
+                        return Err(at(
+                            *line,
+                            format!("'add' needs a list, but '{name}' holds {t}"),
+                        ))
+                    }
+                    None => None,
+                };
+                let vt = type_of(value, scope, sigs).map_err(|m| at(*line, m))?;
+                if let (Some(elem), Some(vt)) = (elem, vt) {
+                    if vt != elem.ty() {
+                        return Err(at(
+                            *line,
+                            format!(
+                                "this list holds {}, but the new item is {vt}",
+                                elem.ty()
+                            ),
+                        ));
+                    }
+                }
+            }
             Stmt::Expr(e, line) => {
                 type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
             }

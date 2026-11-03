@@ -236,6 +236,30 @@ impl Session {
                 items[index as usize - 1] = v;
                 Ok(Flow::Normal)
             }
+            Stmt::AddTo { value, name, .. } => {
+                if self.constants.contains(name) {
+                    return Err(format!(
+                        "line {}: '{name}' is a constant — it can't be grown",
+                        self.line
+                    ));
+                }
+                let v = self.eval(value, env)?;
+                match env.get(name) {
+                    Some(Value::Array(items)) => {
+                        items.borrow_mut().push(v);
+                        Ok(Flow::Normal)
+                    }
+                    Some(other) => Err(format!(
+                        "line {}: 'add' needs a list, but '{name}' holds {}",
+                        self.line,
+                        kind_name(other)
+                    )),
+                    None => Err(format!(
+                        "line {}: I don't know a thing called '{name}'",
+                        self.line
+                    )),
+                }
+            }
             Stmt::If {
                 cond, then, other, ..
             } => {

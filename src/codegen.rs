@@ -105,6 +105,7 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     cg.emit_text_part();
     cg.emit_array_get();
     cg.emit_array_set();
+    cg.emit_array_add();
     cg.emit_text_copy();
     cg.emit_array_copy_scalar();
     cg.emit_array_copy_text();
@@ -272,6 +273,9 @@ impl Codegen {
             } => self
                 .set_item(index, array, value)
                 .map_err(|m| at(*line, m)),
+            Stmt::AddTo { value, name, line } => {
+                self.add_to(value, name).map_err(|m| at(*line, m))
+            }
             Stmt::If {
                 cond,
                 then,
@@ -402,8 +406,32 @@ impl Codegen {
         Ok(())
     }
 
-    fn if_(&mut self, cond: &Expr, then: &[Stmt], other: &[Stmt]) -> Result<(), String> {
-        let ty = self.expr(cond)?;
+    fn add_to(&mut self, value: &Expr, name: &str) -> Result<(), String> {
+        let Some(var) = self.vars.get(name).cloned() else {
+            return Err(format!("I don't know a thing called '{name}'"));
+        };
+        if var.constant {
+            return Err(format!("'{name}' is a constant — it can't be grown"));
+        }
+        let Some(elem) = var.ty.elem() else {
+            return Err(format!("'add' needs a list, but '{name}' holds {}", var.ty));
+        };
+        let ty = self.expr(value)?;
+        if ty != elem.ty() {
+            return Err(format!(
+                "this list holds {}, but the new item is {ty}",
+                elem.ty()
+            ));
+        }
+        self.asm.push_reg(X0);
+        self.load_var(&var);
+        self.asm.pop_reg(X1);
+        self.asm.bl_label("array_add");
+        self.store_var(&var);
+        Ok(())
+    }
+
+    fn if_(&mut self, cond: &Expr, then: &[Stmt], other: &[Stmt]) -> Result<(), String> {        let ty = self.expr(cond)?;
         if ty != Ty::Bool {
             return Err(format!(
                 "'if' needs a condition that is true or false, but this is {ty}"
@@ -1523,6 +1551,52 @@ impl Codegen {
         a.label("array_set_fail");
         a.mov_reg_reg(X0, X4);
         a.b_label("runtime_fail");
+    }
+
+    /// `array_add`: X0 = list, X1 = new item. Grows the list by one, copying it
+    /// to fresh heap space, and gives back the new list in X0.
+    fn emit_array_add(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("array_add");
+        a.ldr(X2, X0, 0); // old length
+        a.mov_imm64(X3, heap_ptr);
+        a.ldr(X4, X3, 0); // destination
+
+        // (length + 2) * 8 keeps the length word and one new item.
+        a.mov_reg_reg(X5, X2);
+        a.add_reg_reg(X5, X5, X5); // *2
+        a.add_reg_reg(X5, X5, X5); // *4
+        a.add_reg_reg(X5, X5, X5); // *8
+        a.add_imm(X5, X5, 16);
+
+        a.add_reg_reg(X6, X4, X5);
+        a.mov_imm64(X10, HEAP_END);
+        a.cmp_reg_reg(X6, X10);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X6, X3, 0);
+
+        a.movz_reg(X9, 1);
+        a.add_reg_reg(X5, X2, X9);
+        a.str(X5, X4, 0); // new length
+        a.add_imm(X7, X4, 8); // destination items
+        a.add_imm(X8, X0, 8); // source items
+        a.mov_reg_reg(X9, X2);
+        a.label("array_add_loop");
+        a.cmp_reg_reg(X9, XZR);
+        a.bcond_label(CC_EQ, "array_add_done");
+        a.ldr(X11, X8, 0);
+        a.str(X11, X7, 0);
+        a.add_imm(X8, X8, 8);
+        a.add_imm(X7, X7, 8);
+        a.sub_imm(X9, X9, 1);
+        a.b_label("array_add_loop");
+
+        a.label("array_add_done");
+        a.str(X1, X7, 0); // the new item
+        a.mov_reg_reg(X0, X4);
+        a.ret();
     }
 
     /// `text_copy`: X0 = text, result is a fresh copy of it in X0.

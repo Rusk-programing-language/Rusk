@@ -222,7 +222,7 @@ naturally: `letter 1 of a + letter 1 of b`, `part 2 to 4 of a is "ell"`.
 
 ### Lists
 
-A list is a fixed-length, homogeneous sequence. Write one with square brackets:
+A list is a homogeneous sequence. Write one with square brackets:
 
 ```rusk
 let loaves be [3, 6, 9]
@@ -244,13 +244,14 @@ let empty_flags be an empty list of truth values
 in function parameters as `a list of numbers`, `a list of text`, or
 `a list of truth values`.
 
-Three forms work on lists, all counting from **1**:
+Four forms work on lists, all counting from **1**:
 
 | Form | Gives back | Meaning |
 |---|---|---|
 | `length of LIST` | a number | how many items the list holds |
 | `item N of LIST` | the item kind | the item at position `N` |
 | `set item N of LIST to VALUE` | — | replace the item at position `N` |
+| `add VALUE to LIST` | — | append `VALUE`, growing the list |
 
 ```rusk
 let xs be [10, 20, 30]
@@ -258,6 +259,8 @@ say length of xs          # 3
 say item 2 of xs          # 20
 set item 2 of xs to 99
 say xs                    # [10, 99, 30]
+add 40 to xs
+say xs                    # [10, 99, 30, 40]
 ```
 
 Rules:
@@ -266,6 +269,9 @@ Rules:
 - The item number must be a number, evaluated before the list.
 - `item N of` and `set item N of` need a list; the new value's kind must match
   the list's item kind.
+- `add VALUE to LIST` needs a list variable whose item kind matches `VALUE`.
+  Adding an owned text value moves it into the list; `copy of` keeps the
+  original. Adding to a constant is an error.
 - Asking for an item outside the list is a **runtime error**:
 
   ```console
@@ -274,7 +280,8 @@ Rules:
 
 - A list value is owned by one name at a time. `let ys be xs` moves the list
   from `xs` to `ys`; `ys` and `xs` never alias. Use `let ys be copy of xs` when
-  you want two independent lists. The list itself cannot grow or shrink.
+  you want two independent lists. `add VALUE to LIST` grows the list in place
+  from the program's point of view; the name keeps ownership.
 - Lists do not compare with `is` or the ordering operators yet.
 
 ## 7. Blocks

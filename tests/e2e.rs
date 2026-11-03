@@ -579,6 +579,66 @@ fn set_item_checks_its_bounds_too() {
 }
 
 #[test]
+fn add_grows_a_list() {
+    let src = "\
+let xs be [1, 2]
+add 3 to xs
+say xs
+say length of xs
+let ys be an empty list of numbers
+add 7 to ys
+say ys
+let words be [\"rye\"]
+add \"wheat\" to words
+say words
+let flags be [true]
+add false to flags
+say flags
+";
+    let (stdout, code) = run("grow_list", src);
+    assert_eq!(
+        stdout,
+        "[1, 2, 3]\n3\n[7]\n[rye, wheat]\n[true, false]\n"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn add_can_grow_a_list_inside_a_function() {
+    let src = "\
+to doubled with xs as a list of numbers:
+    let ys be an empty list of numbers
+    for each x in xs:
+        add x * 2 to ys
+    give back ys
+
+say doubled with [1, 2, 3]
+";
+    let (stdout, code) = run("grow_local", src);
+    assert_eq!(stdout, "[2, 4, 6]\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn adding_text_moves_it_into_the_list() {
+    let err = rusk::bake("let a be \"hi\"\nlet xs be [\"x\"]\nadd a to xs\nsay a\n")
+        .unwrap_err();
+    assert!(err.contains("moved already"), "{err}");
+}
+
+#[test]
+fn add_checks_the_item_kind() {
+    let err = rusk::bake("let xs be [1]\nadd \"two\" to xs\n").unwrap_err();
+    assert!(err.contains("this list holds a number"), "{err}");
+}
+
+#[test]
+fn a_constant_list_cannot_grow() {
+    let err = rusk::bake("constant xs be [1]\nadd 2 to xs\n").unwrap_err();
+    assert!(err.contains("constant"), "{err}");
+}
+
+#[test]
 fn a_constant_cannot_be_set() {
     let err = rusk::bake("constant pi be 3\nset pi to 4\n").unwrap_err();
     assert!(err.contains("constant"), "{err}");

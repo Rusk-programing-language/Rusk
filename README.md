@@ -31,7 +31,7 @@ division by zero, heap exhaustion, and runaway recursion as Rusk errors
 instead of crashing. Everything from v0.5 — constants, homogeneous lists,
 `import`, text operations, and the interactive session — still works. The
 compiler is a lexer, parser, import expander, type checker, ownership checker,
-AArch64 code generator, and ELF writer, with 142 tests. It targets
+AArch64 code generator, and ELF writer, with 147 tests. It targets
 **AArch64 Linux** only.
 
 ## Quick start
@@ -113,6 +113,8 @@ say loaves                    # [3, 12, 9]
 let names be ["rye", "wheat"]
 for each name in names:
     say "one " + name + " loaf"
+add "spelt" to names
+say names                     # [rye, wheat, spelt]
 
 let empty be an empty list of numbers
 say empty                     # []
@@ -281,7 +283,8 @@ Runtime facts worth knowing:
 - Lists are stored as `[len: u64][item: i64]...` in the same bump heap. A list
   value is a pointer, but the ownership checker allows only one live name for
   it, so `let b be a` moves the list and `copy of a` makes a new one. Item and
-  bounds checks happen in the runtime helper `array_get` / `array_set`.
+  bounds checks happen in the runtime helper `array_get` / `array_set`;
+  `array_add` copies the list one item longer and leaves the old block behind.
 - Text compares byte by byte (unsigned), then by length, so `"b"` is more than
   `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order. Lists do
   not compare yet.
@@ -305,9 +308,10 @@ Honest list, so the docs don't lie:
 - There is no borrow checker and no shared borrowing: a value has one owner at
   a time, and `copy of` deep-copies text and lists. That is simpler than Rust,
   and it rules out aliasing bugs by refusing to have aliases at all.
-- Lists are homogeneous and flat: no nested lists, and no `push`, `pop`, or
-  `remove`. Their contents can be replaced with `set item`, but the list itself
-  has a fixed length.
+- Lists are homogeneous and flat: no nested lists, and no `pop` or `remove`.
+  Their contents can be replaced with `set item`, and `add VALUE to LIST`
+  appends an item by copying the list to fresh heap space. There is no
+  capacity headroom, so each `add` allocates.
 - Imports are textual inclusion with one global namespace. There are no module
   namespaces, selective imports, or aliases, so modules prefix their names
   (`text_`, `math_`).
