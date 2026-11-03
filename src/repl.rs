@@ -63,6 +63,8 @@ fn quote(bytes: &[u8]) -> String {
 enum Flow {
     Normal,
     Return(Value),
+    Break,
+    Continue,
 }
 
 struct Func {
@@ -129,6 +131,20 @@ impl Session {
                 Ok(Flow::Return(_)) => {
                     result = Err(format!(
                         "line {}: 'give back' only works inside a function",
+                        stmt.line()
+                    ));
+                    break;
+                }
+                Ok(Flow::Break) => {
+                    result = Err(format!(
+                        "line {}: 'break' only works inside a loop",
+                        stmt.line()
+                    ));
+                    break;
+                }
+                Ok(Flow::Continue) => {
+                    result = Err(format!(
+                        "line {}: 'continue' only works inside a loop",
                         stmt.line()
                     ));
                     break;
@@ -238,8 +254,10 @@ impl Session {
                 let count = self.eval_int(count, env)?;
                 let mut done = 0i64;
                 while done < count {
-                    if let Flow::Return(v) = self.exec_block(body, env)? {
-                        return Ok(Flow::Return(v));
+                    match self.exec_block(body, env)? {
+                        Flow::Normal | Flow::Continue => {}
+                        Flow::Break => break,
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
                     }
                     if done == i64::MAX {
                         break;
@@ -252,11 +270,11 @@ impl Session {
                 let value = self.eval(cond, env)?;
                 match value {
                     Value::Bool(false) => return Ok(Flow::Normal),
-                    Value::Bool(true) => {
-                        if let Flow::Return(v) = self.exec_block(body, env)? {
-                            return Ok(Flow::Return(v));
-                        }
-                    }
+                    Value::Bool(true) => match self.exec_block(body, env)? {
+                        Flow::Normal | Flow::Continue => {}
+                        Flow::Break => return Ok(Flow::Normal),
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                    },
                     other => {
                         return Err(format!(
                             "line {}: 'while' needs a condition that is true or false, but this is {}",
@@ -296,6 +314,8 @@ impl Session {
                 self.line
             )),
             Stmt::GiveBack(e, _) => Ok(Flow::Return(self.eval(e, env)?)),
+            Stmt::Break(_) => Ok(Flow::Break),
+            Stmt::Continue(_) => Ok(Flow::Continue),
             Stmt::Expr(e, _) => {
                 let value = self.eval(e, env)?;
                 if value != Value::Nothing {
@@ -336,17 +356,17 @@ impl Session {
         // The loop name lives only inside the body; put back what it meant.
         let previous = env.insert(name.to_string(), Value::Int(start));
         let mut i = start;
-        let mut flow = Flow::Normal;
         loop {
             if i > end {
                 break;
             }
             env.insert(name.to_string(), Value::Int(i));
             match self.exec_block(body, env) {
-                Ok(Flow::Normal) => {}
-                Ok(f) => {
-                    flow = f;
-                    break;
+                Ok(Flow::Normal) | Ok(Flow::Continue) => {}
+                Ok(Flow::Break) => break,
+                Ok(flow) => {
+                    restore(env, name, previous);
+                    return Ok(flow);
                 }
                 Err(e) => {
                     restore(env, name, previous);
@@ -359,7 +379,7 @@ impl Session {
             i += 1;
         }
         restore(env, name, previous);
-        Ok(flow)
+        Ok(Flow::Normal)
     }
 
     fn exec_for_each_in(
@@ -383,7 +403,6 @@ impl Session {
         // The loop name lives only inside the body; put back what it meant.
         let previous = env.insert(name.to_string(), Value::Nothing);
         let mut i = 0usize;
-        let mut flow = Flow::Normal;
         loop {
             let len = items.borrow().len();
             if i >= len {
@@ -392,10 +411,11 @@ impl Session {
             let value = items.borrow()[i].clone();
             env.insert(name.to_string(), value);
             match self.exec_block(body, env) {
-                Ok(Flow::Normal) => {}
-                Ok(f) => {
-                    flow = f;
-                    break;
+                Ok(Flow::Normal) | Ok(Flow::Continue) => {}
+                Ok(Flow::Break) => break,
+                Ok(flow) => {
+                    restore(env, name, previous);
+                    return Ok(flow);
                 }
                 Err(e) => {
                     restore(env, name, previous);
@@ -405,7 +425,7 @@ impl Session {
             i += 1;
         }
         restore(env, name, previous);
-        Ok(flow)
+        Ok(Flow::Normal)
     }
 
     // ---- expressions -----------------------------------------------------
@@ -678,6 +698,13 @@ impl Session {
                 Ok(Flow::Normal) => {}
                 Ok(Flow::Return(value)) => {
                     result = Ok(value);
+                    break;
+                }
+                Ok(Flow::Break) | Ok(Flow::Continue) => {
+                    result = Err(format!(
+                        "line {}: that control word only works inside a loop",
+                        self.line
+                    ));
                     break;
                 }
                 Err(e) => {

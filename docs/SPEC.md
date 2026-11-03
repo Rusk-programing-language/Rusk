@@ -353,6 +353,28 @@ the loop name has the list's item kind. The name only exists inside the body,
 just like the range form. Changing an item inside the loop is visible on the
 next iteration, because the loop reads from the same list.
 
+`break` leaves the nearest enclosing loop immediately:
+
+```rusk
+for each word in ["rye", "wheat", "spelt"]:
+    if word is "wheat":
+        break
+    say word            # rye
+```
+
+`continue` skips the rest of the body and starts the next turn:
+
+```rusk
+for each n from 1 to 5:
+    if n is 3:
+        continue
+    say n               # 1, 2, 4, 5
+```
+
+Both only work inside a loop, and both bind to the innermost loop. In a
+`repeat` or `for each`, `continue` still advances the counter before the next
+turn.
+
 ## 10. Functions
 
 ```rusk

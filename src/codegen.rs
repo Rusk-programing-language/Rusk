@@ -132,6 +132,16 @@ struct Codegen {
     line: usize,
     /// Interned sentence printed when the heap runs out of room.
     heap_error: usize,
+    /// Labels for the loops we are inside, innermost last.
+    loops: Vec<LoopLabels>,
+}
+
+#[derive(Clone)]
+struct LoopLabels {
+    /// Where `break` jumps: the instruction after the loop.
+    after: String,
+    /// Where `continue` jumps: this loop's next-turn label.
+    next: String,
 }
 
 impl Codegen {
@@ -146,6 +156,7 @@ impl Codegen {
             strings: HashMap::new(),
             line: 0,
             heap_error: 0,
+            loops: Vec::new(),
         }
     }
 
@@ -291,6 +302,28 @@ impl Codegen {
                 .for_each_in(name, array, body)
                 .map_err(|m| at(*line, m)),
             Stmt::GiveBack(e, line) => self.give_back(e).map_err(|m| at(*line, m)),
+            Stmt::Break(line) => match self.loops.last() {
+                Some(labels) => {
+                    let after = labels.after.clone();
+                    self.asm.b_label(&after);
+                    Ok(())
+                }
+                None => Err(at(
+                    *line,
+                    "'break' only works inside a loop".to_string(),
+                )),
+            },
+            Stmt::Continue(line) => match self.loops.last() {
+                Some(labels) => {
+                    let next = labels.next.clone();
+                    self.asm.b_label(&next);
+                    Ok(())
+                }
+                None => Err(at(
+                    *line,
+                    "'continue' only works inside a loop".to_string(),
+                )),
+            },
             Stmt::Expr(e, line) => self.expr(e).map(|_| ()).map_err(|m| at(*line, m)),
             Stmt::FuncDef { line, .. } => Err(at(
                 *line,
@@ -402,7 +435,12 @@ impl Codegen {
         self.store_var(&counter);
 
         let l_loop = self.new_label("loop");
+        let l_next = self.new_label("next");
         let l_end = self.new_label("after");
+        self.loops.push(LoopLabels {
+            after: l_end.clone(),
+            next: l_next.clone(),
+        });
         self.asm.label(&l_loop);
         self.load_var(&counter);
         self.asm.cmp_reg_reg(X0, XZR);
@@ -410,11 +448,13 @@ impl Codegen {
         for s in body {
             self.stmt(s)?;
         }
+        self.asm.label(&l_next);
         self.load_var(&counter);
         self.asm.mov_imm64(X2, 1);
         self.asm.sub_reg_reg(X0, X0, X2);
         self.store_var(&counter);
         self.asm.b_label(&l_loop);
+        self.loops.pop();
         self.asm.label(&l_end);
         Ok(())
     }
@@ -422,6 +462,10 @@ impl Codegen {
     fn while_(&mut self, cond: &Expr, body: &[Stmt]) -> Result<(), String> {
         let l_loop = self.new_label("while");
         let l_end = self.new_label("after");
+        self.loops.push(LoopLabels {
+            after: l_end.clone(),
+            next: l_loop.clone(),
+        });
         self.asm.label(&l_loop);
         let ty = self.expr(cond)?;
         if ty != Ty::Bool {
@@ -435,6 +479,7 @@ impl Codegen {
             self.stmt(s)?;
         }
         self.asm.b_label(&l_loop);
+        self.loops.pop();
         self.asm.label(&l_end);
         Ok(())
     }
@@ -469,7 +514,12 @@ impl Codegen {
         let previous = self.vars.insert(name.to_string(), item.clone());
 
         let l_loop = self.new_label("each");
+        let l_next = self.new_label("next");
         let l_end = self.new_label("after");
+        self.loops.push(LoopLabels {
+            after: l_end.clone(),
+            next: l_next.clone(),
+        });
         self.asm.label(&l_loop);
         self.load_var(&item);
         self.asm.mov_reg_reg(X2, X0);
@@ -479,11 +529,13 @@ impl Codegen {
         for s in body {
             self.stmt(s)?;
         }
+        self.asm.label(&l_next);
         self.load_var(&item);
         self.asm.mov_imm64(X2, 1);
         self.asm.add_reg_reg(X0, X0, X2);
         self.store_var(&item);
         self.asm.b_label(&l_loop);
+        self.loops.pop();
         self.asm.label(&l_end);
 
         match previous {
@@ -513,7 +565,12 @@ impl Codegen {
         let previous = self.vars.insert(name.to_string(), item.clone());
 
         let l_loop = self.new_label("each_in");
+        let l_next = self.new_label("next");
         let l_end = self.new_label("after");
+        self.loops.push(LoopLabels {
+            after: l_end.clone(),
+            next: l_next.clone(),
+        });
         self.asm.label(&l_loop);
         self.load_var(&index);
         self.asm.mov_reg_reg(X2, X0);
@@ -541,11 +598,13 @@ impl Codegen {
             self.stmt(s)?;
         }
 
+        self.asm.label(&l_next);
         self.load_var(&index);
         self.asm.mov_imm64(X2, 1);
         self.asm.add_reg_reg(X0, X0, X2);
         self.store_var(&index);
         self.asm.b_label(&l_loop);
+        self.loops.pop();
         self.asm.label(&l_end);
 
         match previous {

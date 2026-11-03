@@ -278,6 +278,84 @@ for each j from 3 to 1:
 }
 
 #[test]
+fn break_leaves_a_repeat_loop_early() {
+    let src = "\
+repeat 5 times:
+    say \"turn\"
+    break
+say \"done\"
+";
+    let (stdout, _) = run("break_repeat", src);
+    assert_eq!(stdout, "turn\ndone\n");
+}
+
+#[test]
+fn continue_skips_the_rest_of_a_loop_body() {
+    let src = "\
+for each i from 1 to 5:
+    if i is 3:
+        continue
+    say i
+";
+    let (stdout, _) = run("continue_each", src);
+    assert_eq!(stdout, "1\n2\n4\n5\n");
+}
+
+#[test]
+fn break_works_in_a_while_loop() {
+    let src = "\
+let n be 0
+while true:
+    if n is 2:
+        break
+    say n
+    set n to n + 1
+say \"stopped\"
+";
+    let (stdout, _) = run("break_while", src);
+    assert_eq!(stdout, "0\n1\nstopped\n");
+}
+
+#[test]
+fn break_leaves_a_for_each_in_loop_early() {
+    let src = "\
+let xs be [\"a\", \"b\", \"c\"]
+for each word in xs:
+    if word is \"b\":
+        break
+    say word
+";
+    let (stdout, _) = run("break_each_in", src);
+    assert_eq!(stdout, "a\n");
+}
+
+#[test]
+fn break_only_leaves_the_innermost_loop() {
+    let src = "\
+for each i from 1 to 2:
+    for each j from 1 to 3:
+        if j is 2:
+            break
+        say j
+    say i
+";
+    let (stdout, _) = run("break_nested", src);
+    assert_eq!(stdout, "1\n1\n1\n2\n");
+}
+
+#[test]
+fn break_outside_a_loop_is_rejected() {
+    let err = rusk::bake("break\n").unwrap_err();
+    assert!(err.contains("only works inside a loop"), "{err}");
+}
+
+#[test]
+fn continue_outside_a_loop_is_rejected() {
+    let err = rusk::bake("continue\n").unwrap_err();
+    assert!(err.contains("only works inside a loop"), "{err}");
+}
+
+#[test]
 fn otherwise_if_chains() {
     let src = "\
 to grade with score as a number:

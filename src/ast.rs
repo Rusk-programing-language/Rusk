@@ -188,6 +188,10 @@ pub enum Stmt {
         line: usize,
     },
     GiveBack(Expr, usize),
+    /// `break` — leave the nearest enclosing loop.
+    Break(usize),
+    /// `continue` — skip to the next turn of the nearest enclosing loop.
+    Continue(usize),
     Expr(Expr, usize),
 }
 
@@ -213,6 +217,8 @@ impl Stmt {
             | Stmt::FuncDef { line, .. }
             | Stmt::Import { line, .. }
             | Stmt::GiveBack(_, line)
+            | Stmt::Break(line)
+            | Stmt::Continue(line)
             | Stmt::Expr(_, line) => *line,
         }
     }

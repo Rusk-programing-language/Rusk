@@ -87,20 +87,34 @@ struct Checker<'a> {
 }
 
 impl<'a> Checker<'a> {
-    /// Analyze a sequence. `Ok(false)` means every path through it leaves the
-    /// function, so following statements are unreachable.
-    fn block(&mut self, stmts: &[Stmt], scope: &mut Scope) -> Result<bool, String> {
+    /// Analyze a sequence.
+    fn block(&mut self, stmts: &[Stmt], scope: &mut Scope) -> Result<Outcome, String> {
+        let mut breaks = None;
+        let mut continues = None;
         for stmt in stmts {
-            if !self.stmt(stmt, scope)? {
-                return Ok(false);
+            let out = self.stmt(stmt, scope)?;
+            breaks = join_opt(breaks, out.breaks);
+            continues = join_opt(continues, out.continues);
+            if !out.falls {
+                return Ok(Outcome {
+                    falls: false,
+                    breaks,
+                    continues,
+                });
             }
         }
-        Ok(true)
+        Ok(Outcome {
+            falls: true,
+            breaks,
+            continues,
+        })
     }
 
-    fn stmt(&mut self, stmt: &Stmt, scope: &mut Scope) -> Result<bool, String> {
+    fn stmt(&mut self, stmt: &Stmt, scope: &mut Scope) -> Result<Outcome, String> {
         match stmt {
-            Stmt::Say(e, line) => Self::line_at(*line, self.expr(e, scope, Use::Read))?,
+            Stmt::Say(e, line) => {
+                Self::line_at(*line, self.expr(e, scope, Use::Read))?;
+            }
             Stmt::Let { name, value, line } => {
                 let ty = self.ty_of(value, scope)?;
                 Self::line_at(*line, self.expr(value, scope, Use::Move))?;
@@ -160,14 +174,21 @@ impl<'a> Checker<'a> {
             } => {
                 Self::line_at(*line, self.expr(cond, scope, Use::Read))?;
                 let mut then_scope = scope.clone();
-                let then_falls = self.block(then, &mut then_scope)?;
+                let then_out = self.block(then, &mut then_scope)?;
                 let mut other_scope = scope.clone();
-                let other_falls = self.block(other, &mut other_scope)?;
+                let other_out = self.block(other, &mut other_scope)?;
                 *scope = merge(
                     scope,
-                    &[(then_scope, then_falls), (other_scope, other_falls)],
+                    &[
+                        (then_scope, then_out.falls),
+                        (other_scope, other_out.falls),
+                    ],
                 );
-                return Ok(then_falls || other_falls);
+                return Ok(Outcome {
+                    falls: then_out.falls || other_out.falls,
+                    breaks: join_opt(then_out.breaks, other_out.breaks),
+                    continues: join_opt(then_out.continues, other_out.continues),
+                });
             }
             Stmt::Repeat { count, body, line } => {
                 Self::line_at(*line, self.expr(count, scope, Use::Read))?;
@@ -232,21 +253,47 @@ impl<'a> Checker<'a> {
             }
             Stmt::GiveBack(e, line) => {
                 Self::line_at(*line, self.expr(e, scope, Use::Move))?;
-                return Ok(false);
+                return Ok(Outcome::returns());
+            }
+            Stmt::Break(_) => {
+                return Ok(Outcome {
+                    falls: false,
+                    breaks: Some(scope.clone()),
+                    continues: None,
+                });
+            }
+            Stmt::Continue(_) => {
+                return Ok(Outcome {
+                    falls: false,
+                    breaks: None,
+                    continues: Some(scope.clone()),
+                });
             }
             Stmt::Expr(e, line) => Self::line_at(*line, self.expr(e, scope, Use::Read))?,
         }
-        Ok(true)
+        Ok(Outcome::falls())
     }
 
-    /// Analyze a loop body once and merge its effects into the enclosing scope.
+    /// Analyze a loop body once and merge every way it can leave into the
+    /// enclosing scope. A `break` or `continue` ends one path but its moves
+    /// still happened, so those paths have to join the state after the loop.
     fn loop_body(&mut self, body: &[Stmt], scope: &mut Scope) -> Result<(), String> {
-        let mut body_scope = scope.clone();
-        let falls = self.block(body, &mut body_scope)?;
-        *scope = merge(scope, &[(body_scope, falls)]);
+        let base = scope.clone();
+        let mut body_scope = base.clone();
+        let out = self.block(body, &mut body_scope)?;
+        let mut arms: Vec<(Scope, bool)> = vec![(base.clone(), true)];
+        if out.falls {
+            arms.push((body_scope, true));
+        }
+        if let Some(exit) = out.breaks {
+            arms.push((exit, true));
+        }
+        if let Some(exit) = out.continues {
+            arms.push((exit, true));
+        }
+        *scope = merge(&base, &arms);
         Ok(())
     }
-
     fn expr(&mut self, e: &Expr, scope: &mut Scope, use_: Use) -> Result<(), String> {
         match e {
             Expr::Int(_) | Expr::Str(_) | Expr::Bool(_) | Expr::EmptyArray(_) => {}
@@ -332,6 +379,39 @@ enum Use {
     Move,
 }
 
+/// How a statement or block can leave. `breaks` and `continues` hold the state
+/// at each such point so a loop can merge the moves that happened there.
+struct Outcome {
+    falls: bool,
+    breaks: Option<Scope>,
+    continues: Option<Scope>,
+}
+
+impl Outcome {
+    fn falls() -> Self {
+        Outcome {
+            falls: true,
+            breaks: None,
+            continues: None,
+        }
+    }
+
+    fn returns() -> Self {
+        Outcome {
+            falls: false,
+            breaks: None,
+            continues: None,
+        }
+    }
+}
+
+fn join_opt(a: Option<Scope>, b: Option<Scope>) -> Option<Scope> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some(a), Some(b)) => Some(merge(&a, &[(a.clone(), true), (b, true)])),
+    }
+}
+
 fn restore(scope: &mut Scope, name: &str, previous: Option<Slot>) {
     match previous {
         Some(slot) => {
@@ -375,7 +455,10 @@ fn merge(base: &Scope, arms: &[(Scope, bool)]) -> Scope {
         }
     }
     for name in new_names {
-        let first = falling[0][name];
+        let first = *falling
+            .iter()
+            .find_map(|arm| arm.get(name))
+            .expect("a new name comes from a falling arm");
         let everywhere_alive = falling.len() == arms.len()
             && falling.iter().all(|arm| {
                 matches!(
@@ -623,5 +706,62 @@ say answer
 ",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_break_before_a_move_leaves_the_value_alive() {
+        check_src(
+            "\
+let a be \"hi\"
+repeat 2 times:
+    break
+    let b be a
+say a
+",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_move_before_a_break_poisons_the_name_after_the_loop() {
+        let message = err(
+            "\
+let a be \"hi\"
+repeat 2 times:
+    let b be a
+    break
+say a
+",
+        );
+        assert!(message.contains("moved already"), "{message}");
+    }
+
+    #[test]
+    fn a_move_before_a_continue_poisons_the_name_after_the_loop() {
+        let message = err(
+            "\
+let a be \"hi\"
+repeat 2 times:
+    let b be a
+    continue
+say a
+",
+        );
+        assert!(message.contains("moved already"), "{message}");
+    }
+
+    #[test]
+    fn a_break_inside_one_branch_still_poisons_the_name() {
+        let message = err(
+            "\
+let a be \"hi\"
+repeat 2 times:
+    if true:
+        let b be a
+        break
+say a
+",
+        );
+        assert!(message.contains("moved already"), "{message}");
     }
 }

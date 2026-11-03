@@ -31,7 +31,7 @@ division by zero, heap exhaustion, and runaway recursion as Rusk errors
 instead of crashing. Everything from v0.5 — constants, homogeneous lists,
 `import`, text operations, and the interactive session — still works. The
 compiler is a lexer, parser, import expander, type checker, ownership checker,
-AArch64 code generator, and ELF writer, with 127 tests. It targets
+AArch64 code generator, and ELF writer, with 138 tests. It targets
 **AArch64 Linux** only.
 
 ## Quick start
@@ -68,6 +68,14 @@ while temperature is more than 150:
     set temperature to temperature - 20
 
 for each slice from 1 to 3:
+    say slice
+
+# break leaves the loop; continue jumps to the next turn
+for each slice from 1 to 5:
+    if slice is 3:
+        continue
+    if slice is 5:
+        break
     say slice
 
 # arithmetic and truth

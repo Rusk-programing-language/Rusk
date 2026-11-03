@@ -7,7 +7,7 @@
 //! import_stmt:= "import" (TEXT | NAME) NEWLINE
 //! stmt       := say_stmt | let_stmt | const_stmt | set_stmt | if_stmt
 //!             | repeat_stmt | while_stmt | for_each_stmt | func_def
-//!             | give_back | expr_stmt
+//!             | give_back | break_stmt | continue_stmt | expr_stmt
 //! say_stmt   := "say" expr NEWLINE
 //! let_stmt   := ("let" | "variable") NAME "be" expr NEWLINE
 //! const_stmt := "constant" NAME "be" expr NEWLINE
@@ -239,6 +239,18 @@ impl Parser {
             let value = self.expr()?;
             self.end_of_line()?;
             return Ok(Stmt::Say(value, line));
+        }
+
+        if self.is_word("break") {
+            self.bump();
+            self.end_of_line()?;
+            return Ok(Stmt::Break(line));
+        }
+
+        if self.is_word("continue") {
+            self.bump();
+            self.end_of_line()?;
+            return Ok(Stmt::Continue(line));
         }
 
         if self.is_word("let") || self.is_word("variable") {

@@ -76,7 +76,7 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
                 );
             }
             let mut fresh: Option<Ty> = None;
-            infer_stmts(body, &mut scope, &sigs, &mut fresh, true)?;
+            infer_stmts(body, &mut scope, &sigs, &mut fresh, true, 0)?;
             if fresh.is_some() {
                 saw_return.insert((*name).clone(), true);
             }
@@ -104,6 +104,7 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
             &sigs,
             &mut stray,
             false,
+            0,
         )?;
     }
 
@@ -152,6 +153,7 @@ fn infer_stmts(
     sigs: &Sigs,
     out: &mut Option<Ty>,
     allow_return: bool,
+    loops: usize,
 ) -> Result<(), String> {
     for stmt in stmts {
         match stmt {
@@ -275,8 +277,8 @@ fn infer_stmts(
                         ));
                     }
                 }
-                infer_stmts(then, scope, sigs, out, allow_return)?;
-                infer_stmts(other, scope, sigs, out, allow_return)?;
+                infer_stmts(then, scope, sigs, out, allow_return, loops)?;
+                infer_stmts(other, scope, sigs, out, allow_return, loops)?;
             }
             Stmt::Repeat { count, body, line } => {
                 let t = type_of(count, scope, sigs).map_err(|m| at(*line, m))?;
@@ -288,7 +290,7 @@ fn infer_stmts(
                         ));
                     }
                 }
-                infer_stmts(body, scope, sigs, out, allow_return)?;
+                infer_stmts(body, scope, sigs, out, allow_return, loops + 1)?;
             }
             Stmt::While { cond, body, line } => {
                 let t = type_of(cond, scope, sigs).map_err(|m| at(*line, m))?;
@@ -302,7 +304,7 @@ fn infer_stmts(
                         ));
                     }
                 }
-                infer_stmts(body, scope, sigs, out, allow_return)?;
+                infer_stmts(body, scope, sigs, out, allow_return, loops + 1)?;
             }
             Stmt::ForEach {
                 name,
@@ -329,7 +331,7 @@ fn infer_stmts(
                         constant: false,
                     },
                 );
-                infer_stmts(body, scope, sigs, out, allow_return)?;
+                infer_stmts(body, scope, sigs, out, allow_return, loops + 1)?;
                 match previous {
                     Some(t) => {
                         scope.insert(name.clone(), t);
@@ -363,7 +365,7 @@ fn infer_stmts(
                         constant: false,
                     },
                 );
-                infer_stmts(body, scope, sigs, out, allow_return)?;
+                infer_stmts(body, scope, sigs, out, allow_return, loops + 1)?;
                 match previous {
                     Some(t) => {
                         scope.insert(name.clone(), t);
@@ -391,6 +393,19 @@ fn infer_stmts(
                         }
                         _ => *out = Some(t),
                     }
+                }
+            }
+            Stmt::Break(line) => {
+                if loops == 0 {
+                    return Err(at(*line, "'break' only works inside a loop".to_string()));
+                }
+            }
+            Stmt::Continue(line) => {
+                if loops == 0 {
+                    return Err(at(
+                        *line,
+                        "'continue' only works inside a loop".to_string(),
+                    ));
                 }
             }
             Stmt::FuncDef { line, .. } => {
