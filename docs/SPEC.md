@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.5
+# The Rusk Language — Specification v0.6
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.5
+emits native machine code directly. This document describes exactly what v0.6
 accepts and what it guarantees.
 
-Status: **v0.5, AArch64 Linux**. Everything here is implemented and tested;
+Status: **v0.6, AArch64 Linux**. Everything here is implemented and tested;
 anything not here does not exist yet.
 
 ---
@@ -37,7 +37,11 @@ Blank lines are ignored.
 | Truth | `true`, `false` | The result of comparisons and `not` |
 | List | `[1, 2, 3]`, `["a", "b"]`, `[true, false]` | Fixed length, one kind of item, positions count from 1 |
 
-Numbers are integers only. There is no floating point in v0.5.
+Numbers are integers only. There is no floating point in v0.6.
+
+Text and lists live on a heap and are **owned**: a name holds one of them at a
+time. Ownership is what makes the language memory-safe without a garbage
+collector; see §4.1.
 
 ## 4. Naming things
 
@@ -61,6 +65,46 @@ Names may contain letters, digits, and underscores, and may not start with a
 digit. Keywords are not reserved — `say`, `let`, `if` and the rest are matched
 by position, so a variable literally named `say` is legal (if confusing).
 
+### 4.1 Ownership and copying
+
+Text and lists are the two **owned** kinds. Numbers and truth values are plain
+machine words and are copied freely. For an owned value:
+
+- `let NAME be VALUE`, `constant NAME be VALUE`, `set NAME to VALUE`, passing
+  an argument, writing an item into a list, and `give back` all **move** the
+  value. The old name is empty afterwards.
+- Using a name after its value has moved is a **compile error**:
+
+  ```console
+  burnt: in app.rk: line 3: 'greeting' was moved already — 'copy of greeting'
+  keeps the original
+  ```
+
+- `copy of VALUE` makes a fresh deep copy. The source stays usable. Copying a
+  list of text copies the list and every text item in it.
+- A `constant` is read-only. It can be read but not moved; copy it instead.
+- A move inside one arm of an `if` counts as a move after the `if`, because
+  that arm might have run. A `give back` ends the path, so it does not poison
+  the code that falls through. A move inside a loop body counts as a move
+  after the loop, even if the loop might run zero times.
+
+```rusk
+let greeting be "hello"
+let echoed be greeting        # moves greeting
+say echoed                    # hello
+# say greeting               # compile error
+
+let words be ["rye", "wheat"]
+let mine be copy of words     # an independent list
+say words                     # [rye, wheat]
+say mine                      # [rye, wheat]
+```
+
+Rusk has no null, no pointers, and no threads. A value cannot be observed
+through two names, so there is no dangling reference, no double free, and no
+shared mutable state to race over. The checker runs before any machine code is
+produced; it is not a runtime cost.
+
 ## 5. Saying things
 
 ```rusk
@@ -83,7 +127,7 @@ Operator precedence, loosest first:
 | Sum | `+`, `-` | left |
 | Product | `*`, `/` | left |
 | Unary | `-`, `not` | right |
-| Primary | number, text, truth, list, name, call, text in pieces, list item, `( ... )` | — |
+| Primary | number, text, truth, list, name, call, text in pieces, list item, `copy of`, `( ... )` | — |
 
 `+` adds two numbers or joins two pieces of text. `-`, `*`, and `/` are numbers
 only. A bare `is` means `is equal to`: `if name is "Rusk":`.
@@ -215,9 +259,9 @@ Rules:
   burnt: line 4: an item outside the list
   ```
 
-- A list value is a handle. `let ys be xs` makes `ys` another name for the same
-  items, so `set item 1 of ys to 0` is visible through `xs` too. The list itself
-  cannot grow or shrink.
+- A list value is owned by one name at a time. `let ys be xs` moves the list
+  from `xs` to `ys`; `ys` and `xs` never alias. Use `let ys be copy of xs` when
+  you want two independent lists. The list itself cannot grow or shrink.
 - Lists do not compare with `is` or the ordering operators yet.
 
 ## 7. Blocks
@@ -411,7 +455,11 @@ say "Hello, world."
 
 ```console
 $ rusk
-Rusk 0.5.0 — an English-like language
+░█▀▄░█░█░█▀▀░█░█
+░█▀▄░█░█░▀▀█░█▀▄
+░▀░▀░▀▀▀░▀▀▀░▀░▀
+
+Rusk 0.6.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -439,12 +487,12 @@ finishes it.
 ```
 
 The session is a tree-walking evaluator over the same AST, not the AArch64
-backend. Every submission is still lexed, parsed, and type checked against the
-whole session before any of it runs, so a session accepts the same programs the
-compiler does. Text operations use byte positions here too, and lists share
-their items between names, matching the baked behavior. `import` works at the
-prompt (relative to the current directory); inside `:load`, relative imports
-resolve from the loaded file's directory.
+backend. Every submission is still lexed, parsed, type checked, and ownership
+checked against the whole session before any of it runs, so a session accepts
+the same programs the compiler does. Text operations use byte positions here
+too, and a moved name is empty here just as it is in a baked program. `import`
+works at the prompt (relative to the current directory); inside `:load`,
+relative imports resolve from the loaded file's directory.
 
 When stdin is not a terminal, the banner and prompts are omitted, so
 `rusk < program.rk` works as a pipe. The session is not a `.rk` file compiler:
@@ -469,6 +517,24 @@ exit with status 1:
 burnt: line 3: a letter outside the text
 ```
 
+Ownership mistakes are compile errors, and they point at the use that came
+after the move:
+
+```console
+burnt: in app.rk: line 3: 'greeting' was moved already — 'copy of greeting'
+keeps the original
+```
+
+The runtime also turns machine-level failures into Rusk sentences instead of
+crashes:
+
+| Failure | Message | Status |
+|---|---|---|
+| item or letter out of range | `burnt: line N: a letter outside the text` | 1 |
+| division by zero | `burnt: line N: I can't divide by zero` | 1 |
+| heap exhausted | `burnt: the program ran out of memory` | 1 |
+| recursion deeper than 1000 calls | `burnt: the program recursed too deeply` | 1 |
+
 ## 15. Compilation model
 
 `rusk build file.rk` writes an executable next to the source with the extension
@@ -492,9 +558,11 @@ in `X29`. Each frame stores the caller's `X29`/`X30` at `sp+0`/`sp+8`, then its
 parameters and locals above that, so recursion gets a fresh set of slots.
 
 A list is a pointer to `[len: u64][item: i64]...`, allocated from the same bump
-heap as joined text. Assigning a list copies the pointer, which is why two names
-can share one list. `array_get` and `array_set` check the 1-based index against
-the stored length and report `an item outside the list` on failure.
+heap as joined text. The ownership pass guarantees that only one live name
+refers to a list, so assigning a list never creates an alias; `copy of` makes a
+new list and copies every item. `array_get` and `array_set` check the 1-based
+index against the stored length and report `an item outside the list` on
+failure.
 
 ### Guarantees
 
@@ -503,20 +571,22 @@ the stored length and report `an item outside the list` on failure.
 - Baking is deterministic: the same source produces byte-identical output.
 - The compiler never writes a partial executable; failures leave the target
   untouched.
+- A baked program never uses a moved value, never reads or writes outside a
+  list, never divides by zero silently, never overruns the heap, and never
+  runs off the process stack. These are checked statically where possible and
+  guarded at runtime otherwise.
 
 ### Known limits of the backend
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.5, worth relocating later.
-- Division by zero traps (SIGFPE analogue) rather than producing a Rusk-level
-  error.
+  collide. Fine for v0.6, worth relocating later.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
 - Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
-  is reclaimed, and running past the end of the heap is not detected.
+  is reclaimed; exhausting it is reported, but memory is not reused.
+- Ownership is single-owner, not borrowing: there is no way to lend a value to
+  two readers at once. `copy of` is the escape hatch.
 - Lists have a fixed length: there is no append, insert, or remove.
-- Recursion depth is bounded only by the process stack; runaway recursion dies
-  rather than reporting an error.
 - At most 8 parameters per function; no function values, closures, or
   overloading.
 - Imports are textual inclusion in one global namespace; there are no module
@@ -525,6 +595,7 @@ the stored length and report `an item outside the list` on failure.
 ## 16. Roadmap (not implemented)
 
 - growing lists (append, insert, remove) and nested lists
+- borrowing and shared read-only views
 - module namespaces and selective imports
 - function values and closures
 - an x86-64 encoder behind the same AST and codegen

@@ -558,6 +558,13 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             Ok(elem.map(|e| Ty::Array(e)))
         }
         Expr::EmptyArray(elem) => Ok(Some(Ty::Array(*elem))),
+        Expr::Copy(inner) => {
+            let t = type_of(inner, scope, sigs)?;
+            match t {
+                Some(Ty::Nothing) => Err("there's nothing to copy — that function gives nothing back".to_string()),
+                other => Ok(other),
+            }
+        }
         Expr::Item(index, array) => {
             let it = type_of(index, scope, sigs)?;
             if let Some(t) = it {
@@ -630,6 +637,43 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }
         }
     }
+}
+
+/// Type one expression against already-known variable kinds and signatures.
+///
+/// The ownership pass runs after `check`, so it knows every name's kind but
+/// still needs to ask the same rules about a value. This is a thin public
+/// wrapper around the ordinary checker.
+pub fn type_of_with(
+    e: &Expr,
+    vars: &HashMap<String, Ty>,
+    sigs: &HashMap<String, Sig>,
+) -> Result<Option<Ty>, String> {
+    let scope: Scope = vars
+        .iter()
+        .map(|(name, ty)| {
+            (
+                name.clone(),
+                Scoped {
+                    ty: Some(*ty),
+                    constant: false,
+                },
+            )
+        })
+        .collect();
+    let inferred: Sigs = sigs
+        .iter()
+        .map(|(name, sig)| {
+            (
+                name.clone(),
+                SigInfer {
+                    params: sig.params.clone(),
+                    ret: Some(sig.ret),
+                },
+            )
+        })
+        .collect();
+    type_of(e, &scope, &inferred)
 }
 
 fn op_word(op: BinOp) -> &'static str {

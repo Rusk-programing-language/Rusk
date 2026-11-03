@@ -1,6 +1,6 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.5):
+//! Grammar (v0.6):
 //!
 //! ```text
 //! program    := (import_stmt | stmt)*
@@ -30,6 +30,7 @@
 //!             | "letter" expr "of" primary
 //!             | "part" expr "to" expr "of" primary
 //!             | "item" expr "of" primary
+//!             | "copy" "of" primary
 //!             | "[" (expr ("," expr)*)? "]"
 //!             | ("an")? "empty" "list" "of" TYPE
 //!             | "(" expr ")"
@@ -377,7 +378,9 @@ impl Parser {
                 }
                 if word == "truth" {
                     self.bump();
-                    self.eat_word("values");
+                    if !self.eat_word("value") {
+                        self.eat_word("values");
+                    }
                     return Ok(Ty::Bool);
                 }
                 let ty = match word.as_str() {
@@ -605,6 +608,12 @@ impl Parser {
                     self.bump(); // "of"
                     let inner = self.primary()?;
                     return Ok(Expr::Length(Box::new(inner)));
+                }
+                if word == "copy" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
+                    self.bump(); // "copy"
+                    self.bump(); // "of"
+                    let inner = self.primary()?;
+                    return Ok(Expr::Copy(Box::new(inner)));
                 }
                 if word == "part" && self.starts_index() {
                     self.bump(); // "part"

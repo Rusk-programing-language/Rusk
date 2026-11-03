@@ -16,6 +16,7 @@ pub mod codegen;
 pub mod elf;
 pub mod imports;
 pub mod lexer;
+pub mod ownership;
 pub mod parser;
 pub mod repl;
 pub mod types;

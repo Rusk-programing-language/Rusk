@@ -33,6 +33,13 @@ const ITOA_CAPACITY: u64 = 32;
 const HEAP_PTR_OFFSET: u64 = 0x1000;
 const HEAP_START_OFFSET: u64 = 0x1_0000;
 const HEAP_SIZE: u64 = 0x10_0000;
+const HEAP_END: u64 = DATA_BASE + HEAP_START_OFFSET + HEAP_SIZE;
+/// Where the runtime keeps the current call depth.
+const DEPTH_OFFSET: u64 = 0x1800;
+/// Deepest call nesting the runtime will allow before it reports an error.
+const MAX_DEPTH: u64 = 1000;
+const HEAP_ERROR: &str = "burnt: the program ran out of memory\n";
+const DEPTH_ERROR: &str = "burnt: the program recursed too deeply\n";
 /// Frame slots start after the saved frame pointer and return address.
 const FRAME_HEADER: u64 = 16;
 
@@ -59,7 +66,9 @@ pub struct Baked {
 
 pub fn compile(program: &Program) -> Result<Baked, String> {
     let funcs = crate::types::check(program)?;
+    crate::ownership::check(program, &funcs)?;
     let mut cg = Codegen::new(funcs);
+    cg.heap_error = cg.intern(HEAP_ERROR);
 
     cg.asm.label("_start");
     // The text heap starts at a fixed spot; a bump pointer in the data area
@@ -96,6 +105,10 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     cg.emit_text_part();
     cg.emit_array_get();
     cg.emit_array_set();
+    cg.emit_text_copy();
+    cg.emit_array_copy_scalar();
+    cg.emit_array_copy_text();
+    cg.emit_heap_fail();
     cg.emit_runtime_fail();
 
     if cg.next_global * 8 > HEAP_PTR_OFFSET {
@@ -117,6 +130,8 @@ struct Codegen {
     strings: HashMap<String, usize>,
     /// The source line of the statement being compiled, for runtime errors.
     line: usize,
+    /// Interned sentence printed when the heap runs out of room.
+    heap_error: usize,
 }
 
 impl Codegen {
@@ -130,6 +145,7 @@ impl Codegen {
             label_counter: 0,
             strings: HashMap::new(),
             line: 0,
+            heap_error: 0,
         }
     }
 
@@ -184,6 +200,13 @@ impl Codegen {
     /// The sentence a runtime failure should print, tied to the current line.
     fn runtime_message(&self, what: &str) -> String {
         format!("burnt: line {}: {what}\n", self.line)
+    }
+
+    /// Fail with the heap message if `reg` has grown past the end of the heap.
+    fn emit_heap_check(&mut self, reg: u8) {
+        self.asm.mov_imm64(X8, HEAP_END);
+        self.asm.cmp_reg_reg(reg, X8);
+        self.asm.bcond_label(CC_GT, "heap_fail");
     }
 
     fn store_var(&mut self, var: &Var) {
@@ -584,6 +607,22 @@ impl Codegen {
         self.asm.str(X30, SP, 8);
         self.asm.add_imm(X29, SP, 0);
 
+        // Refuse to let recursion run into the process stack. The counter is
+        // global, so a deeply nested call reports a Rusk error instead of a
+        // segmentation fault.
+        let depth_ok = self.new_label("depth_ok");
+        self.asm.mov_imm64(X9, DATA_BASE + DEPTH_OFFSET);
+        self.asm.ldr(X10, X9, 0);
+        self.asm.mov_imm64(X11, MAX_DEPTH);
+        self.asm.cmp_reg_reg(X10, X11);
+        self.asm.bcond_label(CC_LT, &depth_ok);
+        let id = self.intern(DEPTH_ERROR);
+        self.asm.mov_abs(X0, id);
+        self.asm.b_label("runtime_fail");
+        self.asm.label(&depth_ok);
+        self.asm.add_imm(X10, X10, 1);
+        self.asm.str(X10, X9, 0);
+
         for (i, p) in params.iter().enumerate() {
             self.vars.insert(
                 p.name.clone(),
@@ -608,6 +647,11 @@ impl Codegen {
         // Falling off the end gives 0, so a procedure's result is harmless.
         self.asm.mov_imm64(X0, 0);
         self.asm.label(&ret_label);
+        // Give the depth counter back before tearing down the frame.
+        self.asm.mov_imm64(X1, DATA_BASE + DEPTH_OFFSET);
+        self.asm.ldr(X2, X1, 0);
+        self.asm.sub_imm(X2, X2, 1);
+        self.asm.str(X2, X1, 0);
         self.asm.add_imm(SP, X29, 0);
         self.asm.ldr(X29, SP, 0);
         self.asm.ldr(X30, SP, 8);
@@ -787,6 +831,7 @@ impl Codegen {
                 self.asm.ldr(X6, X5, 0);
                 self.asm.mov_imm64(X7, n * 8 + 8);
                 self.asm.add_reg_reg(X7, X6, X7);
+                self.emit_heap_check(X7);
                 self.asm.str(X7, X5, 0);
                 self.asm.mov_imm64(X7, n);
                 self.asm.str(X7, X6, 0);
@@ -802,6 +847,7 @@ impl Codegen {
                 self.asm.mov_imm64(X5, heap_ptr);
                 self.asm.ldr(X6, X5, 0);
                 self.asm.add_imm(X7, X6, 8);
+                self.emit_heap_check(X7);
                 self.asm.str(X7, X5, 0);
                 self.asm.movz_reg(X7, 0);
                 self.asm.str(X7, X6, 0);
@@ -827,6 +873,26 @@ impl Codegen {
                 self.asm.mov_abs(X4, id);
                 self.asm.bl_label("array_get");
                 Ok(elem.ty())
+            }
+            Expr::Copy(inner) => {
+                let ty = self.expr(inner)?;
+                match ty {
+                    Ty::Str => {
+                        self.asm.bl_label("text_copy");
+                        Ok(Ty::Str)
+                    }
+                    Ty::Array(elem) => {
+                        match elem {
+                            Elem::Str => self.asm.bl_label("array_copy_text"),
+                            Elem::Int | Elem::Bool => self.asm.bl_label("array_copy_scalar"),
+                        }
+                        Ok(ty)
+                    }
+                    Ty::Int | Ty::Bool => Ok(ty),
+                    Ty::Nothing => Err(
+                        "there's nothing to copy — that function gives nothing back".to_string(),
+                    ),
+                }
             }
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
@@ -890,7 +956,17 @@ impl Codegen {
                 match op {
                     Sub => self.asm.sub_reg_reg(X0, X1, X0),
                     Mul => self.asm.mul_reg_reg(X0, X1, X0),
-                    Div => self.asm.sdiv_reg_reg(X0, X1, X0),
+                    Div => {
+                        let ok = self.new_label("div_ok");
+                        self.asm.cmp_reg_reg(X0, XZR);
+                        self.asm.bcond_label(CC_NE, &ok);
+                        let msg = self.runtime_message("I can't divide by zero");
+                        let id = self.intern(&msg);
+                        self.asm.mov_abs(X0, id);
+                        self.asm.b_label("runtime_fail");
+                        self.asm.label(&ok);
+                        self.asm.sdiv_reg_reg(X0, X1, X0);
+                    }
                     _ => unreachable!(),
                 }
                 Ok(Ty::Int)
@@ -1116,6 +1192,9 @@ impl Codegen {
         a.ldr(X6, X5, 0); // new string starts here
         a.add_reg_reg(X7, X6, X4);
         a.add_imm(X7, X7, 8);
+        a.mov_imm64(X8, HEAP_END);
+        a.cmp_reg_reg(X7, X8);
+        a.bcond_label(CC_GT, "heap_fail");
         a.str(X7, X5, 0); // bump the heap pointer
         a.str(X4, X6, 0); // write the length
         a.add_imm(X9, X6, 8); // destination bytes
@@ -1218,6 +1297,9 @@ impl Codegen {
         a.mov_imm64(X5, heap_ptr);
         a.ldr(X6, X5, 0);
         a.add_imm(X7, X6, 9);
+        a.mov_imm64(X8, HEAP_END);
+        a.cmp_reg_reg(X7, X8);
+        a.bcond_label(CC_GT, "heap_fail");
         a.str(X7, X5, 0);
         a.movz_reg(X3, 1);
         a.str(X3, X6, 0);
@@ -1262,6 +1344,9 @@ impl Codegen {
         a.ldr(X8, X7, 0);
         a.add_reg_reg(X9, X8, X6);
         a.add_imm(X9, X9, 8);
+        a.mov_imm64(X10, HEAP_END);
+        a.cmp_reg_reg(X9, X10);
+        a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X7, 0);
         a.str(X6, X8, 0);
 
@@ -1288,6 +1373,9 @@ impl Codegen {
         a.mov_imm64(X7, heap_ptr);
         a.ldr(X8, X7, 0);
         a.add_imm(X9, X8, 8);
+        a.mov_imm64(X10, HEAP_END);
+        a.cmp_reg_reg(X9, X10);
+        a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X7, 0);
         a.movz_reg(X9, 0);
         a.str(X9, X8, 0);
@@ -1350,6 +1438,155 @@ impl Codegen {
 
         a.label("array_set_fail");
         a.mov_reg_reg(X0, X4);
+        a.b_label("runtime_fail");
+    }
+
+    /// `text_copy`: X0 = text, result is a fresh copy of it in X0.
+    fn emit_text_copy(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("text_copy");
+        a.ldr(X2, X0, 0); // length
+        a.mov_reg_reg(X3, X0); // source text
+        a.mov_imm64(X5, heap_ptr);
+        a.ldr(X6, X5, 0); // destination
+        a.add_reg_reg(X7, X6, X2);
+        a.add_imm(X7, X7, 8);
+        a.mov_imm64(X8, HEAP_END);
+        a.cmp_reg_reg(X7, X8);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X7, X5, 0);
+        a.str(X2, X6, 0);
+
+        a.add_imm(X3, X3, 8);
+        a.add_imm(X4, X6, 8);
+        a.mov_reg_reg(X9, X2);
+        a.label("tcopy_loop");
+        a.cmp_reg_reg(X9, XZR);
+        a.bcond_label(CC_EQ, "tcopy_done");
+        a.ldrb(X10, X3, 0);
+        a.strb(X10, X4, 0);
+        a.add_imm(X3, X3, 1);
+        a.add_imm(X4, X4, 1);
+        a.sub_imm(X9, X9, 1);
+        a.b_label("tcopy_loop");
+
+        a.label("tcopy_done");
+        a.mov_reg_reg(X0, X6);
+        a.ret();
+    }
+
+    /// `array_copy_scalar`: X0 = list of numbers or truth values. A fresh list
+    /// is allocated and the words are copied into it.
+    fn emit_array_copy_scalar(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("array_copy_scalar");
+        a.mov_reg_reg(X1, X0); // source list
+        a.ldr(X2, X1, 0); // length
+        a.mov_imm64(X5, heap_ptr);
+        a.ldr(X6, X5, 0); // destination
+
+        a.mov_reg_reg(X7, X2);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_imm(X7, X7, 8);
+        a.mov_reg_reg(X9, X6);
+        a.add_reg_reg(X9, X9, X7);
+        a.mov_imm64(X8, HEAP_END);
+        a.cmp_reg_reg(X9, X8);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X9, X5, 0);
+        a.str(X2, X6, 0);
+
+        a.add_imm(X1, X1, 8);
+        a.add_imm(X3, X6, 8);
+        a.mov_reg_reg(X4, X2);
+        a.label("acopy_scalar_loop");
+        a.cmp_reg_reg(X4, XZR);
+        a.bcond_label(CC_EQ, "acopy_scalar_done");
+        a.ldr(X7, X1, 0);
+        a.str(X7, X3, 0);
+        a.add_imm(X1, X1, 8);
+        a.add_imm(X3, X3, 8);
+        a.sub_imm(X4, X4, 1);
+        a.b_label("acopy_scalar_loop");
+
+        a.label("acopy_scalar_done");
+        a.mov_reg_reg(X0, X6);
+        a.ret();
+    }
+
+    /// `array_copy_text`: X0 = list of text. Each text item is copied too, so
+    /// the new list and the old list do not share any heap value.
+    fn emit_array_copy_text(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("array_copy_text");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        // `text_copy` is reached with `bl`, which overwrites X30. Keep the
+        // caller's link register in the frame or `ret` returns into the loop.
+        a.str(X30, SP, 40);
+
+        a.mov_reg_reg(X19, X0); // source items cursor
+        a.ldr(X21, X19, 0); // length
+        a.mov_imm64(X5, heap_ptr);
+        a.ldr(X6, X5, 0); // destination start
+        a.mov_reg_reg(X7, X21);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_imm(X7, X7, 8);
+        a.mov_reg_reg(X9, X6);
+        a.add_reg_reg(X9, X9, X7);
+        a.mov_imm64(X8, HEAP_END);
+        a.cmp_reg_reg(X9, X8);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X9, X5, 0);
+        a.str(X21, X6, 0);
+
+        a.mov_reg_reg(X23, X6); // destination start
+        a.add_imm(X19, X19, 8);
+        a.add_imm(X20, X6, 8);
+        a.movz_reg(X22, 0);
+        a.label("acopy_text_loop");
+        a.cmp_reg_reg(X22, X21);
+        a.bcond_label(CC_GE, "acopy_text_done");
+        a.ldr(X0, X19, 0);
+        a.bl_label("text_copy");
+        a.str(X0, X20, 0);
+        a.add_imm(X19, X19, 8);
+        a.add_imm(X20, X20, 8);
+        a.add_imm(X22, X22, 1);
+        a.b_label("acopy_text_loop");
+
+        a.label("acopy_text_done");
+        a.mov_reg_reg(X0, X23);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.ldr(X30, SP, 40);
+        a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// `heap_fail`: report a heap that has run out of room and leave.
+    fn emit_heap_fail(&mut self) {
+        let id = self.heap_error;
+        let a = &mut self.asm;
+        a.label("heap_fail");
+        a.mov_abs(X0, id);
         a.b_label("runtime_fail");
     }
 

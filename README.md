@@ -23,12 +23,16 @@ kernel through `write(2)` and `exit(2)` syscalls.
 
 ## Status
 
-v0.5 adds constants (`constant NAME be VALUE`), homogeneous lists (`[a, b]`,
-`an empty list of numbers`, `item N of`, `set item N of`, `for each ... in`),
-and recursive `import` statements that can pull in several files. It keeps the
-text operations and interactive session from v0.4. The compiler is a lexer,
-parser, import expander, type checker, AArch64 code generator, and ELF writer,
-with 102 tests. It targets **AArch64 Linux** only.
+v0.6 adds **memory safety by ownership**. Every text value and every list has
+exactly one owner; `let`, `set`, function arguments, list literals, and
+`give back` move that owner, using a name after it has moved is a compile
+error, and `copy of` makes a fresh value instead. The runtime also reports
+division by zero, heap exhaustion, and runaway recursion as Rusk errors
+instead of crashing. Everything from v0.5 — constants, homogeneous lists,
+`import`, text operations, and the interactive session — still works. The
+compiler is a lexer, parser, import expander, type checker, ownership checker,
+AArch64 code generator, and ELF writer, with 127 tests. It targets
+**AArch64 Linux** only.
 
 ## Quick start
 
@@ -104,6 +108,30 @@ let empty be an empty list of numbers
 say empty                     # []
 ```
 
+Text and lists are owned. Giving one a second name moves it, and the compiler
+rejects any later use of the old name — so there is never a dangling name,
+a double free, or two writers racing over one value:
+
+```rusk
+let words be ["rye", "wheat"]
+let mine be copy of words     # `copy of` makes an independent list
+say words                     # [rye, wheat]
+say mine                      # [rye, wheat]
+
+let greeting be "hello"
+let echoed be greeting        # this moves greeting
+say echoed                    # hello
+
+# say greeting                # compile error: greeting was moved
+
+constant motto be "bake twice"
+let sign be copy of motto     # constants are read-only; copy them
+say sign
+```
+
+Numbers and truth values are plain machine words, so they are copied freely
+and never move. The rule is checked before code generation, not at runtime.
+
 A file can pull in several modules; each file is included at most once:
 
 ```rusk
@@ -153,7 +181,11 @@ Run `rusk` with no arguments (or `rusk repl`) to work interactively:
 
 ```console
 $ rusk
-Rusk 0.5.0 — an English-like language
+░█▀▄░█░█░█▀▀░█░█
+░█▀▄░█░█░▀▀█░█▀▄
+░▀░▀░▀▀▀░▀▀▀░▀░▀
+
+Rusk 0.6.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -198,6 +230,12 @@ Piped input skips the banner and prompts, so `rusk < program.rk` works too.
  parser     AST, recursive descent, English operators
    │
    ▼
+ types      kinds and return-kind inference
+   │
+   ▼
+ownership   one owner per text value and list
+   │
+   ▼
  codegen    AArch64 machine code, one word at a time
    │
    ▼
@@ -213,6 +251,7 @@ Piped input skips the banner and prompts, so `rusk < program.rk` works too.
 | `src/lexer.rs` | Source to tokens; keywords are plain words matched by the parser |
 | `src/parser.rs` | Recursive descent over the English grammar |
 | `src/types.rs` | Type checking and return-kind inference (fixed point) |
+| `src/ownership.rs` | Flow-sensitive single-owner checking for text and lists |
 | `src/codegen.rs` | AST to machine code; stack-machine expression evaluation, stack frames |
 | `src/aarch64.rs` | Hand-written instruction encoder and branch/address fixups |
 | `src/elf.rs` | Static ELF64 executable writer |
@@ -230,22 +269,32 @@ Runtime facts worth knowing:
   pointer to its length. Joining two strings bumps a 1 MiB heap in the data
   area and copies both byte blobs into it.
 - Lists are stored as `[len: u64][item: i64]...` in the same bump heap. A list
-  value is a pointer, so `let b be a` gives two names for one list. Item and
+  value is a pointer, but the ownership checker allows only one live name for
+  it, so `let b be a` moves the list and `copy of a` makes a new one. Item and
   bounds checks happen in the runtime helper `array_get` / `array_set`.
 - Text compares byte by byte (unsigned), then by length, so `"b"` is more than
   `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order. Lists do
   not compare yet.
 - `say` of a number calls a hand-built itoa loop that divides by ten and writes
   digits backwards into a 32-byte buffer.
+- Before code generation, `ownership` walks every path and rejects a use of a
+  moved name. A move in one arm of an `if` counts as a move after it; a `give
+  back` ends that path. `copy of` is the only way to duplicate an owned value.
+- Runtime guards turn three machine-level failures into Rusk sentences on
+  standard error with exit status 1: division by zero, heap exhaustion, and
+  recursion deeper than 1000 calls.
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.5 doesn't do yet
+## What v0.6 doesn't do yet
 
 Honest list, so the docs don't lie:
 
-- Text is immutable. Joining allocates from a fixed 1 MiB heap with no bound
-  check, and nothing is reclaimed.
+- Text is immutable. Joining allocates from a fixed 1 MiB heap, and nothing is
+  reclaimed. Running past the end is now a Rusk error rather than a crash.
+- There is no borrow checker and no shared borrowing: a value has one owner at
+  a time, and `copy of` deep-copies text and lists. That is simpler than Rust,
+  and it rules out aliasing bugs by refusing to have aliases at all.
 - Lists are homogeneous and flat: no nested lists, and no `push`, `pop`, or
   `remove`. Their contents can be replaced with `set item`, but the list itself
   has a fixed length.
@@ -255,11 +304,9 @@ Honest list, so the docs don't lie:
 - Text positions count bytes, not Unicode characters.
 - At most 8 parameters per function, and no closures, anonymous functions, or
   function values.
-- Division by zero traps the process instead of reporting a Rusk error.
 - AArch64 Linux only. The codegen is written so an x86-64 encoder can slot in
   behind the same AST.
 - The single load segment is RWX, which is convenient but not hardened.
-- Deep recursion cannot be caught: it runs into the stack limit and dies.
 
 ## Why the name
 

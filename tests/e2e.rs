@@ -389,16 +389,17 @@ double with 21
 // ---- lists and constants ---------------------------------------------
 
 #[test]
-fn lists_hold_items_and_share_their_storage() {
+fn lists_hold_items_and_copy_of_is_independent() {
     let src = "\
 let xs be [10, 20, 30]
 say length of xs
 say item 2 of xs
 set item 2 of xs to 99
 say xs
-let ys be xs
+let ys be copy of xs
 set item 1 of ys to 7
 say xs
+say ys
 say an empty list of numbers
 let flags be [true, false]
 say flags
@@ -408,7 +409,7 @@ say words
     let (stdout, code) = run("lists", src);
     assert_eq!(
         stdout,
-        "3\n20\n[10, 99, 30]\n[7, 99, 30]\n[]\n[true, false]\n[a, b]\n"
+        "3\n20\n[10, 99, 30]\n[10, 99, 30]\n[7, 99, 30]\n[]\n[true, false]\n[a, b]\n"
     );
     assert_eq!(code, 0);
 }
@@ -515,4 +516,97 @@ say length of xs
     let (stdout, code) = run("list_return", src);
     assert_eq!(stdout, "[5, 6]\n6\n2\n");
     assert_eq!(code, 0);
+}
+
+// ---- ownership and runtime safety ------------------------------------
+
+#[test]
+fn using_a_name_after_it_moves_is_a_compile_error() {
+    let src = "\
+let xs be [1, 2]
+let ys be xs
+say xs
+";
+    let err = rusk::bake(src).unwrap_err();
+    assert!(err.contains("moved already"), "{err}");
+    assert!(err.contains("line 3"), "{err}");
+}
+
+#[test]
+fn copy_of_keeps_text_and_lists_usable() {
+    let src = "\
+let greeting be \"hello\"
+let echo be copy of greeting
+say greeting
+say echo
+let xs be [\"a\", \"b\"]
+let ys be copy of xs
+set item 1 of ys to \"z\"
+say xs
+say ys
+";
+    let (stdout, code) = run("ownership_copy", src);
+    assert_eq!(stdout, "hello\nhello\n[a, b]\n[z, b]\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_function_argument_moves_and_copy_of_brings_it_back() {
+    let src = "\
+to shout with s as text:
+    say s + \"!\"
+
+let greeting be \"hi\"
+shout with copy of greeting
+say greeting
+";
+    let (stdout, code) = run("ownership_call", src);
+    assert_eq!(stdout, "hi!\nhi\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_constant_cannot_be_moved() {
+    let err = rusk::bake("constant greeting be \"hi\"\nlet a be greeting\n").unwrap_err();
+    assert!(err.contains("constant"), "{err}");
+    assert!(err.contains("copy of"), "{err}");
+}
+
+#[test]
+fn dividing_by_zero_stops_with_a_sentence() {
+    let src = "say \"before\"\nsay 1 / 0\nsay \"after\"\n";
+    let (stdout, stderr, code) = run_full("div_zero", src);
+    assert_eq!(stdout, "before\n");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("line 2: I can't divide by zero"), "{stderr}");
+}
+
+#[test]
+fn runaway_recursion_stops_with_a_sentence() {
+    let src = "\
+to down with n as a number and acc as a number:
+    if n is 0:
+        give back acc
+    give back down with n + 1 and acc
+
+say down with 1 and 0
+";
+    let (stdout, stderr, code) = run_full("deep_recursion", src);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("recursed too deeply"), "{stderr}");
+}
+
+#[test]
+fn running_out_of_heap_stops_with_a_sentence() {
+    let src = "\
+let s be \"0123456789abcdef\"
+repeat 30 times:
+    set s to s + s
+say \"unreachable\"
+";
+    let (stdout, stderr, code) = run_full("heap_exhaustion", src);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("ran out of memory"), "{stderr}");
 }

@@ -92,6 +92,8 @@ pub enum Expr {
     EmptyArray(Elem),
     /// `item N of LIST` — one item, counting from 1.
     Item(Box<Expr>, Box<Expr>),
+    /// `copy of VALUE` — a fresh copy of text or a list.
+    Copy(Box<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }

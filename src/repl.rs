@@ -25,8 +25,8 @@ enum Value {
     Int(i64),
     Str(Vec<u8>),
     Bool(bool),
-    /// A list is shared by handle: `let b be a` makes two names for one list,
-    /// just as copying a pointer does in a baked program.
+    /// A list is owned by one name at a time, just as a pointer is moved in a
+    /// baked program. `copy of` makes a new list instead of aliasing.
     Array(Rc<RefCell<Vec<Value>>>),
     Nothing,
 }
@@ -117,7 +117,9 @@ impl Session {
 
         let mut all = self.stmts.clone();
         all.extend(program.stmts.iter().cloned());
-        self.sigs = types::check(&Program { stmts: all })?;
+        let whole = Program { stmts: all };
+        self.sigs = types::check(&whole)?;
+        crate::ownership::check(&whole, &self.sigs)?;
 
         let mut env = std::mem::take(&mut self.globals);
         let mut result = Ok(());
@@ -508,6 +510,19 @@ impl Session {
                 Ok(Value::Array(Rc::new(RefCell::new(values))))
             }
             Expr::EmptyArray(_) => Ok(Value::Array(Rc::new(RefCell::new(Vec::new())))),
+            Expr::Copy(inner) => match self.eval(inner, env)? {
+                Value::Str(bytes) => Ok(Value::Str(bytes)),
+                Value::Array(items) => {
+                    let copied = items.borrow().iter().map(copy_value).collect();
+                    Ok(Value::Array(Rc::new(RefCell::new(copied))))
+                }
+                Value::Int(n) => Ok(Value::Int(n)),
+                Value::Bool(b) => Ok(Value::Bool(b)),
+                Value::Nothing => Err(format!(
+                    "line {}: there's nothing to copy — that function gives nothing back",
+                    self.line
+                )),
+            },
             Expr::Item(index, array) => {
                 let index = self.eval_int(index, env)?;
                 let items = match self.eval(array, env)? {
@@ -762,6 +777,21 @@ impl Session {
     }
 }
 
+/// A fresh copy for `copy of`. Text is already an owned byte vector; a list
+/// gets a new vector, and its text items are cloned as well.
+fn copy_value(value: &Value) -> Value {
+    match value {
+        Value::Int(n) => Value::Int(*n),
+        Value::Bool(b) => Value::Bool(*b),
+        Value::Str(bytes) => Value::Str(bytes.clone()),
+        Value::Array(items) => {
+            let copied = items.borrow().iter().map(copy_value).collect();
+            Value::Array(Rc::new(RefCell::new(copied)))
+        }
+        Value::Nothing => Value::Nothing,
+    }
+}
+
 fn restore(env: &mut HashMap<String, Value>, name: &str, previous: Option<Value>) {
     match previous {
         Some(value) => {
@@ -898,10 +928,18 @@ fn trim_newline(line: &str) -> &str {
     line.trim_end_matches(|c| c == '\n' || c == '\r')
 }
 
+/// The wordmark shown when the session starts on a terminal.
+const BANNER: &str = "\
+░█▀▄░█░█░█▀▀░█░█
+░█▀▄░█░█░▀▀█░█▀▄
+░▀░▀░▀▀▀░▀▀▀░▀░▀";
+
 /// Run the interactive session on stdin/stdout.
 pub fn run() -> Result<(), String> {
     let interactive = io::stdin().is_terminal();
     if interactive {
+        println!("{BANNER}");
+        println!();
         println!("Rusk {} — an English-like language", env!("CARGO_PKG_VERSION"));
         println!("Type :help for commands, :quit to leave.\n");
     }
@@ -1026,19 +1064,29 @@ mod tests {
     }
 
     #[test]
-    fn lists_persist_and_share_their_items() {
+    fn lists_persist_and_copy_of_makes_an_independent_list() {
         let mut session = Session::new();
         session.submit("let xs be [1, 2, 3]\n").unwrap();
         session.submit("set item 2 of xs to 9\n").unwrap();
-        session.submit("let ys be xs\n").unwrap();
+        session.submit("let ys be copy of xs\n").unwrap();
         session.submit("set item 1 of ys to 7\n").unwrap();
-        assert_eq!(session.globals["xs"].display(), "[7, 9, 3]");
+        assert_eq!(session.globals["xs"].display(), "[1, 9, 3]");
         assert_eq!(session.globals["ys"].display(), "[7, 9, 3]");
 
         session
             .submit("let empty be an empty list of text\n")
             .unwrap();
         assert_eq!(session.globals["empty"].display(), "[]");
+    }
+
+    #[test]
+    fn moving_a_name_removes_the_old_owner() {
+        let mut session = Session::new();
+        session.submit("let xs be [1, 2, 3]\n").unwrap();
+        session.submit("let ys be xs\n").unwrap();
+        let err = session.submit("say xs\n").unwrap_err();
+        assert!(err.contains("was moved already"), "{err}");
+        session.submit("say ys\n").unwrap();
     }
 
     #[test]
@@ -1070,6 +1118,15 @@ mod tests {
         assert!(err.contains("outside the list"), "{err}");
         session.submit("set item 2 of xs to 5\n").unwrap();
         assert_eq!(session.globals["xs"].display(), "[1, 5]");
+    }
+
+    #[test]
+    fn the_banner_is_the_rusk_wordmark() {
+        assert_eq!(
+            BANNER,
+            "░█▀▄░█░█░█▀▀░█░█\n░█▀▄░█░█░▀▀█░█▀▄\n░▀░▀░▀▀▀░▀▀▀░▀░▀"
+        );
+        assert_eq!(BANNER.lines().count(), 3);
     }
 
     #[test]

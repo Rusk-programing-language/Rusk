@@ -1,0 +1,23 @@
+# Every text value and every list has exactly one owner.
+
+let greeting be "hello"
+let echo be copy of greeting     # `copy of` leaves greeting usable
+say greeting
+say echo
+
+# `let`, `set`, arguments, list literals, and `give back` move a value.
+# The old name cannot be used afterwards: the compiler rejects it.
+let words be ["rye", "wheat"]
+let more be copy of words
+say words
+say more
+
+# Numbers and truth values are plain machine words, so they never move.
+let n be 3
+let m be n
+say n + m
+
+# A constant is read-only. Copy it instead of moving it.
+constant loaf be "sourdough"
+let mine be copy of loaf
+say mine

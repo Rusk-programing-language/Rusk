@@ -7,10 +7,11 @@ say item 2 of loaves        # 6
 set item 2 of loaves to 12
 say loaves                  # [3, 12, 9]
 
-# A list is shared by handle: both names see the same items.
-let same be loaves
+# A list has one owner at a time. `copy of` makes an independent list.
+let same be copy of loaves
 set item 1 of same to 0
-say loaves                  # [0, 12, 9]
+say loaves                  # [3, 12, 9]
+say same                    # [0, 12, 9]
 
 let names be ["rye", "wheat", "spelt"]
 for each name in names:
