@@ -117,6 +117,52 @@ say true
 values print as themselves (`true` / `false`); numbers print in decimal, with a
 minus sign when negative.
 
+### System input and output
+
+Rusk programs reach the operating system through a small set of English
+statements and primaries. There is no library to import and no host language
+runtime:
+
+```rusk
+say number of arguments        # how many arguments follow the program name
+say argument 1                 # the first argument, or empty text
+say environment "HOME"         # the variable's text, or empty text
+
+let name be read line          # one line from standard input, without newline
+let rest be read all input     # everything left on standard input
+let text be read file "notes.txt"
+write "fresh" to file "loaf.txt"
+
+warn "the oven is hot"         # like `say`, but on standard error
+stop with 2                    # end now with exit status 2
+```
+
+Rules:
+
+- `argument N` counts from 1. A number below 1 or past the last argument gives
+  empty text, not an error.
+- `number of arguments` counts only the arguments after the program name.
+- `environment NAME` takes the variable name as text. An unset variable gives
+  empty text.
+- `read line` reads bytes up to a newline or end of input and drops the newline
+  (and a carriage return before it). `read all input` reads the rest of
+  standard input, including newlines.
+- `read file PATH` gives the whole file as text. A missing or unreadable file
+  stops the program with `burnt: I can't open that file` and status 1.
+- `write TEXT to file PATH` replaces the file's contents, creating it with mode
+  `0644` when needed. A failure stops the program with
+  `burnt: I can't write to that file` and status 1.
+- A path longer than 4095 bytes is reported at runtime as
+  `burnt: that file path is too long`.
+- `warn VALUE` writes the value and a newline to standard error. It accepts the
+  same values as `say`.
+- `stop with CODE` ends the program immediately with that exit status. It may
+  appear in a block or a function; the ownership checker treats the statement
+  as ending its path.
+- `read line`, `read all input`, `read file`, and `environment` each produce a
+  fresh owned text value, so their results follow the same move and `copy of`
+  rules as other text.
+
 ## 6. Expressions
 
 Operator precedence, loosest first:
@@ -129,7 +175,7 @@ Operator precedence, loosest first:
 | Sum | `+`, `-` | left |
 | Product | `*`, `/` | left |
 | Unary | `-`, `not` | right |
-| Primary | number, text, truth, list, name, call, text in pieces, list item, `copy of`, `( ... )` | — |
+| Primary | number, text, truth, list, name, call, text in pieces, list item, `copy of`, `argument N`, `number of arguments`, `environment NAME`, `read line`, `read all input`, `read file PATH`, `( ... )` | — |
 
 `+` adds two numbers or joins two pieces of text. `-`, `*`, and `/` are numbers
 only. A bare `is` means `is equal to`: `if name is "Rusk":`.
@@ -485,11 +531,18 @@ inside an imported file names the file it came from.
 
 A program is executed top to bottom. When the last statement finishes, the
 program exits with status 0. There is no `main` and no entry-point ceremony.
+`stop with CODE` chooses a different exit status and ends the program
+immediately.
 
 ```rusk
 # hello.rk
 say "Hello, world."
 ```
+
+`rusk run file.rk one two` bakes the file, runs it, and passes `one` and `two`
+to the program; `argument 1` is `one`, and `number of arguments` is 2. The
+temporary executable keeps the program's name in `argv[0]`, which commands such
+as `argument 1` skip automatically.
 
 ## 13. The interactive session
 
@@ -536,6 +589,12 @@ too, and a moved name is empty here just as it is in a baked program. `import`
 works at the prompt (relative to the current directory); inside `:load`,
 relative imports resolve from the loaded file's directory.
 
+System primaries work at the prompt as well: `argument N` sees the words after
+`rusk repl`, `environment` reads the session's environment, and `read line`,
+`read all input`, `read file`, `write ... to file`, and `warn` use the same
+standard streams and files as a baked program. `stop with CODE` ends the
+session with that status.
+
 When stdin is not a terminal, the banner and prompts are omitted, so
 `rusk < program.rk` works as a pipe. The session is not a `.rk` file compiler:
 it does not write an executable.
@@ -576,6 +635,12 @@ crashes:
 | division by zero | `burnt: line N: I can't divide by zero` | 1 |
 | heap exhausted | `burnt: the program ran out of memory` | 1 |
 | recursion deeper than 1000 calls | `burnt: the program recursed too deeply` | 1 |
+| unreadable file | `burnt: I can't open that file` | 1 |
+| unwritable file | `burnt: I can't write to that file` | 1 |
+| file path longer than 4095 bytes | `burnt: that file path is too long` | 1 |
+
+`stop with CODE` is not an error: it exits immediately with the requested
+status and prints no message.
 
 ## 15. Compilation model
 
@@ -591,8 +656,12 @@ The output is a static ELF64 executable:
   zero-filled by the kernel;
 - no interpreter, no dynamic section, no relocations, no libc.
 
-Because there is no libc, `say` is a direct `write` syscall (`x8 = 64`) and
-program exit is `exit` (`x8 = 93`).
+Because there is no libc, `say` and `warn` are direct `write` syscalls
+(`x8 = 64`) to descriptors 1 and 2, and program exit is `exit` (`x8 = 93`).
+Standard input and files use `read` (`x8 = 63`); files are opened with
+`openat` (`x8 = 56`) and closed with `close` (`x8 = 57`). The initial stack
+pointer is saved in the data area at entry so command-line arguments and
+environment variables can be walked without a C startup routine.
 
 Function calls use the standard AArch64 shape, assembled by hand: arguments in
 `X0..X7`, the result in `X0`, the return address in `X30`, and the frame pointer
@@ -628,7 +697,12 @@ failure.
   is reclaimed; exhausting it is reported, but memory is not reused.
 - Ownership is single-owner, not borrowing: there is no way to lend a value to
   two readers at once. `copy of` is the escape hatch.
-- Lists have a fixed length: there is no append, insert, or remove.
+- Lists are homogeneous and flat: no nested lists, and no `pop` or `remove`.
+  They can grow with `add VALUE to LIST`, which copies the whole list to fresh
+  heap space; there is no capacity headroom.
+- System I/O covers text files and the three standard streams. There are no
+  directories, sockets, processes, or random-access file positions, and a path
+  is limited to 4095 bytes.
 - At most 8 parameters per function; no function values, closures, or
   overloading.
 - Imports are textual inclusion in one global namespace; there are no module
@@ -636,7 +710,7 @@ failure.
 
 ## 16. Roadmap (not implemented)
 
-- growing lists (append, insert, remove) and nested lists
+- nested lists, `pop`/`remove`, and list capacity
 - borrowing and shared read-only views
 - module namespaces and selective imports
 - function values and closures

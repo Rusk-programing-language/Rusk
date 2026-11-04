@@ -23,16 +23,18 @@ kernel through `write(2)` and `exit(2)` syscalls.
 
 ## Status
 
-v0.6 adds **memory safety by ownership**. Every text value and every list has
-exactly one owner; `let`, `set`, function arguments, list literals, and
-`give back` move that owner, using a name after it has moved is a compile
-error, and `copy of` makes a fresh value instead. The runtime also reports
-division by zero, heap exhaustion, and runaway recursion as Rusk errors
-instead of crashing. Everything from v0.5 — constants, homogeneous lists,
-`import`, text operations, and the interactive session — still works. The
-compiler is a lexer, parser, import expander, type checker, ownership checker,
-AArch64 code generator, and ELF writer, with 147 tests. It targets
-**AArch64 Linux** only.
+v0.6 adds **memory safety by ownership** and **system I/O**. Every text value
+and every list has exactly one owner; `let`, `set`, function arguments, list
+literals, and `give back` move that owner, using a name after it has moved is a
+compile error, and `copy of` makes a fresh value instead. The runtime also
+reports division by zero, heap exhaustion, and runaway recursion as Rusk
+errors instead of crashing. Programs can read command-line arguments,
+environment variables, standard input, and files, and can write files, warn on
+standard error, and choose an exit status. Everything from v0.5 — constants,
+homogeneous lists, `import`, text operations, and the interactive session —
+still works. The compiler is a lexer, parser, import expander, type checker,
+ownership checker, AArch64 code generator, and ELF writer, with 154 tests. It
+targets **AArch64 Linux** only.
 
 ## Quick start
 
@@ -143,6 +145,27 @@ say sign
 
 Numbers and truth values are plain machine words, so they are copied freely
 and never move. The rule is checked before code generation, not at runtime.
+
+Programs can talk to the system without a library:
+
+```rusk
+say number of arguments       # arguments after the program's own name
+say argument 1                # empty text when there is no such argument
+say environment "HOME"        # empty text when the variable is unset
+
+let name be read line         # one line, without its newline
+let rest be read all input    # everything left on standard input
+let notes be read file "notes.txt"
+write "baked fresh" to file "loaf.txt"
+
+warn "using the spare oven"   # standard error, with a newline
+stop with 2                   # choose the process exit status
+```
+
+`read file` and `write ... to file` use the path as written. A missing or
+unreadable file, or a path too long for the runtime scratch area, is reported
+as a Rusk error. `rusk run file.rk one two` passes `one` and `two` through to
+`argument 1` and `argument 2`.
 
 A file can pull in several modules; each file is included at most once:
 
@@ -288,6 +311,11 @@ Runtime facts worth knowing:
 - Text compares byte by byte (unsigned), then by length, so `"b"` is more than
   `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order. Lists do
   not compare yet.
+- The kernel's initial stack pointer is saved at entry, so `argument N` and
+  `environment NAME` can walk `argv` and `envp` directly. File paths are copied
+  into a 4 KiB scratch area and NUL-terminated before `openat(2)`. Standard
+  input and files are read with `read(2)`; files are written with
+  `openat(2)`/`write(2)`/`close(2)`.
 - `say` of a number calls a hand-built itoa loop that divides by ten and writes
   digits backwards into a 32-byte buffer.
 - Before code generation, `ownership` walks every path and rejects a use of a
@@ -312,6 +340,9 @@ Honest list, so the docs don't lie:
   Their contents can be replaced with `set item`, and `add VALUE to LIST`
   appends an item by copying the list to fresh heap space. There is no
   capacity headroom, so each `add` allocates.
+- System I/O is intentionally small: text files and standard streams only, no
+  directories, sockets, processes, or random access. A path is limited by the
+  4 KiB scratch area, and reading stops when the 1 MiB heap is full.
 - Imports are textual inclusion with one global namespace. There are no module
   namespaces, selective imports, or aliases, so modules prefix their names
   (`text_`, `math_`).

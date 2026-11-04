@@ -4,7 +4,7 @@
 //! rusk                              start the interactive session
 //! rusk repl                         start the interactive session
 //! rusk build <file.rk> [-o <out>]   bake a native executable
-//! rusk run   <file.rk>              bake and run it
+//! rusk run   <file.rk> [args...]  bake and run it, passing the arguments on
 //! rusk check <file.rk>              bake without writing anything
 //! rusk version
 //! ```
@@ -47,11 +47,12 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "run" => {
-            let (input, _) = parse_targets(&args[1..])?;
+            let (input, program_args) = parse_run_target(&args[1..])?;
             let bytes = bake_bytes(&input)?;
             let out = std::env::temp_dir().join(format!("rusk-run-{}", std::process::id()));
             elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
             let status = Command::new(&out)
+                .args(&program_args)
                 .status()
                 .map_err(|e| format!("can't run {}: {e}", out.display()))?;
             let _ = std::fs::remove_file(&out);
@@ -92,7 +93,7 @@ USAGE
   rusk                              start the interactive session
   rusk repl                         start the interactive session
   rusk build <file.rk> [-o <out>]   bake a native executable
-  rusk run   <file.rk>              bake it and run it
+  rusk run   <file.rk> [args...]   bake it and run it, passing arguments on
   rusk check <file.rk>              bake without writing an executable
   rusk version
   rusk help
@@ -103,8 +104,18 @@ The REPL is a tree-walking session over the same syntax and type checker."
     );
 }
 
-fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
-    let mut input: Option<PathBuf> = None;
+/// `run` takes one file and then any number of program arguments.
+fn parse_run_target(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
+    let Some(first) = args.first() else {
+        return Err("I need a .rk file to bake".to_string());
+    };
+    if first.starts_with('-') {
+        return Err(format!("I don't know the option '{first}'"));
+    }
+    Ok((PathBuf::from(first), args[1..].to_vec()))
+}
+
+fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {    let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {

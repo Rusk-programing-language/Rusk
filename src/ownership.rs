@@ -170,6 +170,17 @@ impl<'a> Checker<'a> {
                 Self::line_at(*line, self.expr(value, scope, Use::Move))?;
                 Self::line_at(*line, self.expr(&Expr::Var(name.clone()), scope, Use::Read))?;
             }
+            Stmt::Warn(e, line) => {
+                Self::line_at(*line, self.expr(e, scope, Use::Read))?;
+            }
+            Stmt::Stop(e, line) => {
+                Self::line_at(*line, self.expr(e, scope, Use::Read))?;
+                return Ok(Outcome::returns());
+            }
+            Stmt::WriteFile { text, path, line } => {
+                Self::line_at(*line, self.expr(text, scope, Use::Read))?;
+                Self::line_at(*line, self.expr(path, scope, Use::Read))?;
+            }
             Stmt::If {
                 cond,
                 then,
@@ -333,6 +344,11 @@ impl<'a> Checker<'a> {
                 }
             }
             Expr::Copy(inner) => self.expr(inner, scope, Use::Read)?,
+            Expr::Argument(index) => self.expr(index, scope, Use::Read)?,
+            Expr::ArgCount => {}
+            Expr::Environment(name) => self.expr(name, scope, Use::Read)?,
+            Expr::ReadLine | Expr::ReadAll => {}
+            Expr::ReadFile(path) => self.expr(path, scope, Use::Read)?,
             Expr::Call(_name, args) => {
                 for arg in args {
                     self.expr(arg, scope, Use::Move)?;

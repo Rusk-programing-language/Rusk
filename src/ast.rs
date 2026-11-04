@@ -94,6 +94,18 @@ pub enum Expr {
     Item(Box<Expr>, Box<Expr>),
     /// `copy of VALUE` — a fresh copy of text or a list.
     Copy(Box<Expr>),
+    /// `argument N` — command-line argument N, counting from 1.
+    Argument(Box<Expr>),
+    /// `number of arguments` — how many command-line arguments were given.
+    ArgCount,
+    /// `environment NAME` — an environment variable's text, empty if unset.
+    Environment(Box<Expr>),
+    /// `read line` — one line from standard input, without its newline.
+    ReadLine,
+    /// `read all input` — everything left on standard input.
+    ReadAll,
+    /// `read file PATH` — a file's contents as text.
+    ReadFile(Box<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
@@ -151,6 +163,16 @@ pub enum Stmt {
     AddTo {
         value: Expr,
         name: String,
+        line: usize,
+    },
+    /// `warn VALUE` — print to standard error with a newline.
+    Warn(Expr, usize),
+    /// `stop with CODE` — end the program with an exit status.
+    Stop(Expr, usize),
+    /// `write TEXT to file PATH` — replace a file's contents.
+    WriteFile {
+        text: Expr,
+        path: Expr,
         line: usize,
     },
     If {
@@ -219,6 +241,7 @@ impl Stmt {
             | Stmt::Set { line, .. }
             | Stmt::SetItem { line, .. }
             | Stmt::AddTo { line, .. }
+            | Stmt::WriteFile { line, .. }
             | Stmt::If { line, .. }
             | Stmt::Repeat { line, .. }
             | Stmt::While { line, .. }
@@ -227,6 +250,8 @@ impl Stmt {
             | Stmt::FuncDef { line, .. }
             | Stmt::Import { line, .. }
             | Stmt::GiveBack(_, line)
+            | Stmt::Warn(_, line)
+            | Stmt::Stop(_, line)
             | Stmt::Break(line)
             | Stmt::Continue(line)
             | Stmt::Expr(_, line) => *line,

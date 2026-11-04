@@ -36,6 +36,17 @@ const HEAP_SIZE: u64 = 0x10_0000;
 const HEAP_END: u64 = DATA_BASE + HEAP_START_OFFSET + HEAP_SIZE;
 /// Where the runtime keeps the current call depth.
 const DEPTH_OFFSET: u64 = 0x1800;
+/// Where the initial stack pointer (argc/argv/envp) is remembered.
+const ARGS_SP_OFFSET: u64 = 0x1808;
+/// Scratch space for turning Rusk text into a NUL-terminated path.
+const PATH_OFFSET: u64 = 0x3000;
+const PATH_CAPACITY: u64 = 4096;
+/// `SYS_read`
+const SYS_READ: u64 = 63;
+/// `SYS_openat`
+const SYS_OPENAT: u64 = 56;
+/// `SYS_close`
+const SYS_CLOSE: u64 = 57;
 /// Deepest call nesting the runtime will allow before it reports an error.
 const MAX_DEPTH: u64 = 1000;
 const HEAP_ERROR: &str = "burnt: the program ran out of memory\n";
@@ -71,6 +82,11 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     cg.heap_error = cg.intern(HEAP_ERROR);
 
     cg.asm.label("_start");
+    // Remember where the kernel put argc, argv, and envp before using the stack.
+    // `str` cannot name SP, so copy it through a scratch register first.
+    cg.asm.mov_imm64(X1, DATA_BASE + ARGS_SP_OFFSET);
+    cg.asm.add_imm(X2, SP, 0);
+    cg.asm.str(X2, X1, 0);
     // The text heap starts at a fixed spot; a bump pointer in the data area
     // remembers where the next joined string goes.
     cg.asm.mov_imm64(X1, DATA_BASE + HEAP_PTR_OFFSET);
@@ -106,6 +122,14 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     cg.emit_array_get();
     cg.emit_array_set();
     cg.emit_array_add();
+    cg.emit_empty_text();
+    cg.emit_cstr_copy();
+    cg.emit_path_copy();
+    cg.emit_arg_text();
+    cg.emit_env_text();
+    cg.emit_read_stream();
+    cg.emit_read_file();
+    cg.emit_write_file();
     cg.emit_text_copy();
     cg.emit_array_copy_scalar();
     cg.emit_array_copy_text();
@@ -169,6 +193,7 @@ impl Codegen {
     fn bss_size(&self) -> u64 {
         (self.next_global * 8)
             .max(ITOA_OFFSET + ITOA_CAPACITY)
+            .max(PATH_OFFSET + PATH_CAPACITY)
             .max(HEAP_START_OFFSET + HEAP_SIZE)
     }
 
@@ -276,6 +301,33 @@ impl Codegen {
             Stmt::AddTo { value, name, line } => {
                 self.add_to(value, name).map_err(|m| at(*line, m))
             }
+            Stmt::Warn(e, line) => {
+                let ty = self.expr(e).map_err(|m| at(*line, m))?;
+                if ty == Ty::Nothing {
+                    return Err(at(
+                        *line,
+                        "that function doesn't give anything back, so there's nothing to warn about"
+                            .to_string(),
+                    ));
+                }
+                self.emit_show(ty, 2);
+                Ok(())
+            }
+            Stmt::Stop(e, line) => {
+                let ty = self.expr(e).map_err(|m| at(*line, m))?;
+                if ty != Ty::Int {
+                    return Err(at(
+                        *line,
+                        format!("'stop with' needs an exit code as a number, but this is {ty}"),
+                    ));
+                }
+                self.asm.mov_imm64(X8, SYS_EXIT);
+                self.asm.svc();
+                Ok(())
+            }
+            Stmt::WriteFile { text, path, line } => self
+                .write_file(text, path)
+                .map_err(|m| at(*line, m)),
             Stmt::If {
                 cond,
                 then,
@@ -428,6 +480,26 @@ impl Codegen {
         self.asm.pop_reg(X1);
         self.asm.bl_label("array_add");
         self.store_var(&var);
+        Ok(())
+    }
+
+    fn write_file(&mut self, text: &Expr, path: &Expr) -> Result<(), String> {
+        let tt = self.expr(text)?;
+        if tt != Ty::Str {
+            return Err(format!(
+                "'write ... to file' needs the text as text, but this is {tt}"
+            ));
+        }
+        self.asm.push_reg(X0);
+        let pt = self.expr(path)?;
+        if pt != Ty::Str {
+            return Err(format!(
+                "'write ... to file' needs the path as text, but this is {pt}"
+            ));
+        }
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.pop_reg(X0);
+        self.asm.bl_label("write_file");
         Ok(())
     }
 
@@ -981,6 +1053,55 @@ impl Codegen {
                     ),
                 }
             }
+            Expr::Argument(index) => {
+                let ty = self.expr(index)?;
+                if ty != Ty::Int {
+                    return Err(format!(
+                        "the argument number must be a number, but this is {ty}"
+                    ));
+                }
+                self.asm.bl_label("arg_text");
+                Ok(Ty::Str)
+            }
+            Expr::ArgCount => {
+                self.asm.mov_imm64(X1, DATA_BASE + ARGS_SP_OFFSET);
+                self.asm.ldr(X0, X1, 0);
+                self.asm.ldr(X0, X0, 0); // argc
+                self.asm.sub_imm(X0, X0, 1); // skip the program's own name
+                Ok(Ty::Int)
+            }
+            Expr::Environment(name) => {
+                let ty = self.expr(name)?;
+                if ty != Ty::Str {
+                    return Err(format!(
+                        "'environment' needs a variable name as text, but this is {ty}"
+                    ));
+                }
+                self.asm.bl_label("env_text");
+                Ok(Ty::Str)
+            }
+            Expr::ReadLine => {
+                self.asm.movz_reg(X0, 0); // stdin
+                self.asm.movz_reg(X1, 1); // stop at a newline
+                self.asm.bl_label("read_stream");
+                Ok(Ty::Str)
+            }
+            Expr::ReadAll => {
+                self.asm.movz_reg(X0, 0); // stdin
+                self.asm.movz_reg(X1, 0); // read to end of file
+                self.asm.bl_label("read_stream");
+                Ok(Ty::Str)
+            }
+            Expr::ReadFile(path) => {
+                let ty = self.expr(path)?;
+                if ty != Ty::Str {
+                    return Err(format!(
+                        "'read file' needs a path as text, but this is {ty}"
+                    ));
+                }
+                self.asm.bl_label("read_file");
+                Ok(Ty::Str)
+            }
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
                 match op {
@@ -1116,12 +1237,18 @@ impl Codegen {
     // ---- printing --------------------------------------------------------
 
     fn emit_say(&mut self, ty: Ty) {
+        self.emit_show(ty, 1);
+    }
+
+    /// Print a value to `fd` with a newline. `fd` 1 is stdout, 2 is stderr.
+    fn emit_show(&mut self, ty: Ty, fd: u64) {
         match ty {
             Ty::Int => {
+                self.asm.mov_imm64(X9, fd);
                 self.asm.bl_label("print_int");
-                self.emit_newline();
+                self.emit_newline(fd);
             }
-            Ty::Str => self.emit_print_text(),
+            Ty::Str => self.emit_print_text(fd),
             Ty::Bool => {
                 let l_false = self.new_label("say_false");
                 let l_done = self.new_label("say_done");
@@ -1134,40 +1261,40 @@ impl Codegen {
                 let f = self.intern("false");
                 self.asm.mov_abs(X0, f);
                 self.asm.label(&l_done);
-                self.emit_print_text();
+                self.emit_print_text(fd);
             }
-            Ty::Array(elem) => self.emit_say_array(elem),
+            Ty::Array(elem) => self.emit_say_array(elem, fd),
             Ty::Nothing => {}
         }
     }
 
     /// X0 points at a length-prefixed string: `[len: u64][bytes...]`.
-    fn emit_write_text_value(&mut self) {
+    fn emit_write_text_value(&mut self, fd: u64) {
         self.asm.ldr(X2, X0, 0); // len
         self.asm.add_imm(X1, X0, 8); // bytes
-        self.asm.mov_imm64(X0, 1); // fd = stdout
+        self.asm.mov_imm64(X0, fd);
         self.asm.mov_imm64(X8, SYS_WRITE);
         self.asm.svc();
     }
 
-    fn emit_print_text(&mut self) {
-        self.emit_write_text_value();
-        self.emit_newline();
+    fn emit_print_text(&mut self, fd: u64) {
+        self.emit_write_text_value(fd);
+        self.emit_newline(fd);
     }
 
     /// Write an interned literal without a newline.
-    fn emit_write_literal(&mut self, s: &str) {
+    fn emit_write_literal(&mut self, s: &str, fd: u64) {
         let id = self.intern(s);
         self.asm.mov_abs(X1, id);
         self.asm.add_imm(X1, X1, 8);
         self.asm.mov_imm64(X2, s.len() as u64);
-        self.asm.mov_imm64(X0, 1);
+        self.asm.mov_imm64(X0, fd);
         self.asm.mov_imm64(X8, SYS_WRITE);
         self.asm.svc();
     }
 
     /// X0 points at a list: `[len: u64][item: i64]...`. Print `[a, b, c]`.
-    fn emit_say_array(&mut self, elem: Elem) {
+    fn emit_say_array(&mut self, elem: Elem, fd: u64) {
         self.asm.sub_imm(SP, SP, 32);
         self.asm.str(X19, SP, 0);
         self.asm.str(X20, SP, 8);
@@ -1176,7 +1303,7 @@ impl Codegen {
         self.asm.mov_reg_reg(X19, X0); // list
         self.asm.ldr(X20, X19, 0); // length
         self.asm.add_imm(X19, X19, 8); // items
-        self.emit_write_literal("[");
+        self.emit_write_literal("[", fd);
 
         self.asm.movz_reg(X21, 0); // index
         let l_loop = self.new_label("say_list");
@@ -1188,13 +1315,16 @@ impl Codegen {
         self.asm.bcond_label(CC_GE, &l_done);
         self.asm.cmp_reg_reg(X21, XZR);
         self.asm.bcond_label(CC_EQ, &l_first);
-        self.emit_write_literal(", ");
+        self.emit_write_literal(", ", fd);
         self.asm.label(&l_first);
 
         self.asm.ldr(X0, X19, 0);
         match elem {
-            Elem::Int => self.asm.bl_label("print_int"),
-            Elem::Str => self.emit_write_text_value(),
+            Elem::Int => {
+                self.asm.mov_imm64(X9, fd);
+                self.asm.bl_label("print_int");
+            }
+            Elem::Str => self.emit_write_text_value(fd),
             Elem::Bool => {
                 let l_false = self.new_label("say_item_false");
                 let l_after = self.new_label("say_item_after");
@@ -1207,7 +1337,7 @@ impl Codegen {
                 let f = self.intern("false");
                 self.asm.mov_abs(X0, f);
                 self.asm.label(&l_after);
-                self.emit_write_text_value();
+                self.emit_write_text_value(fd);
             }
         }
 
@@ -1216,20 +1346,20 @@ impl Codegen {
         self.asm.b_label(&l_loop);
 
         self.asm.label(&l_done);
-        self.emit_write_literal("]");
+        self.emit_write_literal("]", fd);
         self.asm.ldr(X19, SP, 0);
         self.asm.ldr(X20, SP, 8);
         self.asm.ldr(X21, SP, 16);
         self.asm.add_imm(SP, SP, 32);
-        self.emit_newline();
+        self.emit_newline(fd);
     }
 
-    fn emit_newline(&mut self) {
+    fn emit_newline(&mut self, fd: u64) {
         let id = self.intern("\n");
         self.asm.mov_abs(X1, id);
         self.asm.add_imm(X1, X1, 8);
         self.asm.mov_imm64(X2, 1);
-        self.asm.mov_imm64(X0, 1);
+        self.asm.mov_imm64(X0, fd);
         self.asm.mov_imm64(X8, SYS_WRITE);
         self.asm.svc();
     }
@@ -1277,7 +1407,7 @@ impl Codegen {
         a.label("pi_write");
         a.mov_reg_reg(X2, X19);
         a.sub_reg_reg(X2, X2, X1); // length
-        a.mov_imm64(X0, 1);
+        a.mov_reg_reg(X0, X9); // chosen file descriptor
         a.mov_imm64(X8, SYS_WRITE);
         a.svc();
 
@@ -1597,6 +1727,345 @@ impl Codegen {
         a.str(X1, X7, 0); // the new item
         a.mov_reg_reg(X0, X4);
         a.ret();
+    }
+
+    /// `empty_text`: a fresh text value with length zero, in X0.
+    fn emit_empty_text(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("empty_text");
+        a.mov_imm64(X1, heap_ptr);
+        a.ldr(X2, X1, 0);
+        a.add_imm(X3, X2, 8);
+        a.mov_imm64(X4, HEAP_END);
+        a.cmp_reg_reg(X3, X4);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X3, X1, 0);
+        a.str(XZR, X2, 0);
+        a.mov_reg_reg(X0, X2);
+        a.ret();
+    }
+
+    /// `cstr_copy`: X0 = a NUL-terminated C string. Copies it into a fresh Rusk
+    /// text value and gives that back in X0.
+    fn emit_cstr_copy(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("cstr_copy");
+        a.mov_reg_reg(X1, X0); // scan pointer
+        a.label("cstr_len_loop");
+        a.ldrb(X2, X1, 0);
+        a.cmp_reg_reg(X2, XZR);
+        a.bcond_label(CC_EQ, "cstr_len_done");
+        a.add_imm(X1, X1, 1);
+        a.b_label("cstr_len_loop");
+
+        a.label("cstr_len_done");
+        a.sub_reg_reg(X2, X1, X0); // length
+        a.mov_imm64(X3, heap_ptr);
+        a.ldr(X4, X3, 0); // destination
+        a.add_reg_reg(X5, X4, X2);
+        a.add_imm(X5, X5, 8);
+        a.mov_imm64(X6, HEAP_END);
+        a.cmp_reg_reg(X5, X6);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X5, X3, 0);
+        a.str(X2, X4, 0);
+
+        a.add_imm(X5, X4, 8); // destination bytes
+        a.mov_reg_reg(X6, X0); // source bytes
+        a.mov_reg_reg(X7, X2);
+        a.label("cstr_copy_loop");
+        a.cmp_reg_reg(X7, XZR);
+        a.bcond_label(CC_EQ, "cstr_copy_done");
+        a.ldrb(X8, X6, 0);
+        a.strb(X8, X5, 0);
+        a.add_imm(X6, X6, 1);
+        a.add_imm(X5, X5, 1);
+        a.sub_imm(X7, X7, 1);
+        a.b_label("cstr_copy_loop");
+
+        a.label("cstr_copy_done");
+        a.mov_reg_reg(X0, X4);
+        a.ret();
+    }
+
+    /// `arg_text`: X0 = 1-based command-line argument number, result text in X0.
+    fn emit_arg_text(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("arg_text");
+        a.mov_imm64(X1, DATA_BASE + ARGS_SP_OFFSET);
+        a.ldr(X1, X1, 0); // initial stack pointer
+        a.ldr(X2, X1, 0); // argc
+        a.movz_reg(X3, 1);
+        a.cmp_reg_reg(X0, X3);
+        a.bcond_label(CC_LT, "arg_text_empty");
+        a.cmp_reg_reg(X0, X2);
+        a.bcond_label(CC_GE, "arg_text_empty");
+        a.add_imm(X1, X1, 8); // argv
+        a.mov_reg_reg(X3, X0);
+        a.add_reg_reg(X3, X3, X3); // *2
+        a.add_reg_reg(X3, X3, X3); // *4
+        a.add_reg_reg(X3, X3, X3); // *8
+        a.add_reg_reg(X1, X1, X3);
+        a.ldr(X0, X1, 0);
+        a.b_label("cstr_copy");
+
+        a.label("arg_text_empty");
+        a.b_label("empty_text");
+    }
+
+    /// `env_text`: X0 = variable name text, result text in X0. Empty when the
+    /// variable is not set.
+    fn emit_env_text(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("env_text");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        a.str(X30, SP, 40);
+
+        a.ldr(X20, X0, 0); // name length
+        a.add_imm(X19, X0, 8); // name bytes
+        a.mov_imm64(X21, DATA_BASE + ARGS_SP_OFFSET);
+        a.ldr(X21, X21, 0); // initial stack pointer
+        a.ldr(X22, X21, 0); // argc
+        a.add_imm(X21, X21, 8); // argv
+        a.mov_reg_reg(X9, X22);
+        a.add_reg_reg(X9, X9, X9); // *2
+        a.add_reg_reg(X9, X9, X9); // *4
+        a.add_reg_reg(X9, X9, X9); // *8
+        a.add_reg_reg(X21, X21, X9); // after argv
+        a.add_imm(X21, X21, 8); // envp
+
+        a.label("env_loop");
+        a.ldr(X24, X21, 0);
+        a.cmp_reg_reg(X24, XZR);
+        a.bcond_label(CC_EQ, "env_missing");
+        a.mov_reg_reg(X9, X24); // cursor in this entry
+        a.mov_reg_reg(X10, X19); // cursor in the name
+        a.mov_reg_reg(X11, X20); // bytes left to match
+        a.label("env_compare");
+        a.cmp_reg_reg(X11, XZR);
+        a.bcond_label(CC_EQ, "env_equal");
+        a.ldrb(X12, X9, 0);
+        a.ldrb(X13, X10, 0);
+        a.cmp_reg_reg(X12, X13);
+        a.bcond_label(CC_NE, "env_next");
+        a.add_imm(X9, X9, 1);
+        a.add_imm(X10, X10, 1);
+        a.sub_imm(X11, X11, 1);
+        a.b_label("env_compare");
+
+        a.label("env_equal");
+        a.ldrb(X12, X9, 0);
+        a.movz_reg(X13, 61); // '='
+        a.cmp_reg_reg(X12, X13);
+        a.bcond_label(CC_NE, "env_next");
+        a.add_imm(X0, X9, 1); // value after '='
+        a.ldr(X30, SP, 40);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.add_imm(SP, SP, 48);
+        a.b_label("cstr_copy");
+
+        a.label("env_next");
+        a.add_imm(X21, X21, 8);
+        a.b_label("env_loop");
+
+        a.label("env_missing");
+        a.ldr(X30, SP, 40);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.add_imm(SP, SP, 48);
+        a.b_label("empty_text");
+    }
+
+    /// `read_stream`: X0 = file descriptor, X1 = 1 to stop at a newline or 0 to
+    /// read to end of file. Gives back text in X0.
+    fn emit_read_stream(&mut self) {
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label("read_stream");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+
+        a.mov_reg_reg(X19, X0); // fd
+        a.mov_reg_reg(X20, X1); // mode
+        a.mov_imm64(X21, heap_ptr);
+        a.ldr(X22, X21, 0); // text value starts here
+        a.add_imm(X10, X22, 8); // write pointer
+
+        a.label("read_stream_loop");
+        a.mov_imm64(X12, HEAP_END);
+        a.cmp_reg_reg(X10, X12);
+        a.bcond_label(CC_GE, "heap_fail");
+        a.mov_reg_reg(X0, X19);
+        a.mov_reg_reg(X1, X10);
+        a.movz_reg(X2, 1);
+        a.mov_imm64(X8, SYS_READ);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LE, "read_stream_done");
+        a.ldrb(X11, X10, 0);
+        a.cmp_reg_reg(X20, XZR);
+        a.bcond_label(CC_EQ, "read_stream_keep");
+        a.movz_reg(X12, 10); // newline
+        a.cmp_reg_reg(X11, X12);
+        a.bcond_label(CC_EQ, "read_stream_done");
+        a.label("read_stream_keep");
+        a.add_imm(X10, X10, 1);
+        a.b_label("read_stream_loop");
+
+        a.label("read_stream_done");
+        a.add_imm(X12, X22, 8);
+        a.sub_reg_reg(X12, X10, X12);
+        a.str(X12, X22, 0);
+        a.str(X10, X21, 0);
+        a.mov_reg_reg(X0, X22);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
+    /// `path_copy`: X0 = path text, result is a NUL-terminated copy in the
+    /// fixed scratch area, in X0.
+    fn emit_path_copy(&mut self) {
+        let too_long = self.intern("burnt: that file path is too long\n");
+        let a = &mut self.asm;
+
+        a.label("path_copy");
+        a.ldr(X1, X0, 0); // length
+        a.mov_imm64(X2, PATH_CAPACITY - 1);
+        a.cmp_reg_reg(X1, X2);
+        a.bcond_label(CC_GT, "path_copy_fail");
+        a.add_imm(X3, X0, 8);
+        a.mov_imm64(X4, DATA_BASE + PATH_OFFSET);
+        a.mov_reg_reg(X5, X4);
+        a.mov_reg_reg(X6, X1);
+        a.label("path_copy_loop");
+        a.cmp_reg_reg(X6, XZR);
+        a.bcond_label(CC_EQ, "path_copy_done");
+        a.ldrb(X7, X3, 0);
+        a.strb(X7, X4, 0);
+        a.add_imm(X3, X3, 1);
+        a.add_imm(X4, X4, 1);
+        a.sub_imm(X6, X6, 1);
+        a.b_label("path_copy_loop");
+        a.label("path_copy_done");
+        a.strb(XZR, X4, 0);
+        a.mov_reg_reg(X0, X5);
+        a.ret();
+
+        a.label("path_copy_fail");
+        a.mov_abs(X0, too_long);
+        a.b_label("runtime_fail");
+    }
+
+    /// `read_file`: X0 = path text, result text in X0.
+    fn emit_read_file(&mut self) {
+        let open_error = self.intern("burnt: I can't open that file\n");
+        let a = &mut self.asm;
+
+        a.label("read_file");
+        a.sub_imm(SP, SP, 64);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X30, SP, 24);
+
+        a.bl_label("path_copy");
+        a.mov_imm64(X0, (-100i64) as u64); // AT_FDCWD
+        a.mov_imm64(X1, DATA_BASE + PATH_OFFSET);
+        a.movz_reg(X2, 0); // O_RDONLY
+        a.movz_reg(X3, 0);
+        a.mov_imm64(X8, SYS_OPENAT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "read_file_fail");
+        a.mov_reg_reg(X19, X0); // fd
+        a.movz_reg(X1, 0); // read to end
+        a.bl_label("read_stream");
+        a.mov_reg_reg(X20, X0); // text
+        a.mov_reg_reg(X0, X19);
+        a.mov_imm64(X8, SYS_CLOSE);
+        a.svc();
+        a.mov_reg_reg(X0, X20);
+        a.ldr(X30, SP, 24);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.add_imm(SP, SP, 64);
+        a.ret();
+
+        a.label("read_file_fail");
+        a.mov_abs(X0, open_error);
+        a.b_label("runtime_fail");
+    }
+
+    /// `write_file`: X0 = text, X1 = path. Replaces the file's contents.
+    fn emit_write_file(&mut self) {
+        let open_error = self.intern("burnt: I can't write to that file\n");
+        let a = &mut self.asm;
+
+        a.label("write_file");
+        a.sub_imm(SP, SP, 64);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X30, SP, 24);
+
+        a.mov_reg_reg(X19, X0); // text
+        a.mov_reg_reg(X20, X1); // path
+        a.mov_reg_reg(X0, X20);
+        a.bl_label("path_copy");
+        a.mov_imm64(X0, (-100i64) as u64); // AT_FDCWD
+        a.mov_imm64(X1, DATA_BASE + PATH_OFFSET);
+        a.mov_imm64(X2, 577); // O_WRONLY | O_CREAT | O_TRUNC
+        a.mov_imm64(X3, 420); // 0o644
+        a.mov_imm64(X8, SYS_OPENAT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "write_file_fail");
+        a.mov_reg_reg(X21, X0); // fd
+        a.ldr(X2, X19, 0); // length
+        a.add_imm(X1, X19, 8); // bytes
+        a.mov_reg_reg(X0, X21);
+        a.mov_imm64(X8, SYS_WRITE);
+        a.svc();
+        a.mov_reg_reg(X0, X21);
+        a.mov_imm64(X8, SYS_CLOSE);
+        a.svc();
+        a.ldr(X30, SP, 24);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.add_imm(SP, SP, 64);
+        a.ret();
+
+        a.label("write_file_fail");
+        a.mov_abs(X0, open_error);
+        a.b_label("runtime_fail");
     }
 
     /// `text_copy`: X0 = text, result is a fresh copy of it in X0.

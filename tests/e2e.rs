@@ -794,3 +794,132 @@ say \"unreachable\"
     assert_eq!(code, 1);
     assert!(stderr.contains("ran out of memory"), "{stderr}");
 }
+
+fn run_with(
+    name: &str,
+    src: &str,
+    args: &[&str],
+    input: Option<&str>,
+    envs: &[(&str, &str)],
+) -> (String, String, i32) {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let path = bake_to_disk(name, src);
+    let mut command = Command::new(&path);
+    command.args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    let out = match input {
+        Some(input) => {
+            command.stdin(Stdio::piped());
+            let mut child = command
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("program should start");
+            child
+                .stdin
+                .take()
+                .expect("piped stdin should exist")
+                .write_all(input.as_bytes())
+                .expect("input should be written");
+            child.wait_with_output().expect("program should finish")
+        }
+        None => command.output().expect("program should start"),
+    };
+
+    let _ = std::fs::remove_file(&path);
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn command_line_arguments_are_readable() {
+    let src = "\
+say number of arguments
+say argument 1
+say argument 2
+say \"[\" + argument 3 + \"]\"
+";
+    let (stdout, stderr, code) = run_with("args", src, &["alpha", "beta"], None, &[]);
+    assert_eq!(stdout, "2\nalpha\nbeta\n[]\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn environment_variables_are_readable_and_missing_ones_are_empty() {
+    let src = "\
+say environment \"RUSK_TEST_VALUE\"
+say \"[\" + environment \"RUSK_SURELY_MISSING\" + \"]\"
+";
+    let (stdout, _, code) = run_with(
+        "environment",
+        src,
+        &[],
+        None,
+        &[("RUSK_TEST_VALUE", "hello")],
+    );
+    assert_eq!(stdout, "hello\n[]\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn standard_input_can_be_read_a_line_at_a_time_or_all_at_once() {
+    let src = "\
+let first be read line
+say \"first: \" + first
+let rest be read all input
+say \"rest: \" + rest
+";
+    let (stdout, _, code) = run_with("stdin", src, &[], Some("one\ntwo\nthree\n"), &[]);
+    assert_eq!(stdout, "first: one\nrest: two\nthree\n\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn files_can_be_written_and_read_back() {
+    let path = std::env::temp_dir().join(format!("rusk-io-{}.txt", std::process::id()));
+    let path_text = format!("\"{}\"", path.display());
+    let src = format!(
+        "write \"saved text\" to file {path_text}\nsay read file {path_text}\nwarn read file {path_text}\n"
+    );
+    let (stdout, stderr, code) = run_with("files", &src, &[], None, &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(stdout, "saved text\n");
+    assert_eq!(stderr, "saved text\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn warn_goes_to_standard_error() {
+    let src = "say \"normal\"\nwarn \"careful\"\nwarn 42\nwarn true\n";
+    let (stdout, stderr, code) = run_full("warn", src);
+    assert_eq!(stdout, "normal\n");
+    assert_eq!(stderr, "careful\n42\ntrue\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn stop_with_sets_the_exit_code_and_stops_the_program() {
+    let src = "say \"before\"\nstop with 7\nsay \"after\"\n";
+    let (stdout, stderr, code) = run_full("stop_with", src);
+    assert_eq!(stdout, "before\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn an_unreadable_file_stops_with_a_sentence() {
+    let src = "say read file \"/definitely/not/here\"\n";
+    let (stdout, stderr, code) = run_full("missing_file", src);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("I can't open that file"), "{stderr}");
+}

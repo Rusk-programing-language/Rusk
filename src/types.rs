@@ -296,6 +296,40 @@ fn infer_stmts(
             Stmt::Expr(e, line) => {
                 type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
             }
+            Stmt::Warn(e, line) => {
+                let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
+                if t == Some(Ty::Nothing) {
+                    return Err(at(
+                        *line,
+                        "that function doesn't give anything back, so there's nothing to warn about"
+                            .into(),
+                    ));
+                }
+            }
+            Stmt::Stop(e, line) => {
+                let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
+                if let Some(t) = t {
+                    if t != Ty::Int {
+                        return Err(at(
+                            *line,
+                            format!("'stop with' needs an exit code as a number, but this is {t}"),
+                        ));
+                    }
+                }
+            }
+            Stmt::WriteFile { text, path, line } => {
+                for (what, e) in [("text", text), ("path", path)] {
+                    let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
+                    if let Some(t) = t {
+                        if t != Ty::Str {
+                            return Err(at(
+                                *line,
+                                format!("'write ... to file' needs {what} as text, but this is {t}"),
+                            ));
+                        }
+                    }
+                }
+            }
             Stmt::If {
                 cond,
                 then,
@@ -613,6 +647,41 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                 Some(Ty::Nothing) => Err("there's nothing to copy — that function gives nothing back".to_string()),
                 other => Ok(other),
             }
+        }
+        Expr::Argument(index) => {
+            let t = type_of(index, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Int {
+                    return Err(format!(
+                        "the argument number must be a number, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Str))
+        }
+        Expr::ArgCount => Ok(Some(Ty::Int)),
+        Expr::Environment(name) => {
+            let t = type_of(name, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Str {
+                    return Err(format!(
+                        "'environment' needs a variable name as text, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Str))
+        }
+        Expr::ReadLine | Expr::ReadAll => Ok(Some(Ty::Str)),
+        Expr::ReadFile(path) => {
+            let t = type_of(path, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Str {
+                    return Err(format!(
+                        "'read file' needs a path as text, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Str))
         }
         Expr::Item(index, array) => {
             let it = type_of(index, scope, sigs)?;

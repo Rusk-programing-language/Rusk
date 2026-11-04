@@ -7,8 +7,12 @@
 //! import_stmt:= "import" (TEXT | NAME) NEWLINE
 //! stmt       := say_stmt | let_stmt | const_stmt | set_stmt | add_stmt | if_stmt
 //!             | repeat_stmt | while_stmt | for_each_stmt | func_def
-//!             | give_back | break_stmt | continue_stmt | expr_stmt
+//!             | give_back | break_stmt | continue_stmt | warn_stmt | stop_stmt
+//!             | write_stmt | expr_stmt
 //! add_stmt   := "add" expr "to" NAME NEWLINE
+//! warn_stmt  := "warn" expr NEWLINE
+//! stop_stmt  := "stop" "with" expr NEWLINE
+//! write_stmt := "write" expr "to" "file" expr NEWLINE
 //! say_stmt   := "say" expr NEWLINE
 //! let_stmt   := ("let" | "variable") NAME "be" expr NEWLINE
 //! const_stmt := "constant" NAME "be" expr NEWLINE
@@ -37,6 +41,10 @@
 //!             | "part" expr "to" expr "of" primary
 //!             | "item" expr "of" primary
 //!             | "copy" "of" primary
+//!             | "argument" (primary | "count")
+//!             | "number" "of" "arguments"
+//!             | "environment" primary
+//!             | "read" ("line" | "all" "input" | "file" primary)
 //!             | "[" (expr ("," expr)*)? "]"
 //!             | ("an")? "empty" "list" "of" TYPE
 //!             | "(" expr ")"
@@ -245,6 +253,31 @@ impl Parser {
             let value = self.expr(true)?;
             self.end_of_line()?;
             return Ok(Stmt::Say(value, line));
+        }
+
+        if self.is_word("warn") {
+            self.bump();
+            let value = self.expr(true)?;
+            self.end_of_line()?;
+            return Ok(Stmt::Warn(value, line));
+        }
+
+        if self.is_word("stop") {
+            self.bump();
+            self.need_word("with", "after 'stop',")?;
+            let code = self.expr(true)?;
+            self.end_of_line()?;
+            return Ok(Stmt::Stop(code, line));
+        }
+
+        if self.is_word("write") {
+            self.bump();
+            let text = self.expr(true)?;
+            self.need_word("to", "after the text in 'write',")?;
+            self.need_word("file", "after 'write ... to',")?;
+            let path = self.expr(true)?;
+            self.end_of_line()?;
+            return Ok(Stmt::WriteFile { text, path, line });
         }
 
         if self.is_word("break") {
@@ -653,6 +686,47 @@ impl Parser {
                     self.bump(); // "of"
                     let inner = self.primary()?;
                     return Ok(Expr::Length(Box::new(inner)));
+                }
+                if word == "argument" {
+                    self.bump(); // "argument"
+                    if self.eat_word("count") {
+                        return Ok(Expr::ArgCount);
+                    }
+                    let n = self.primary()?;
+                    return Ok(Expr::Argument(Box::new(n)));
+                }
+                if word == "number"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "of")
+                    && matches!(self.peek_at(2), Tok::Ident(s) if s == "arguments")
+                {
+                    self.bump(); // "number"
+                    self.bump(); // "of"
+                    self.bump(); // "arguments"
+                    return Ok(Expr::ArgCount);
+                }
+                if word == "environment" {
+                    self.bump(); // "environment"
+                    let name = self.primary()?;
+                    return Ok(Expr::Environment(Box::new(name)));
+                }
+                if word == "read" {
+                    self.bump(); // "read"
+                    if self.eat_word("line") {
+                        return Ok(Expr::ReadLine);
+                    }
+                    if self.eat_word("all") {
+                        self.need_word("input", "after 'read all',")?;
+                        return Ok(Expr::ReadAll);
+                    }
+                    if self.eat_word("file") {
+                        let path = self.primary()?;
+                        return Ok(Expr::ReadFile(Box::new(path)));
+                    }
+                    return Err(format!(
+                        "line {}: after 'read' I expected 'line', 'all input', or 'file', but found {}",
+                        self.line(),
+                        self.peek().describe()
+                    ));
                 }
                 if word == "copy" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
                     self.bump(); // "copy"

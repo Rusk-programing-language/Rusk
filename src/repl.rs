@@ -14,7 +14,9 @@ use crate::ast::*;
 use crate::types::{self, Sig};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::ffi::OsStr;
+use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -78,6 +80,8 @@ struct Session {
     constants: HashSet<String>,
     funcs: HashMap<String, Rc<Func>>,
     sigs: HashMap<String, Sig>,
+    /// Command-line arguments for `argument N` and `number of arguments`.
+    args: Vec<Vec<u8>>,
     line: usize,
     depth: usize,
 }
@@ -90,6 +94,7 @@ impl Session {
             constants: HashSet::new(),
             funcs: HashMap::new(),
             sigs: HashMap::new(),
+            args: Vec::new(),
             line: 0,
             depth: 0,
         }
@@ -259,6 +264,49 @@ impl Session {
                         self.line
                     )),
                 }
+            }
+            Stmt::Warn(e, _) => {
+                let value = self.eval(e, env)?;
+                if value == Value::Nothing {
+                    return Err(format!(
+                        "line {}: that function doesn't give anything back, so there's nothing to warn about",
+                        self.line
+                    ));
+                }
+                write_value_err(&value, true)
+                    .map_err(|e| format!("line {}: can't write to the screen: {e}", self.line))?;
+                Ok(Flow::Normal)
+            }
+            Stmt::Stop(e, _) => {
+                let code = self.eval_int(e, env)?;
+                io::stdout().flush().ok();
+                io::stderr().flush().ok();
+                std::process::exit(code as i32);
+            }
+            Stmt::WriteFile { text, path, .. } => {
+                let text = match self.eval(text, env)? {
+                    Value::Str(bytes) => bytes,
+                    other => {
+                        return Err(format!(
+                            "line {}: 'write ... to file' needs the text as text, but this is {}",
+                            self.line,
+                            kind_name(&other)
+                        ))
+                    }
+                };
+                let path = match self.eval(path, env)? {
+                    Value::Str(bytes) => bytes,
+                    other => {
+                        return Err(format!(
+                            "line {}: 'write ... to file' needs the path as text, but this is {}",
+                            self.line,
+                            kind_name(&other)
+                        ))
+                    }
+                };
+                std::fs::write(Path::new(OsStr::from_bytes(&path)), text)
+                    .map_err(|_| format!("line {}: I can't write to that file", self.line))?;
+                Ok(Flow::Normal)
             }
             Stmt::If {
                 cond, then, other, ..
@@ -584,6 +632,48 @@ impl Session {
                     return Err(format!("line {}: an item outside the list", self.line));
                 }
                 Ok(items[index as usize - 1].clone())
+            }
+            Expr::Argument(index) => {
+                let n = self.eval_int(index, env)?;
+                if n < 1 || n as usize > self.args.len() {
+                    return Ok(Value::Str(Vec::new()));
+                }
+                Ok(Value::Str(self.args[n as usize - 1].clone()))
+            }
+            Expr::ArgCount => Ok(Value::Int(self.args.len() as i64)),
+            Expr::Environment(name) => {
+                let name = match self.eval(name, env)? {
+                    Value::Str(bytes) => bytes,
+                    other => {
+                        return Err(format!(
+                            "line {}: 'environment' needs a variable name as text, but this is {}",
+                            self.line,
+                            kind_name(&other)
+                        ))
+                    }
+                };
+                Ok(Value::Str(
+                    std::env::var_os(OsStr::from_bytes(&name))
+                        .map(|v| v.as_bytes().to_vec())
+                        .unwrap_or_default(),
+                ))
+            }
+            Expr::ReadLine => Ok(Value::Str(read_stdin_line()?)),
+            Expr::ReadAll => Ok(Value::Str(read_stdin_all()?)),
+            Expr::ReadFile(path) => {
+                let path = match self.eval(path, env)? {
+                    Value::Str(bytes) => bytes,
+                    other => {
+                        return Err(format!(
+                            "line {}: 'read file' needs a path as text, but this is {}",
+                            self.line,
+                            kind_name(&other)
+                        ))
+                    }
+                };
+                let bytes = std::fs::read(Path::new(OsStr::from_bytes(&path)))
+                    .map_err(|_| format!("line {}: I can't open that file", self.line))?;
+                Ok(Value::Str(bytes))
             }
             Expr::Unary(op, inner) => {
                 let value = self.eval(inner, env)?;
@@ -913,6 +1003,16 @@ fn op_word(op: BinOp) -> &'static str {
 fn write_value(value: &Value, newline: bool) -> io::Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    write_value_impl(&mut out, value, newline)
+}
+
+fn write_value_err(value: &Value, newline: bool) -> io::Result<()> {
+    let stderr = io::stderr();
+    let mut out = stderr.lock();
+    write_value_impl(&mut out, value, newline)
+}
+
+fn write_value_impl<W: Write>(out: &mut W, value: &Value, newline: bool) -> io::Result<()> {
     match value {
         Value::Int(n) => write!(out, "{n}")?,
         Value::Str(bytes) => out.write_all(bytes)?,
@@ -923,7 +1023,7 @@ fn write_value(value: &Value, newline: bool) -> io::Result<()> {
                 if i > 0 {
                     out.write_all(b", ")?;
                 }
-                write_value_to(&mut out, item)?;
+                write_value_to(out, item)?;
             }
             out.write_all(b"]")?;
         }
@@ -933,6 +1033,31 @@ fn write_value(value: &Value, newline: bool) -> io::Result<()> {
         out.write_all(b"\n")?;
     }
     out.flush()
+}
+
+fn read_stdin_line() -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match io::stdin().read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => match byte[0] {
+                b'\n' => break,
+                b'\r' => {}
+                b => out.push(b),
+            },
+            Err(e) => return Err(format!("can't read standard input: {e}")),
+        }
+    }
+    Ok(out)
+}
+
+fn read_stdin_all() -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    io::stdin()
+        .read_to_end(&mut out)
+        .map_err(|e| format!("can't read standard input: {e}"))?;
+    Ok(out)
 }
 
 fn write_value_to<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {
@@ -1027,11 +1152,14 @@ pub fn run() -> Result<(), String> {
     }
 
     let stdin = io::stdin();
-    let mut reader = stdin.lock();
     let mut session = Session::new();
+    session.args = std::env::args()
+        .skip(2)
+        .map(|arg| arg.into_bytes())
+        .collect();
 
     loop {
-        let Some(first) = read_line(&mut reader, interactive, "rusk> ")
+        let Some(first) = read_line(&mut stdin.lock(), interactive, "rusk> ")
             .map_err(|e| format!("can't read the prompt: {e}"))?
         else {
             break;
@@ -1050,7 +1178,7 @@ pub fn run() -> Result<(), String> {
         let mut lines = vec![first.to_string()];
         if opens_block(first) || starts_indented(first) {
             loop {
-                let Some(more) = read_line(&mut reader, interactive, "...   ")
+                let Some(more) = read_line(&mut stdin.lock(), interactive, "...   ")
                     .map_err(|e| format!("can't read the prompt: {e}"))?
                 else {
                     break;
@@ -1232,5 +1360,32 @@ mod tests {
             .unwrap();
         assert_eq!(session.globals["loaded"], Value::Int(6));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn arguments_and_files_work_at_the_prompt() {
+        let path = std::env::temp_dir().join(format!("rusk-repl-io-{}.txt", std::process::id()));
+        let mut session = Session::new();
+        session.args = vec![b"alpha".to_vec(), b"beta".to_vec()];
+
+        session.submit("let first be argument 1\n").unwrap();
+        session.submit("let count be number of arguments\n").unwrap();
+        session
+            .submit(&format!(
+                "write \"from the prompt\" to file \"{}\"\n",
+                path.display()
+            ))
+            .unwrap();
+        session
+            .submit(&format!("let back be read file \"{}\"\n", path.display()))
+            .unwrap();
+
+        assert_eq!(session.globals["first"], Value::Str(b"alpha".to_vec()));
+        assert_eq!(session.globals["count"], Value::Int(2));
+        assert_eq!(
+            session.globals["back"],
+            Value::Str(b"from the prompt".to_vec())
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
