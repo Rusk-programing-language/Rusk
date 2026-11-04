@@ -601,8 +601,9 @@ it does not write an executable.
 
 ### The native terminal UI
 
-`rusk tui` opens a small full-screen demo that exercises the tool's own
-terminal module. It is not a wrapper around an external TUI crate:
+`rusk tui` starts the interactive session in a full-screen interface built on
+the tool's own terminal module. It is not a wrapper around an external TUI
+crate:
 
 - raw mode is set through `termios` (`tcgetattr` / `tcsetattr`), keeping the
   original settings and restoring them on exit or drop;
@@ -610,12 +611,20 @@ terminal module. It is not a wrapper around an external TUI crate:
 - the input decoder handles printable ASCII, UTF-8 split across reads, control
   letters, arrows, Home/End, Insert/Delete, Page Up/Down, and function keys;
 - a 100 ms poll loop notices terminal resizes;
-- when stdin or stdout is not a terminal, or `TERM=dumb`, the demo prints the
-  wordmark and a plain explanation instead of using escapes.
+- when stdin or stdout is not a terminal, or `TERM=dumb`, `rusk tui` runs the
+  ordinary line session instead of using escapes.
+
+The full-screen session keeps the wordmark, transcript, input line, history,
+and command results on one screen. Up/Down recall earlier lines, Page Up/Down
+scroll the transcript, Ctrl-C cancels the current line or block, Ctrl-L clears
+the transcript, and Ctrl-D leaves. `stop with CODE` restores the terminal
+before exiting with that status. `rusk tui demo` opens the smaller demo that
+shows the terminal size and the keys you press; press `q` or Ctrl-C to leave
+it.
 
 The TUI is part of the `rusk` command-line tool, not a new Rusk statement and
-not something a baked program links against. Press `q` or Ctrl-C to leave the
-demo; the alternate screen and cursor state are restored first.
+not something a baked program links against. The alternate screen and cursor
+state are restored first.
 
 ## 14. Errors
 

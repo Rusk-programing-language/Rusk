@@ -143,6 +143,10 @@ impl Ansi {
         self.out.push_str("\x1b[2J\x1b[H");
     }
 
+    pub fn clear_line(&mut self) {
+        self.out.push_str("\x1b[2K");
+    }
+
     pub fn move_to(&mut self, row: u16, col: u16) {
         let _ = write!(self.out, "\x1b[{};{}H", row.max(1), col.max(1));
     }

@@ -11,7 +11,7 @@
 //! bytes, not Unicode scalars, or the REPL would disagree with a baked program.
 
 use crate::ast::*;
-use crate::tui::BANNER;
+use crate::tui::{Ansi, Color, Key, Terminal, BANNER};
 use crate::types::{self, Sig};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -22,6 +22,11 @@ use std::path::Path;
 use std::rc::Rc;
 
 const MAX_DEPTH: usize = 2000;
+
+/// Internal marker for `stop with`. It travels as an ordinary error so a stop
+/// inside a function or loop unwinds the evaluator; the REPL notices the
+/// `stop` field and never shows this text.
+const STOP: &str = "\0rusk-stop";
 
 #[derive(Debug, Clone, PartialEq)]
 enum Value {
@@ -83,6 +88,11 @@ struct Session {
     sigs: HashMap<String, Sig>,
     /// Command-line arguments for `argument N` and `number of arguments`.
     args: Vec<Vec<u8>>,
+    /// When set, output is collected here instead of going to stdout.
+    capture: Option<Vec<u8>>,
+    /// The status from `stop with`, kept until the caller can restore the
+    /// terminal before exiting.
+    stop: Option<i32>,
     line: usize,
     depth: usize,
 }
@@ -96,6 +106,8 @@ impl Session {
             funcs: HashMap::new(),
             sigs: HashMap::new(),
             args: Vec::new(),
+            capture: None,
+            stop: None,
             line: 0,
             depth: 0,
         }
@@ -107,6 +119,42 @@ impl Session {
         self.constants.clear();
         self.funcs.clear();
         self.sigs.clear();
+        self.stop = None;
+    }
+
+    /// Collect everything the session prints instead of writing it to stdout.
+    fn begin_capture(&mut self) {
+        self.capture = Some(Vec::new());
+    }
+
+    /// Stop collecting and return what was printed as text.
+    fn end_capture(&mut self) -> String {
+        let bytes = self.capture.take().unwrap_or_default();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn write_out(&mut self, value: &Value, newline: bool) -> io::Result<()> {
+        match self.capture.as_mut() {
+            Some(buffer) => write_value_impl(buffer, value, newline),
+            None => write_value(value, newline),
+        }
+    }
+
+    fn write_warn(&mut self, value: &Value, newline: bool) -> io::Result<()> {
+        match self.capture.as_mut() {
+            Some(buffer) => write_value_impl(buffer, value, newline),
+            None => write_value_err(value, newline),
+        }
+    }
+
+    fn write_line(&mut self, text: &str) {
+        match self.capture.as_mut() {
+            Some(buffer) => {
+                let _ = buffer.write_all(text.as_bytes());
+                let _ = buffer.write_all(b"\n");
+            }
+            None => println!("{text}"),
+        }
     }
 
     /// Type check a submission against the session, then run it statement by
@@ -155,6 +203,10 @@ impl Session {
                     ));
                     break;
                 }
+                Err(e) if self.stop.is_some() && e == STOP => {
+                    result = Ok(());
+                    break;
+                }
                 Err(e) => {
                     result = Err(e);
                     break;
@@ -182,7 +234,7 @@ impl Session {
                         self.line
                     ));
                 }
-                write_value(&value, true)
+                self.write_out(&value, true)
                     .map_err(|e| format!("line {}: can't write to the screen: {e}", self.line))?;
                 Ok(Flow::Normal)
             }
@@ -274,15 +326,14 @@ impl Session {
                         self.line
                     ));
                 }
-                write_value_err(&value, true)
+                self.write_warn(&value, true)
                     .map_err(|e| format!("line {}: can't write to the screen: {e}", self.line))?;
                 Ok(Flow::Normal)
             }
             Stmt::Stop(e, _) => {
                 let code = self.eval_int(e, env)?;
-                io::stdout().flush().ok();
-                io::stderr().flush().ok();
-                std::process::exit(code as i32);
+                self.stop = Some(code as i32);
+                Err(STOP.to_string())
             }
             Stmt::WriteFile { text, path, .. } => {
                 let text = match self.eval(text, env)? {
@@ -392,7 +443,7 @@ impl Session {
             Stmt::Expr(e, _) => {
                 let value = self.eval(e, env)?;
                 if value != Value::Nothing {
-                    write_value(&value, true).map_err(|e| {
+                    self.write_out(&value, true).map_err(|e| {
                         format!("line {}: can't write to the screen: {e}", self.line)
                     })?;
                 }
@@ -873,13 +924,13 @@ impl Session {
         };
         match name {
             "help" | "h" | "?" => {
-                print_help();
+                self.write_line(help_text());
                 Ok(true)
             }
             "quit" | "exit" | "q" => Ok(false),
             "reset" | "clear" => {
                 self.reset();
-                println!("forgotten everything.");
+                self.write_line("forgotten everything.");
                 Ok(true)
             }
             "vars" => {
@@ -907,43 +958,51 @@ impl Session {
         }
     }
 
-    fn show_vars(&self) {
+    fn show_vars(&mut self) {
+        let mut lines = Vec::new();
         if self.globals.is_empty() {
-            println!("nothing yet.");
-            return;
+            lines.push("nothing yet.".to_string());
+        } else {
+            let mut names: Vec<&String> = self.globals.keys().collect();
+            names.sort();
+            for name in names {
+                lines.push(format!("{name} = {}", self.globals[name].display()));
+            }
         }
-        let mut names: Vec<&String> = self.globals.keys().collect();
-        names.sort();
-        for name in names {
-            println!("{name} = {}", self.globals[name].display());
+        for line in lines {
+            self.write_line(&line);
         }
     }
 
-    fn show_funcs(&self) {
+    fn show_funcs(&mut self) {
+        let mut lines = Vec::new();
         if self.funcs.is_empty() {
-            println!("no functions yet.");
-            return;
-        }
-        let mut names: Vec<&String> = self.funcs.keys().collect();
-        names.sort();
-        for name in names {
-            let func = &self.funcs[name];
-            let params = func
-                .params
-                .iter()
-                .map(|p| format!("{} as {}", p.name, p.ty))
-                .collect::<Vec<_>>()
-                .join(" and ");
-            let gives = self
-                .sigs
-                .get(name)
-                .map(|sig| sig.ret)
-                .unwrap_or(Ty::Nothing);
-            if params.is_empty() {
-                println!("to {name}: gives back {gives}");
-            } else {
-                println!("to {name} with {params}: gives back {gives}");
+            lines.push("no functions yet.".to_string());
+        } else {
+            let mut names: Vec<&String> = self.funcs.keys().collect();
+            names.sort();
+            for name in names {
+                let func = &self.funcs[name];
+                let params = func
+                    .params
+                    .iter()
+                    .map(|p| format!("{} as {}", p.name, p.ty))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                let gives = self
+                    .sigs
+                    .get(name)
+                    .map(|sig| sig.ret)
+                    .unwrap_or(Ty::Nothing);
+                if params.is_empty() {
+                    lines.push(format!("to {name}: gives back {gives}"));
+                } else {
+                    lines.push(format!("to {name} with {params}: gives back {gives}"));
+                }
             }
+        }
+        for line in lines {
+            self.write_line(&line);
         }
     }
 }
@@ -1136,6 +1195,345 @@ fn trim_newline(line: &str) -> &str {
     line.trim_end_matches(|c| c == '\n' || c == '\r')
 }
 
+/// How many characters (not bytes) a string holds.
+fn char_count(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn char_offset(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map(|(offset, _)| offset)
+        .unwrap_or(text.len())
+}
+
+fn insert_char(text: &mut String, index: usize, ch: char) {
+    let offset = char_offset(text, index);
+    text.insert(offset, ch);
+}
+
+fn remove_char(text: &mut String, index: usize) {
+    let offset = char_offset(text, index);
+    if offset < text.len() {
+        text.remove(offset);
+    }
+}
+
+fn wrap_line(line: &str, width: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut used = 0;
+    for ch in line.chars() {
+        if used == width {
+            lines.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        current.push(ch);
+        used += 1;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+fn append_output(transcript: &mut Vec<String>, output: &str) {
+    for line in output.split_terminator('\n') {
+        transcript.push(line.to_string());
+    }
+}
+
+fn submit_in_tui(session: &mut Session, transcript: &mut Vec<String>, lines: &[String]) {
+    let src = format!("{}\n", lines.join("\n"));
+    session.begin_capture();
+    let result = session.submit(&src);
+    let output = session.end_capture();
+    append_output(transcript, &output);
+    if let Err(e) = result {
+        if e != STOP {
+            transcript.push(format!("burnt: {e}"));
+        }
+    }
+}
+
+fn draw_tui(
+    terminal: &mut Terminal,
+    transcript: &[String],
+    current: &str,
+    cursor: usize,
+    pending: &[String],
+    scroll: usize,
+) -> Result<(), String> {
+    let (screen_width, screen_height) = terminal.size();
+    let width = screen_width.max(1) as usize;
+    let height = screen_height.max(4) as usize;
+    let area = height - 2;
+
+    let wrapped: Vec<String> = transcript
+        .iter()
+        .flat_map(|line| wrap_line(line, width))
+        .collect();
+    let max_scroll = wrapped.len().saturating_sub(area);
+    let scroll = scroll.min(max_scroll);
+    let start = max_scroll - scroll;
+
+    let prompt = if pending.is_empty() {
+        "rusk> "
+    } else {
+        "...   "
+    };
+
+    let mut frame = Ansi::new();
+    frame.clear();
+    frame.hide_cursor();
+
+    for row in 0..area {
+        frame.move_to((row + 1) as u16, 1);
+        frame.clear_line();
+        if let Some(line) = wrapped.get(start + row) {
+            frame.text(line);
+        }
+    }
+
+    frame.move_to((area + 1) as u16, 1);
+    frame.clear_line();
+    frame.color(Color::BrightCyan);
+    frame.text(prompt);
+    frame.reset();
+    frame.text(current);
+    let column = prompt.chars().count() + cursor + 1;
+    frame.move_to((area + 1) as u16, column.min(width).max(1) as u16);
+    frame.show_cursor();
+
+    frame.move_to(height as u16, 1);
+    frame.clear_line();
+    frame.color(Color::BrightBlack);
+    frame.text("Enter run  ·  Up/Down history  ·  Ctrl-D quit  ·  Ctrl-L clear");
+    frame.reset();
+
+    terminal
+        .draw(&frame)
+        .map_err(|e| format!("can't draw the screen: {e}"))
+}
+
+/// A full-screen session built on the native terminal module. When stdin or
+/// stdout is not a terminal, this falls back to the ordinary line session, so
+/// `rusk tui < program.rk` still works.
+pub fn run_tui() -> Result<(), String> {
+    let mut terminal = Terminal::open().map_err(|e| format!("can't open the terminal: {e}"))?;
+    if !terminal.is_interactive() {
+        return run();
+    }
+    terminal
+        .enter()
+        .map_err(|e| format!("can't put the terminal in raw mode: {e}"))?;
+
+    let mut session = Session::new();
+    session.args = std::env::args()
+        .skip(2)
+        .map(|arg| arg.into_bytes())
+        .collect();
+
+    let mut transcript: Vec<String> = BANNER.lines().map(str::to_string).collect();
+    transcript.push(String::new());
+    transcript.push(format!(
+        "Rusk {} — an English-like language",
+        env!("CARGO_PKG_VERSION")
+    ));
+    transcript.push("Type :help for commands, :quit to leave.".to_string());
+    transcript.push(String::new());
+
+    let mut current = String::new();
+    let mut cursor = 0usize;
+    let mut pending: Vec<String> = Vec::new();
+    let mut history: Vec<String> = Vec::new();
+    let mut history_at: Option<usize> = None;
+    let mut scroll = 0usize;
+    let mut quit = false;
+
+    while !quit {
+        draw_tui(
+            &mut terminal,
+            &transcript,
+            &current,
+            cursor,
+            &pending,
+            scroll,
+        )?;
+
+        let key = match terminal.read_key() {
+            Ok(key) => key,
+            Err(e) => {
+                let _ = terminal.leave();
+                return Err(format!("can't read a key: {e}"));
+            }
+        };
+
+        match key {
+            Some(Key::Char(ch)) => {
+                insert_char(&mut current, cursor, ch);
+                cursor += 1;
+                history_at = None;
+            }
+            Some(Key::Enter) => {
+                let line = std::mem::take(&mut current);
+                cursor = 0;
+                let line_pending = !pending.is_empty();
+                transcript.push(format!(
+                    "{}{}",
+                    if line_pending { "...   " } else { "rusk> " },
+                    line
+                ));
+                if !line.trim().is_empty() {
+                    history.push(line.clone());
+                }
+                history_at = None;
+
+                if line_pending {
+                    if line.trim().is_empty() {
+                        let lines = std::mem::take(&mut pending);
+                        submit_in_tui(&mut session, &mut transcript, &lines);
+                        scroll = 0;
+                        if session.stop.is_some() {
+                            quit = true;
+                        }
+                    } else {
+                        pending.push(line);
+                    }
+                } else if line.trim().is_empty() {
+                    // An empty line at the first prompt is just a new prompt.
+                } else if let Some(command) = line.trim().strip_prefix(':') {
+                    session.begin_capture();
+                    let result = session.command(command);
+                    let output = session.end_capture();
+                    append_output(&mut transcript, &output);
+                    match result {
+                        Ok(true) => {}
+                        Ok(false) => quit = true,
+                        Err(e) => transcript.push(format!("burnt: {e}")),
+                    }
+                    if session.stop.is_some() {
+                        quit = true;
+                    }
+                    scroll = 0;
+                } else if opens_block(&line) || starts_indented(&line) {
+                    pending.push(line);
+                } else {
+                    submit_in_tui(&mut session, &mut transcript, &[line]);
+                    scroll = 0;
+                    if session.stop.is_some() {
+                        quit = true;
+                    }
+                }
+            }
+            Some(Key::Backspace) => {
+                if cursor > 0 {
+                    cursor -= 1;
+                    remove_char(&mut current, cursor);
+                }
+                history_at = None;
+            }
+            Some(Key::Delete) => {
+                remove_char(&mut current, cursor);
+                history_at = None;
+            }
+            Some(Key::Left) => {
+                cursor = cursor.saturating_sub(1);
+            }
+            Some(Key::Right) => {
+                cursor = (cursor + 1).min(char_count(&current));
+            }
+            Some(Key::Home) | Some(Key::Ctrl('a')) => cursor = 0,
+            Some(Key::End) | Some(Key::Ctrl('e')) => cursor = char_count(&current),
+            Some(Key::Tab) => {
+                for _ in 0..4 {
+                    insert_char(&mut current, cursor, ' ');
+                    cursor += 1;
+                }
+                history_at = None;
+            }
+            Some(Key::Up) => {
+                if !history.is_empty() {
+                    let at = match history_at {
+                        None => history.len() - 1,
+                        Some(0) => 0,
+                        Some(index) => index - 1,
+                    };
+                    history_at = Some(at);
+                    current = history[at].clone();
+                    cursor = char_count(&current);
+                }
+            }
+            Some(Key::Down) => match history_at {
+                Some(index) if index + 1 < history.len() => {
+                    history_at = Some(index + 1);
+                    current = history[index + 1].clone();
+                    cursor = char_count(&current);
+                }
+                Some(_) => {
+                    history_at = None;
+                    current.clear();
+                    cursor = 0;
+                }
+                None => {}
+            },
+            Some(Key::Ctrl('c')) => {
+                current.clear();
+                cursor = 0;
+                pending.clear();
+                history_at = None;
+                transcript.push("^C".to_string());
+                scroll = 0;
+            }
+            Some(Key::Ctrl('d')) => {
+                if current.is_empty() && pending.is_empty() {
+                    quit = true;
+                } else if cursor < char_count(&current) {
+                    remove_char(&mut current, cursor);
+                }
+            }
+            Some(Key::Ctrl('l')) => {
+                transcript.clear();
+                scroll = 0;
+            }
+            Some(Key::Ctrl('u')) => {
+                for _ in 0..cursor {
+                    remove_char(&mut current, 0);
+                }
+                cursor = 0;
+            }
+            Some(Key::Ctrl('k')) => {
+                while cursor < char_count(&current) {
+                    remove_char(&mut current, cursor);
+                }
+            }
+            Some(Key::PageUp) => {
+                scroll = scroll.saturating_add((terminal.size().1.max(4) as usize - 2) / 2);
+            }
+            Some(Key::PageDown) => {
+                scroll = scroll.saturating_sub((terminal.size().1.max(4) as usize - 2) / 2);
+            }
+            Some(Key::Resize(_, _)) | None => {}
+            Some(Key::Eof) => quit = true,
+            Some(_) => {}
+        }
+    }
+
+    terminal
+        .leave()
+        .map_err(|e| format!("can't restore the terminal: {e}"))?;
+    if let Some(code) = session.stop {
+        io::stdout().flush().ok();
+        io::stderr().flush().ok();
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
 /// Run the interactive session on stdin/stdout.
 pub fn run() -> Result<(), String> {
     let interactive = io::stdin().is_terminal();
@@ -1167,6 +1565,11 @@ pub fn run() -> Result<(), String> {
             if !session.command(command)? {
                 break;
             }
+            if let Some(code) = session.stop {
+                io::stdout().flush().ok();
+                io::stderr().flush().ok();
+                std::process::exit(code);
+            }
             continue;
         }
 
@@ -1188,7 +1591,14 @@ pub fn run() -> Result<(), String> {
 
         let src = format!("{}\n", lines.join("\n"));
         if let Err(e) = session.submit(&src) {
-            eprintln!("burnt: {e}");
+            if e != STOP {
+                eprintln!("burnt: {e}");
+            }
+        }
+        if let Some(code) = session.stop {
+            io::stdout().flush().ok();
+            io::stderr().flush().ok();
+            std::process::exit(code);
         }
     }
 
@@ -1198,9 +1608,8 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn print_help() {
-    println!(
-        "Commands
+fn help_text() -> &'static str {
+    "Commands
   :help            show this list
   :quit            leave the session
   :reset           forget every name and function
@@ -1210,7 +1619,6 @@ fn print_help() {
 
 Type Rusk at the prompt. A line ending in ':' opens a block; finish it with a
 blank line. An expression on its own line shows its value, as in Python."
-    );
 }
 
 #[cfg(test)]
