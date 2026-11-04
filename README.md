@@ -30,10 +30,12 @@ compile error, and `copy of` makes a fresh value instead. The runtime also
 reports division by zero, heap exhaustion, and runaway recursion as Rusk
 errors instead of crashing. Programs can read command-line arguments,
 environment variables, standard input, and files, and can write files, warn on
-standard error, and choose an exit status. Everything from v0.5 — constants,
+standard error, and choose an exit status. The `rusk` tool also ships a small
+native terminal UI with raw mode, ANSI frames, and key decoding, written
+without a TUI crate. Everything from v0.5 — constants,
 homogeneous lists, `import`, text operations, and the interactive session —
 still works. The compiler is a lexer, parser, import expander, type checker,
-ownership checker, AArch64 code generator, and ELF writer, with 154 tests. It
+ownership checker, AArch64 code generator, and ELF writer, with 163 tests. It
 targets **AArch64 Linux** only.
 
 ## Quick start
@@ -42,6 +44,7 @@ targets **AArch64 Linux** only.
 cargo build --release
 cargo run --                              # start the interactive session
 cargo run -- run examples/hello.rk       # bake and run
+cargo run -- tui                          # try the native terminal UI
 cargo run -- build examples/loop.rk      # write ./examples/loop
 cargo run -- check examples/numbers.rk   # bake without writing anything
 ```
@@ -250,6 +253,13 @@ positions count bytes just like a baked program.
 
 Piped input skips the banner and prompts, so `rusk < program.rk` works too.
 
+`rusk tui` opens a small full-screen demo built on the same native terminal
+module as the rest of the tool. It puts the terminal into raw mode through
+`termios`, draws ANSI frames, decodes arrow/Home/End/function keys and UTF-8,
+notices window resizes, and restores the terminal on the way out. There is no
+`crossterm` or `ratatui`; over a pipe the command prints plain text instead of
+escapes.
+
 ## How it works
 
 ```text
@@ -291,6 +301,7 @@ ownership   one owner per text value and list
 | `src/aarch64.rs` | Hand-written instruction encoder and branch/address fixups |
 | `src/elf.rs` | Static ELF64 executable writer |
 | `src/repl.rs` | Interactive session: tree-walking evaluator over the same AST |
+| `src/tui.rs` | Native terminal UI: raw mode, ANSI frames, key decoding, resize fallback |
 | `src/main.rs` | The `rusk` CLI |
 
 Runtime facts worth knowing:

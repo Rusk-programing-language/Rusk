@@ -11,6 +11,7 @@
 //! bytes, not Unicode scalars, or the REPL would disagree with a baked program.
 
 use crate::ast::*;
+use crate::tui::BANNER;
 use crate::types::{self, Sig};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -1134,12 +1135,6 @@ fn read_line<R: BufRead>(
 fn trim_newline(line: &str) -> &str {
     line.trim_end_matches(|c| c == '\n' || c == '\r')
 }
-
-/// The wordmark shown when the session starts on a terminal.
-const BANNER: &str = "\
-░█▀▄░█░█░█▀▀░█░█
-░█▀▄░█░█░▀▀█░█▀▄
-░▀░▀░▀▀▀░▀▀▀░▀░▀";
 
 /// Run the interactive session on stdin/stdout.
 pub fn run() -> Result<(), String> {

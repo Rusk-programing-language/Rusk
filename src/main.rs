@@ -3,6 +3,7 @@
 //! ```text
 //! rusk                              start the interactive session
 //! rusk repl                         start the interactive session
+//! rusk tui                          open the native terminal demo
 //! rusk build <file.rk> [-o <out>]   bake a native executable
 //! rusk run   <file.rk> [args...]  bake and run it, passing the arguments on
 //! rusk check <file.rk>              bake without writing anything
@@ -33,6 +34,7 @@ fn run(args: &[String]) -> Result<(), String> {
 
     match command {
         "repl" | "console" => rusk::repl::run(),
+        "tui" => rusk::tui::run_demo(),
         "build" => {
             let (input, output) = parse_targets(&args[1..])?;
             let bytes = bake_bytes(&input)?;
@@ -92,6 +94,7 @@ fn print_help() {
 USAGE
   rusk                              start the interactive session
   rusk repl                         start the interactive session
+  rusk tui                          open the native terminal demo
   rusk build <file.rk> [-o <out>]   bake a native executable
   rusk run   <file.rk> [args...]   bake it and run it, passing arguments on
   rusk check <file.rk>              bake without writing an executable

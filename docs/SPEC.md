@@ -599,6 +599,24 @@ When stdin is not a terminal, the banner and prompts are omitted, so
 `rusk < program.rk` works as a pipe. The session is not a `.rk` file compiler:
 it does not write an executable.
 
+### The native terminal UI
+
+`rusk tui` opens a small full-screen demo that exercises the tool's own
+terminal module. It is not a wrapper around an external TUI crate:
+
+- raw mode is set through `termios` (`tcgetattr` / `tcsetattr`), keeping the
+  original settings and restoring them on exit or drop;
+- frames are built as ANSI escape strings and written in one pass;
+- the input decoder handles printable ASCII, UTF-8 split across reads, control
+  letters, arrows, Home/End, Insert/Delete, Page Up/Down, and function keys;
+- a 100 ms poll loop notices terminal resizes;
+- when stdin or stdout is not a terminal, or `TERM=dumb`, the demo prints the
+  wordmark and a plain explanation instead of using escapes.
+
+The TUI is part of the `rusk` command-line tool, not a new Rusk statement and
+not something a baked program links against. Press `q` or Ctrl-C to leave the
+demo; the alternate screen and cursor state are restored first.
+
 ## 14. Errors
 
 The compiler reports problems with a line number and a sentence:
@@ -703,6 +721,8 @@ failure.
 - System I/O covers text files and the three standard streams. There are no
   directories, sockets, processes, or random-access file positions, and a path
   is limited to 4095 bytes.
+- The native TUI uses Linux `termios` and ANSI escapes. It is for the `rusk`
+  tool only; baked programs have no terminal primitives yet.
 - At most 8 parameters per function; no function values, closures, or
   overloading.
 - Imports are textual inclusion in one global namespace; there are no module

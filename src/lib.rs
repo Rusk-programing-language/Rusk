@@ -19,6 +19,7 @@ pub mod lexer;
 pub mod ownership;
 pub mod parser;
 pub mod repl;
+pub mod tui;
 pub mod types;
 
 use std::path::Path;
