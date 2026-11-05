@@ -108,11 +108,17 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             let cur = *indents.last().unwrap();
             if col > cur {
                 indents.push(col);
-                toks.push(Token { tok: Tok::Indent, line });
+                toks.push(Token {
+                    tok: Tok::Indent,
+                    line,
+                });
             } else if col < cur {
                 while col < *indents.last().unwrap() {
                     indents.pop();
-                    toks.push(Token { tok: Tok::Dedent, line });
+                    toks.push(Token {
+                        tok: Tok::Dedent,
+                        line,
+                    });
                 }
                 if col != *indents.last().unwrap() {
                     return Err(format!(
@@ -129,7 +135,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         match c {
             ' ' | '\t' | '\r' => i += 1,
             '\n' => {
-                toks.push(Token { tok: Tok::Newline, line });
+                toks.push(Token {
+                    tok: Tok::Newline,
+                    line,
+                });
                 line += 1;
                 i += 1;
                 at_line_start = true;
@@ -186,7 +195,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                         "line {start_line}: this text never gets closed — add a closing '\"'"
                     ));
                 }
-                toks.push(Token { tok: Tok::Str(s), line });
+                toks.push(Token {
+                    tok: Tok::Str(s),
+                    line,
+                });
             }
             '0'..='9' => {
                 let start = i;
@@ -197,7 +209,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 let value = digits.parse::<i64>().map_err(|_| {
                     format!("line {line}: the number {digits} is too big for Rusk (max 9223372036854775807)")
                 })?;
-                toks.push(Token { tok: Tok::Int(value), line });
+                toks.push(Token {
+                    tok: Tok::Int(value),
+                    line,
+                });
             }
             c if c.is_alphabetic() || c == '_' => {
                 let start = i;
@@ -205,51 +220,87 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                toks.push(Token { tok: Tok::Ident(word), line });
+                toks.push(Token {
+                    tok: Tok::Ident(word),
+                    line,
+                });
             }
             ':' => {
-                toks.push(Token { tok: Tok::Colon, line });
+                toks.push(Token {
+                    tok: Tok::Colon,
+                    line,
+                });
                 i += 1;
             }
             ',' => {
-                toks.push(Token { tok: Tok::Comma, line });
+                toks.push(Token {
+                    tok: Tok::Comma,
+                    line,
+                });
                 i += 1;
             }
             '(' => {
-                toks.push(Token { tok: Tok::LParen, line });
+                toks.push(Token {
+                    tok: Tok::LParen,
+                    line,
+                });
                 i += 1;
             }
             ')' => {
-                toks.push(Token { tok: Tok::RParen, line });
+                toks.push(Token {
+                    tok: Tok::RParen,
+                    line,
+                });
                 i += 1;
             }
             '[' => {
-                toks.push(Token { tok: Tok::LBracket, line });
+                toks.push(Token {
+                    tok: Tok::LBracket,
+                    line,
+                });
                 i += 1;
             }
             ']' => {
-                toks.push(Token { tok: Tok::RBracket, line });
+                toks.push(Token {
+                    tok: Tok::RBracket,
+                    line,
+                });
                 i += 1;
             }
             '+' => {
-                toks.push(Token { tok: Tok::Plus, line });
+                toks.push(Token {
+                    tok: Tok::Plus,
+                    line,
+                });
                 i += 1;
             }
             '-' => {
-                toks.push(Token { tok: Tok::Minus, line });
+                toks.push(Token {
+                    tok: Tok::Minus,
+                    line,
+                });
                 i += 1;
             }
             '*' => {
-                toks.push(Token { tok: Tok::Star, line });
+                toks.push(Token {
+                    tok: Tok::Star,
+                    line,
+                });
                 i += 1;
             }
             '/' => {
-                toks.push(Token { tok: Tok::Slash, line });
+                toks.push(Token {
+                    tok: Tok::Slash,
+                    line,
+                });
                 i += 1;
             }
             '=' => {
                 if i + 1 < n && chars[i + 1] == '=' {
-                    toks.push(Token { tok: Tok::EqEq, line });
+                    toks.push(Token {
+                        tok: Tok::EqEq,
+                        line,
+                    });
                     i += 2;
                 } else {
                     toks.push(Token { tok: Tok::Eq, line });
@@ -258,16 +309,25 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             }
             '!' => {
                 if i + 1 < n && chars[i + 1] == '=' {
-                    toks.push(Token { tok: Tok::NotEq, line });
+                    toks.push(Token {
+                        tok: Tok::NotEq,
+                        line,
+                    });
                     i += 2;
                 } else {
-                    toks.push(Token { tok: Tok::Bang, line });
+                    toks.push(Token {
+                        tok: Tok::Bang,
+                        line,
+                    });
                     i += 1;
                 }
             }
             '<' => {
                 if i + 1 < n && chars[i + 1] == '=' {
-                    toks.push(Token { tok: Tok::LtEq, line });
+                    toks.push(Token {
+                        tok: Tok::LtEq,
+                        line,
+                    });
                     i += 2;
                 } else {
                     toks.push(Token { tok: Tok::Lt, line });
@@ -276,7 +336,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             }
             '>' => {
                 if i + 1 < n && chars[i + 1] == '=' {
-                    toks.push(Token { tok: Tok::GtEq, line });
+                    toks.push(Token {
+                        tok: Tok::GtEq,
+                        line,
+                    });
                     i += 2;
                 } else {
                     toks.push(Token { tok: Tok::Gt, line });
@@ -290,13 +353,22 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
     }
 
     if !matches!(toks.last(), Some(t) if t.tok == Tok::Newline) {
-        toks.push(Token { tok: Tok::Newline, line });
+        toks.push(Token {
+            tok: Tok::Newline,
+            line,
+        });
     }
     while indents.len() > 1 {
         indents.pop();
-        toks.push(Token { tok: Tok::Dedent, line });
+        toks.push(Token {
+            tok: Tok::Dedent,
+            line,
+        });
     }
-    toks.push(Token { tok: Tok::Eof, line });
+    toks.push(Token {
+        tok: Tok::Eof,
+        line,
+    });
     Ok(toks)
 }
 
@@ -325,7 +397,12 @@ mod tests {
     fn comments_and_blank_lines_are_ignored() {
         let src = "# a comment\n\nsay \"hi\"  # trailing\n";
         let toks = lex(src).unwrap();
-        assert_eq!(toks.iter().filter(|t| t.tok == Tok::Ident("say".into())).count(), 1);
+        assert_eq!(
+            toks.iter()
+                .filter(|t| t.tok == Tok::Ident("say".into()))
+                .count(),
+            1
+        );
     }
 
     #[test]

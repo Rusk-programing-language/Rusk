@@ -30,8 +30,8 @@ pub fn expand(source: &str, base: Option<&Path>) -> Result<Program, String> {
 /// Read a file and expand every import it reaches. Errors name the file they
 /// came from.
 pub fn expand_file(path: &Path) -> Result<Program, String> {
-    let source = std::fs::read_to_string(path)
-        .map_err(|e| format!("can't read {}: {e}", path.display()))?;
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
     let canon = canonical(path);
     let mut loader = Loader::new();
     loader.stack.push(canon);
@@ -73,11 +73,8 @@ impl Loader {
             let canon = canonical(&resolved);
 
             if self.stack.contains(&canon) {
-                let mut chain: Vec<String> = self
-                    .stack
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect();
+                let mut chain: Vec<String> =
+                    self.stack.iter().map(|p| p.display().to_string()).collect();
                 chain.push(canon.display().to_string());
                 let message = format!("this import makes a cycle: {}", chain.join(" -> "));
                 return Err(match label {
@@ -92,8 +89,7 @@ impl Loader {
             let imported = std::fs::read_to_string(&resolved)
                 .map_err(|e| format!("can't read {}: {e}", resolved.display()))?;
             self.stack.push(canon.clone());
-            let expanded =
-                self.expand_source(&imported, resolved.parent(), Some(&resolved))?;
+            let expanded = self.expand_source(&imported, resolved.parent(), Some(&resolved))?;
             self.stack.pop();
             self.loaded.insert(canon);
             stmts.extend(expanded.stmts);
@@ -152,11 +148,7 @@ mod tests {
 
     fn scratch() -> PathBuf {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "rusk-imports-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir = std::env::temp_dir().join(format!("rusk-imports-{}-{}", std::process::id(), n));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -202,7 +194,11 @@ mod tests {
             "base.rk",
             "to base_add with a as a number and b as a number:\n    give back a + b\n",
         );
-        write(&dir, "extra.rk", "import \"base\"\nto extra_zero:\n    give back 0\n");
+        write(
+            &dir,
+            "extra.rk",
+            "import \"base\"\nto extra_zero:\n    give back 0\n",
+        );
         let main = write(
             &dir,
             "main.rk",
@@ -256,11 +252,7 @@ mod tests {
     fn imports_inside_blocks_are_rejected() {
         let dir = scratch();
         write(&dir, "helper.rk", "to helper:\n    give back 1\n");
-        let main = write(
-            &dir,
-            "main.rk",
-            "if true:\n    import \"helper\"\n",
-        );
+        let main = write(&dir, "main.rk", "if true:\n    import \"helper\"\n");
         let err = expand_file(&main).unwrap_err();
         assert!(err.contains("top level"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);

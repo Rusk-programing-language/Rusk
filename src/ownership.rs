@@ -58,10 +58,7 @@ pub fn check(program: &Program, sigs: &HashMap<String, Sig>) -> Result<(), Strin
     // Function bodies have their own names; a move inside one never touches a
     // top-level owner.
     for stmt in &program.stmts {
-        if let Stmt::FuncDef {
-            params, body, ..
-        } = stmt
-        {
+        if let Stmt::FuncDef { params, body, .. } = stmt {
             let mut scope = Scope::new();
             for p in params {
                 scope.insert(
@@ -141,10 +138,7 @@ impl<'a> Checker<'a> {
             }
             Stmt::Set { name, value, line } => {
                 let Some(old) = scope.get(name).copied() else {
-                    return Err(at(
-                        *line,
-                        format!("I don't know a thing called '{name}'"),
-                    ));
+                    return Err(at(*line, format!("I don't know a thing called '{name}'")));
                 };
                 if old.constant {
                     return Err(at(
@@ -168,6 +162,12 @@ impl<'a> Checker<'a> {
             }
             Stmt::AddTo { value, name, line } => {
                 Self::line_at(*line, self.expr(value, scope, Use::Move))?;
+                Self::line_at(*line, self.expr(&Expr::Var(name.clone()), scope, Use::Read))?;
+            }
+            Stmt::Remove { index, name, line } => {
+                if let Some(index) = index {
+                    Self::line_at(*line, self.expr(index, scope, Use::Read))?;
+                }
                 Self::line_at(*line, self.expr(&Expr::Var(name.clone()), scope, Use::Read))?;
             }
             Stmt::Warn(e, line) => {
@@ -194,10 +194,7 @@ impl<'a> Checker<'a> {
                 let other_out = self.block(other, &mut other_scope)?;
                 *scope = merge(
                     scope,
-                    &[
-                        (then_scope, then_out.falls),
-                        (other_scope, other_out.falls),
-                    ],
+                    &[(then_scope, then_out.falls), (other_scope, other_out.falls)],
                 );
                 return Ok(Outcome {
                     falls: then_out.falls || other_out.falls,
@@ -262,8 +259,7 @@ impl<'a> Checker<'a> {
             Stmt::Import { line, .. } => {
                 return Err(at(
                     *line,
-                    "this import wasn't resolved — imports only work at the top level"
-                        .to_string(),
+                    "this import wasn't resolved — imports only work at the top level".to_string(),
                 ));
             }
             Stmt::GiveBack(e, line) => {
@@ -315,11 +311,7 @@ impl<'a> Checker<'a> {
             Expr::Var(name) => {
                 let Some(slot) = scope.get_mut(name) else {
                     // A bare name can also be a zero-argument call.
-                    if self
-                        .sigs
-                        .get(name)
-                        .is_some_and(|sig| sig.params.is_empty())
-                    {
+                    if self.sigs.get(name).is_some_and(|sig| sig.params.is_empty()) {
                         return Ok(());
                     }
                     return Err(format!(
@@ -523,13 +515,11 @@ mod tests {
 
     #[test]
     fn moving_text_then_using_it_is_an_error() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 let b be a
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
@@ -576,66 +566,56 @@ say flag
 
     #[test]
     fn passing_text_to_a_function_moves_it() {
-        let message = err(
-            "\
+        let message = err("\
 to shout with s as text:
     say s
 
 let a be \"hi\"
 shout with a
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
     #[test]
     fn putting_text_in_a_list_moves_it() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 let xs be [a]
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
     #[test]
     fn setting_an_item_takes_ownership() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 let xs be [\"x\"]
 set item 1 of xs to a
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
     #[test]
     fn a_move_inside_a_function_is_local_to_it() {
-        let message = err(
-            "\
+        let message = err("\
 to consume with s as text:
     let t be s
     say s
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
     #[test]
     fn a_move_in_one_branch_poisons_the_name_after_it() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 if true:
     let b be a
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
@@ -654,25 +634,21 @@ to pick with s as text and flag as a truth value:
 
     #[test]
     fn a_move_inside_a_loop_poisons_the_name_after_it() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 repeat 2 times:
     let b be a
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
     #[test]
     fn a_constant_cannot_be_moved() {
-        let message = err(
-            "\
+        let message = err("\
 constant greeting be \"hi\"
 let a be greeting
-",
-        );
+");
         assert!(message.contains("constant"), "{message}");
     }
 
@@ -716,6 +692,21 @@ say xs
     }
 
     #[test]
+    fn removing_from_a_list_does_not_move_the_list_or_the_index() {
+        check_src(
+            "\
+let xs be [\"a\", \"b\", \"c\"]
+let n be 2
+remove item n from xs
+remove last from xs
+say xs
+say n
+",
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn a_zero_argument_call_is_not_a_missing_variable() {
         check_src(
             "\
@@ -744,44 +735,38 @@ say a
 
     #[test]
     fn a_move_before_a_break_poisons_the_name_after_the_loop() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 repeat 2 times:
     let b be a
     break
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
     #[test]
     fn a_move_before_a_continue_poisons_the_name_after_the_loop() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 repeat 2 times:
     let b be a
     continue
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 
     #[test]
     fn a_break_inside_one_branch_still_poisons_the_name() {
-        let message = err(
-            "\
+        let message = err("\
 let a be \"hi\"
 repeat 2 times:
     if true:
         let b be a
         break
 say a
-",
-        );
+");
         assert!(message.contains("moved already"), "{message}");
     }
 }

@@ -44,7 +44,9 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
         } = stmt
         {
             if defs.iter().any(|(n, ..)| *n == name) {
-                return Err(format!("line {line}: there's already a function called '{name}'"));
+                return Err(format!(
+                    "line {line}: there's already a function called '{name}'"
+                ));
             }
             defs.push((name, params, body, *line));
         }
@@ -160,7 +162,11 @@ fn infer_stmts(
             Stmt::Say(e, line) => {
                 let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
                 if t == Some(Ty::Nothing) {
-                    return Err(at(*line, "that function doesn't give anything back, so there's nothing to say".into()));
+                    return Err(at(
+                        *line,
+                        "that function doesn't give anything back, so there's nothing to say"
+                            .into(),
+                    ));
                 }
             }
             Stmt::Let { name, value, line } => {
@@ -251,10 +257,7 @@ fn infer_stmts(
                     if vt != elem.ty() {
                         return Err(at(
                             *line,
-                            format!(
-                                "this list holds {}, but the new item is {vt}",
-                                elem.ty()
-                            ),
+                            format!("this list holds {}, but the new item is {vt}", elem.ty()),
                         ));
                     }
                 }
@@ -285,11 +288,40 @@ fn infer_stmts(
                     if vt != elem.ty() {
                         return Err(at(
                             *line,
-                            format!(
-                                "this list holds {}, but the new item is {vt}",
-                                elem.ty()
-                            ),
+                            format!("this list holds {}, but the new item is {vt}", elem.ty()),
                         ));
+                    }
+                }
+            }
+            Stmt::Remove { index, name, line } => {
+                if let Some(index) = index {
+                    let it = type_of(index, scope, sigs).map_err(|m| at(*line, m))?;
+                    if let Some(t) = it {
+                        if t != Ty::Int {
+                            return Err(at(
+                                *line,
+                                format!("the item number must be a number, but this is {t}"),
+                            ));
+                        }
+                    }
+                }
+                let old = scope
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| at(*line, format!("I don't know a thing called '{name}'")))?;
+                if old.constant {
+                    return Err(at(
+                        *line,
+                        format!("'{name}' is a constant — it can't be changed"),
+                    ));
+                }
+                match old.ty {
+                    Some(Ty::Array(_)) | None => {}
+                    Some(t) => {
+                        return Err(at(
+                            *line,
+                            format!("'remove' needs a list, but '{name}' holds {t}"),
+                        ))
                     }
                 }
             }
@@ -324,7 +356,9 @@ fn infer_stmts(
                         if t != Ty::Str {
                             return Err(at(
                                 *line,
-                                format!("'write ... to file' needs {what} as text, but this is {t}"),
+                                format!(
+                                    "'write ... to file' needs {what} as text, but this is {t}"
+                                ),
                             ));
                         }
                     }
@@ -341,7 +375,9 @@ fn infer_stmts(
                     if t != Ty::Bool {
                         return Err(at(
                             *line,
-                            format!("'if' needs a condition that is true or false, but this is {t}"),
+                            format!(
+                                "'if' needs a condition that is true or false, but this is {t}"
+                            ),
                         ));
                     }
                 }
@@ -456,7 +492,9 @@ fn infer_stmts(
                         Some(old) if *old != t => {
                             return Err(at(
                                 *line,
-                                format!("this function gives back {old} elsewhere, but here it's {t}"),
+                                format!(
+                                    "this function gives back {old} elsewhere, but here it's {t}"
+                                ),
                             ))
                         }
                         _ => *out = Some(t),
@@ -470,10 +508,7 @@ fn infer_stmts(
             }
             Stmt::Continue(line) => {
                 if loops == 0 {
-                    return Err(at(
-                        *line,
-                        "'continue' only works inside a loop".to_string(),
-                    ));
+                    return Err(at(*line, "'continue' only works inside a loop".to_string()));
                 }
             }
             Stmt::FuncDef { line, .. } => {
@@ -644,7 +679,9 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
         Expr::Copy(inner) => {
             let t = type_of(inner, scope, sigs)?;
             match t {
-                Some(Ty::Nothing) => Err("there's nothing to copy — that function gives nothing back".to_string()),
+                Some(Ty::Nothing) => {
+                    Err("there's nothing to copy — that function gives nothing back".to_string())
+                }
                 other => Ok(other),
             }
         }
@@ -676,9 +713,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             let t = type_of(path, scope, sigs)?;
             if let Some(t) = t {
                 if t != Ty::Str {
-                    return Err(format!(
-                        "'read file' needs a path as text, but this is {t}"
-                    ));
+                    return Err(format!("'read file' needs a path as text, but this is {t}"));
                 }
             }
             Ok(Some(Ty::Str))
@@ -687,9 +722,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             let it = type_of(index, scope, sigs)?;
             if let Some(t) = it {
                 if t != Ty::Int {
-                    return Err(format!(
-                        "the item number must be a number, but this is {t}"
-                    ));
+                    return Err(format!("the item number must be a number, but this is {t}"));
                 }
             }
             let at = type_of(array, scope, sigs)?;
@@ -706,9 +739,9 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                 (UnOp::Neg, Some(Ty::Int)) => Ok(Some(Ty::Int)),
                 (UnOp::Neg, Some(t)) => Err(format!("'-' flips a number, but this is {t}")),
                 (UnOp::Not, Some(Ty::Bool)) => Ok(Some(Ty::Bool)),
-                (UnOp::Not, Some(t)) => {
-                    Err(format!("'not' flips something true or false, but this is {t}"))
-                }
+                (UnOp::Not, Some(t)) => Err(format!(
+                    "'not' flips something true or false, but this is {t}"
+                )),
             }
         }
         Expr::Binary(op, left, right) => {
@@ -754,10 +787,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                 }
                 _ => {
                     if lt != rt {
-                        return Err(format!(
-                            "'{}' can't compare {lt} with {rt}",
-                            op_word(*op)
-                        ));
+                        return Err(format!("'{}' can't compare {lt} with {rt}", op_word(*op)));
                     }
                     Ok(Some(Ty::Bool))
                 }
@@ -992,6 +1022,24 @@ say s + \"!\"
 
         let err = check_src("say item 1 of 5\n").unwrap_err();
         assert!(err.contains("needs a list"), "{err}");
+    }
+
+    #[test]
+    fn remove_needs_a_changeable_list_and_a_number_index() {
+        check_src("let xs be [1, 2, 3]\nremove last from xs\nremove item 2 from xs\n").unwrap();
+        check_src("let xs be an empty list of text\nremove last from xs\n").unwrap();
+
+        let err = check_src("let x be 1\nremove last from x\n").unwrap_err();
+        assert!(err.contains("'remove' needs a list"), "{err}");
+
+        let err = check_src("let xs be [1]\nremove item \"one\" from xs\n").unwrap_err();
+        assert!(err.contains("item number must be a number"), "{err}");
+
+        let err = check_src("constant xs be [1]\nremove last from xs\n").unwrap_err();
+        assert!(err.contains("constant"), "{err}");
+
+        let err = check_src("remove last from xs\n").unwrap_err();
+        assert!(err.contains("don't know a thing called 'xs'"), "{err}");
     }
 
     #[test]

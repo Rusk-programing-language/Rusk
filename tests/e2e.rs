@@ -508,8 +508,6 @@ double with 21
     assert!(out.status.success());
 }
 
-
-
 // ---- lists and constants ---------------------------------------------
 
 #[test]
@@ -596,10 +594,7 @@ add false to flags
 say flags
 ";
     let (stdout, code) = run("grow_list", src);
-    assert_eq!(
-        stdout,
-        "[1, 2, 3]\n3\n[7]\n[rye, wheat]\n[true, false]\n"
-    );
+    assert_eq!(stdout, "[1, 2, 3]\n3\n[7]\n[rye, wheat]\n[true, false]\n");
     assert_eq!(code, 0);
 }
 
@@ -621,8 +616,7 @@ say doubled with [1, 2, 3]
 
 #[test]
 fn adding_text_moves_it_into_the_list() {
-    let err = rusk::bake("let a be \"hi\"\nlet xs be [\"x\"]\nadd a to xs\nsay a\n")
-        .unwrap_err();
+    let err = rusk::bake("let a be \"hi\"\nlet xs be [\"x\"]\nadd a to xs\nsay a\n").unwrap_err();
     assert!(err.contains("moved already"), "{err}");
 }
 
@@ -630,6 +624,116 @@ fn adding_text_moves_it_into_the_list() {
 fn add_checks_the_item_kind() {
     let err = rusk::bake("let xs be [1]\nadd \"two\" to xs\n").unwrap_err();
     assert!(err.contains("this list holds a number"), "{err}");
+}
+
+#[test]
+fn lists_grow_past_their_starting_capacity() {
+    let src = "\
+let xs be an empty list of numbers
+let i be 1
+while i is at most 20:
+    add i to xs
+    set i to i + 1
+say xs
+say length of xs
+remove item 10 from xs
+say xs
+say length of xs
+let words be an empty list of text
+add \"a\" to words
+add \"bb\" to words
+add \"ccc\" to words
+add \"dddd\" to words
+add \"eeeee\" to words
+say words
+remove last from words
+say words
+";
+    let (stdout, code) = run("grow_capacity", src);
+    assert_eq!(
+        stdout,
+        "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]\n\
+         20\n\
+         [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]\n\
+         19\n\
+         [a, bb, ccc, dddd, eeeee]\n\
+         [a, bb, ccc, dddd]\n"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn remove_last_and_remove_item_shift_later_items() {
+    let src = "\
+let xs be [1, 2, 3, 4]
+remove last from xs
+say xs
+remove item 1 from xs
+say xs
+remove item 2 from xs
+say xs
+add 9 to xs
+say xs
+let flags be [true, false, true]
+remove item 2 from flags
+say flags
+";
+    let (stdout, code) = run("remove_items", src);
+    assert_eq!(stdout, "[1, 2, 3]\n[2, 3]\n[2]\n[2, 9]\n[true, true]\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn removal_keeps_a_copy_of_the_list_independent() {
+    let src = "\
+let xs be [1, 2, 3]
+let ys be copy of xs
+remove item 2 from ys
+say xs
+say ys
+remove last from xs
+say xs
+say ys
+";
+    let (stdout, code) = run("remove_copy", src);
+    assert_eq!(stdout, "[1, 2, 3]\n[1, 3]\n[1, 2]\n[1, 3]\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn removing_from_an_empty_list_stops_the_program() {
+    let src = "say \"start\"\nlet xs be an empty list of numbers\nremove last from xs\n";
+    let (stdout, stderr, code) = run_full("remove_empty", src);
+    assert_eq!(stdout, "start\n");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("line 3: there's nothing to remove"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn removing_an_item_outside_the_list_stops_the_program() {
+    let src = "say \"start\"\nlet xs be [1, 2]\nremove item 3 from xs\n";
+    let (stdout, stderr, code) = run_full("remove_bounds", src);
+    assert_eq!(stdout, "start\n");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("line 3: an item outside the list"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn remove_checks_the_target_and_index_kinds() {
+    let err = rusk::bake("let n be 1\nremove last from n\n").unwrap_err();
+    assert!(err.contains("'remove' needs a list"), "{err}");
+
+    let err = rusk::bake("let xs be [1]\nremove item \"one\" from xs\n").unwrap_err();
+    assert!(err.contains("item number must be a number"), "{err}");
+
+    let err = rusk::bake("constant xs be [1]\nremove last from xs\n").unwrap_err();
+    assert!(err.contains("constant"), "{err}");
 }
 
 #[test]
@@ -679,7 +783,9 @@ fn a_program_can_import_several_modules() {
     let (bytes, _) = rusk::bake_path(&main).unwrap();
     let out = dir.join("main");
     rusk::elf::write(&out, &bytes).unwrap();
-    let result = Command::new(&out).output().expect("imported program should start");
+    let result = Command::new(&out)
+        .output()
+        .expect("imported program should start");
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n8\n");
@@ -762,7 +868,10 @@ fn dividing_by_zero_stops_with_a_sentence() {
     let (stdout, stderr, code) = run_full("div_zero", src);
     assert_eq!(stdout, "before\n");
     assert_eq!(code, 1);
-    assert!(stderr.contains("line 2: I can't divide by zero"), "{stderr}");
+    assert!(
+        stderr.contains("line 2: I can't divide by zero"),
+        "{stderr}"
+    );
 }
 
 #[test]

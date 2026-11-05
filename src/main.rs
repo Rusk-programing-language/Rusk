@@ -126,7 +126,8 @@ fn parse_run_target(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
     Ok((PathBuf::from(first), args[1..].to_vec()))
 }
 
-fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {    let mut input: Option<PathBuf> = None;
+fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
@@ -165,8 +166,7 @@ fn default_output(input: &Path) -> PathBuf {
 }
 
 fn bake_bytes(input: &Path) -> Result<Vec<u8>, String> {
-    rusk::bake_path(input)
-        .map(|(bytes, _)| bytes)
+    rusk::bake_path(input).map(|(bytes, _)| bytes)
 }
 
 fn size(bytes: usize) -> String {

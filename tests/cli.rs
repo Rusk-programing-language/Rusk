@@ -21,7 +21,11 @@ fn run_forwards_arguments_after_the_file() {
         .expect("rusk should start");
 
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1\nalpha\n");
 }
 

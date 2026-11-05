@@ -1,15 +1,18 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.6):
+//! Grammar (v0.7):
 //!
 //! ```text
 //! program    := (import_stmt | stmt)*
 //! import_stmt:= "import" (TEXT | NAME) NEWLINE
-//! stmt       := say_stmt | let_stmt | const_stmt | set_stmt | add_stmt | if_stmt
-//!             | repeat_stmt | while_stmt | for_each_stmt | func_def
-//!             | give_back | break_stmt | continue_stmt | warn_stmt | stop_stmt
-//!             | write_stmt | expr_stmt
+//! stmt       := say_stmt | let_stmt | const_stmt | set_stmt | add_stmt
+//!             | remove_stmt | if_stmt | repeat_stmt | while_stmt
+//!             | for_each_stmt | func_def | give_back | break_stmt
+//!             | continue_stmt | warn_stmt | stop_stmt | write_stmt
+//!             | expr_stmt
 //! add_stmt   := "add" expr "to" NAME NEWLINE
+//! remove_stmt:= "remove" "last" "from" NAME NEWLINE
+//!             | "remove" "item" expr "from" NAME NEWLINE
 //! warn_stmt  := "warn" expr NEWLINE
 //! stop_stmt  := "stop" "with" expr NEWLINE
 //! write_stmt := "write" expr "to" "file" expr NEWLINE
@@ -301,8 +304,31 @@ impl Parser {
             return Ok(Stmt::AddTo { value, name, line });
         }
 
+        if self.is_word("remove") {
+            self.bump();
+            let index = if self.eat_word("last") {
+                None
+            } else if self.eat_word("item") {
+                Some(self.expr(true)?)
+            } else {
+                return Err(format!(
+                    "line {}: after 'remove' I expected 'last' or 'item N', but found {}",
+                    self.line(),
+                    self.peek().describe()
+                ));
+            };
+            self.need_word("from", "after 'remove last' or the item number,")?;
+            let name = self.name("after 'remove ... from'")?;
+            self.end_of_line()?;
+            return Ok(Stmt::Remove { index, name, line });
+        }
+
         if self.is_word("let") || self.is_word("variable") {
-            let word = if self.is_word("let") { "let" } else { "variable" };
+            let word = if self.is_word("let") {
+                "let"
+            } else {
+                "variable"
+            };
             self.bump();
             let name = self.name(&format!("after '{word}'"))?;
             self.need_word("be", &format!("after '{word} {name}',"))?;
@@ -361,7 +387,12 @@ impl Parser {
             } else {
                 Vec::new()
             };
-            return Ok(Stmt::If { cond, then, other, line });
+            return Ok(Stmt::If {
+                cond,
+                then,
+                other,
+                line,
+            });
         }
 
         if self.is_word("repeat") {
@@ -657,8 +688,7 @@ impl Parser {
                 Ok(Expr::Array(items))
             }
             Tok::Ident(word) => {
-                if (word == "empty"
-                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "list"))
+                if (word == "empty" && matches!(self.peek_at(1), Tok::Ident(s) if s == "list"))
                     || (word == "an"
                         && matches!(self.peek_at(1), Tok::Ident(s) if s == "empty")
                         && matches!(self.peek_at(2), Tok::Ident(s) if s == "list"))
@@ -896,7 +926,10 @@ mod tests {
         assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Var(name), _) if name == "letter"));
 
         let prog = p("say letter + 1\n");
-        assert!(matches!(&prog.stmts[0], Stmt::Say(Expr::Binary(BinOp::Add, ..), _)));
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Say(Expr::Binary(BinOp::Add, ..), _)
+        ));
     }
 
     #[test]
@@ -939,6 +972,49 @@ mod tests {
             Stmt::FuncDef { params, .. } => assert_eq!(params[0].ty, Ty::Array(Elem::Int)),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn remove_parses_both_forms() {
+        let prog = p("remove last from xs\n");
+        match &prog.stmts[0] {
+            Stmt::Remove { index, name, .. } => {
+                assert!(index.is_none());
+                assert_eq!(name, "xs");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let prog = p("remove item 2 from xs\n");
+        match &prog.stmts[0] {
+            Stmt::Remove {
+                index: Some(Expr::Int(2)),
+                name,
+                ..
+            } => assert_eq!(name, "xs"),
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let prog = p("remove item n + 1 from xs\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Remove {
+                index: Some(Expr::Binary(BinOp::Add, ..)),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn remove_needs_a_target_and_from() {
+        let err = parse(lex("remove from xs\n").unwrap()).unwrap_err();
+        assert!(err.contains("expected 'last' or 'item N'"), "{err}");
+
+        let err = parse(lex("remove last xs\n").unwrap()).unwrap_err();
+        assert!(err.contains("'from'"), "{err}");
+
+        let err = parse(lex("remove item 2 xs\n").unwrap()).unwrap_err();
+        assert!(err.contains("'from'"), "{err}");
     }
 
     #[test]

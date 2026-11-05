@@ -219,11 +219,7 @@ impl Session {
 
     // ---- statements ------------------------------------------------------
 
-    fn exec_stmt(
-        &mut self,
-        stmt: &Stmt,
-        env: &mut HashMap<String, Value>,
-    ) -> Result<Flow, String> {
+    fn exec_stmt(&mut self, stmt: &Stmt, env: &mut HashMap<String, Value>) -> Result<Flow, String> {
         self.line = stmt.line();
         match stmt {
             Stmt::Say(e, _) => {
@@ -318,6 +314,52 @@ impl Session {
                     )),
                 }
             }
+            Stmt::Remove { index, name, .. } => {
+                if self.constants.contains(name) {
+                    return Err(format!(
+                        "line {}: '{name}' is a constant — it can't be changed",
+                        self.line
+                    ));
+                }
+                let index = match index {
+                    Some(index) => Some(self.eval_int(index, env)?),
+                    None => None,
+                };
+                match env.get_mut(name) {
+                    Some(Value::Array(items)) => {
+                        let mut items = items.borrow_mut();
+                        match index {
+                            Some(index) => {
+                                if index < 1 || index as usize > items.len() {
+                                    return Err(format!(
+                                        "line {}: an item outside the list",
+                                        self.line
+                                    ));
+                                }
+                                items.remove(index as usize - 1);
+                            }
+                            None => {
+                                if items.pop().is_none() {
+                                    return Err(format!(
+                                        "line {}: there's nothing to remove",
+                                        self.line
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(Flow::Normal)
+                    }
+                    Some(other) => Err(format!(
+                        "line {}: 'remove' needs a list, but '{name}' holds {}",
+                        self.line,
+                        kind_name(other)
+                    )),
+                    None => Err(format!(
+                        "line {}: I don't know a thing called '{name}'",
+                        self.line
+                    )),
+                }
+            }
             Stmt::Warn(e, _) => {
                 let value = self.eval(e, env)?;
                 if value == Value::Nothing {
@@ -399,13 +441,11 @@ impl Session {
                         Flow::Break => return Ok(Flow::Normal),
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                     },
-                    other => {
-                        return Err(format!(
-                            "line {}: 'while' needs a condition that is true or false, but this is {}",
-                            self.line,
-                            kind_name(&other)
-                        ))
-                    }
+                    other => return Err(format!(
+                        "line {}: 'while' needs a condition that is true or false, but this is {}",
+                        self.line,
+                        kind_name(&other)
+                    )),
                 }
             },
             Stmt::ForEach {
@@ -416,10 +456,7 @@ impl Session {
                 ..
             } => self.exec_for_each(name, from, to, body, env),
             Stmt::ForEachIn {
-                name,
-                array,
-                body,
-                ..
+                name, array, body, ..
             } => self.exec_for_each_in(name, array, body, env),
             Stmt::FuncDef {
                 name, params, body, ..
@@ -554,11 +591,7 @@ impl Session {
 
     // ---- expressions -----------------------------------------------------
 
-    fn eval(
-        &mut self,
-        expr: &Expr,
-        env: &mut HashMap<String, Value>,
-    ) -> Result<Value, String> {
+    fn eval(&mut self, expr: &Expr, env: &mut HashMap<String, Value>) -> Result<Value, String> {
         match expr {
             Expr::Int(n) => Ok(Value::Int(*n)),
             Expr::Str(s) => Ok(Value::Str(s.as_bytes().to_vec())),
@@ -780,11 +813,7 @@ impl Session {
         }
     }
 
-    fn eval_int(
-        &mut self,
-        expr: &Expr,
-        env: &mut HashMap<String, Value>,
-    ) -> Result<i64, String> {
+    fn eval_int(&mut self, expr: &Expr, env: &mut HashMap<String, Value>) -> Result<i64, String> {
         match self.eval(expr, env)? {
             Value::Int(n) => Ok(n),
             other => Err(format!(
@@ -946,15 +975,13 @@ impl Session {
                     return Err("':load' needs a file name".to_string());
                 }
                 let path = Path::new(rest);
-                let src = std::fs::read_to_string(path)
-                    .map_err(|e| format!("can't read {rest}: {e}"))?;
+                let src =
+                    std::fs::read_to_string(path).map_err(|e| format!("can't read {rest}: {e}"))?;
                 self.submit_at(&src, path.parent())
                     .map_err(|e| format!("in {rest}: {e}"))?;
                 Ok(true)
             }
-            other => Err(format!(
-                "I don't know the command ':{other}' — try :help"
-            )),
+            other => Err(format!("I don't know the command ':{other}' — try :help")),
         }
     }
 
@@ -1540,7 +1567,10 @@ pub fn run() -> Result<(), String> {
     if interactive {
         println!("{BANNER}");
         println!();
-        println!("Rusk {} — an English-like language", env!("CARGO_PKG_VERSION"));
+        println!(
+            "Rusk {} — an English-like language",
+            env!("CARGO_PKG_VERSION")
+        );
         println!("Type :help for commands, :quit to leave.\n");
     }
 
@@ -1724,6 +1754,44 @@ mod tests {
     }
 
     #[test]
+    fn removing_items_shrinks_the_list_without_moving_it() {
+        let mut session = Session::new();
+        session.submit("let xs be [1, 2, 3, 4]\n").unwrap();
+        session.submit("remove last from xs\n").unwrap();
+        assert_eq!(session.globals["xs"].display(), "[1, 2, 3]");
+        session.submit("remove item 1 from xs\n").unwrap();
+        assert_eq!(session.globals["xs"].display(), "[2, 3]");
+        session.submit("add 9 to xs\n").unwrap();
+        assert_eq!(session.globals["xs"].display(), "[2, 3, 9]");
+        session.submit("let ys be copy of xs\n").unwrap();
+        session.submit("remove item 2 from ys\n").unwrap();
+        assert_eq!(session.globals["xs"].display(), "[2, 3, 9]");
+        assert_eq!(session.globals["ys"].display(), "[2, 9]");
+    }
+
+    #[test]
+    fn removing_text_and_refused_removals_keep_the_session_alive() {
+        let mut session = Session::new();
+        session.submit("let words be [\"a\", \"b\"]\n").unwrap();
+        session.submit("remove last from words\n").unwrap();
+        assert_eq!(session.globals["words"].display(), "[\"a\"]");
+        session.submit("remove last from words\n").unwrap();
+        assert_eq!(session.globals["words"].display(), "[]");
+
+        let err = session.submit("remove last from words\n").unwrap_err();
+        assert!(err.contains("nothing to remove"), "{err}");
+
+        session.submit("let xs be [1]\n").unwrap();
+        let err = session.submit("remove item 2 from xs\n").unwrap_err();
+        assert!(err.contains("outside the list"), "{err}");
+        assert_eq!(session.globals["xs"].display(), "[1]");
+
+        session.submit("let n be 5\n").unwrap();
+        let err = session.submit("remove last from n\n").unwrap_err();
+        assert!(err.contains("needs a list"), "{err}");
+    }
+
+    #[test]
     fn list_bounds_errors_keep_the_session_alive() {
         let mut session = Session::new();
         session.submit("let xs be [1, 2]\n").unwrap();
@@ -1772,7 +1840,9 @@ mod tests {
         session.args = vec![b"alpha".to_vec(), b"beta".to_vec()];
 
         session.submit("let first be argument 1\n").unwrap();
-        session.submit("let count be number of arguments\n").unwrap();
+        session
+            .submit("let count be number of arguments\n")
+            .unwrap();
         session
             .submit(&format!(
                 "write \"from the prompt\" to file \"{}\"\n",

@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.6
+# The Rusk Language — Specification v0.7
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.6
+emits native machine code directly. This document describes exactly what v0.7
 accepts and what it guarantees.
 
-Status: **v0.6, AArch64 Linux**. Everything here is implemented and tested;
+Status: **v0.7, AArch64 Linux**. Everything here is implemented and tested;
 anything not here does not exist yet.
 
 ---
@@ -35,9 +35,9 @@ Blank lines are ignored.
 | Number | `42`, `-7` | Signed 64-bit integer (two's complement) |
 | Text | `"hello"` | Immutable; escapes `\n`, `\t`, `\r`, `\0`, `\\`, `\"` |
 | Truth | `true`, `false` | The result of comparisons and `not` |
-| List | `[1, 2, 3]`, `["a", "b"]`, `[true, false]` | Fixed length, one kind of item, positions count from 1 |
+| List | `[1, 2, 3]`, `["a", "b"]`, `[true, false]` | Growable, one kind of item, positions count from 1 |
 
-Numbers are integers only. There is no floating point in v0.6.
+Numbers are integers only. There is no floating point in v0.7.
 
 Text and lists live on a heap and are **owned**: a name holds one of them at a
 time. Ownership is what makes the language memory-safe without a garbage
@@ -290,7 +290,7 @@ let empty_flags be an empty list of truth values
 in function parameters as `a list of numbers`, `a list of text`, or
 `a list of truth values`.
 
-Four forms work on lists, all counting from **1**:
+Six forms work on lists, all counting from **1**:
 
 | Form | Gives back | Meaning |
 |---|---|---|
@@ -298,6 +298,8 @@ Four forms work on lists, all counting from **1**:
 | `item N of LIST` | the item kind | the item at position `N` |
 | `set item N of LIST to VALUE` | — | replace the item at position `N` |
 | `add VALUE to LIST` | — | append `VALUE`, growing the list |
+| `remove last from LIST` | — | remove the final item |
+| `remove item N from LIST` | — | remove the item at position `N` |
 
 ```rusk
 let xs be [10, 20, 30]
@@ -307,6 +309,10 @@ set item 2 of xs to 99
 say xs                    # [10, 99, 30]
 add 40 to xs
 say xs                    # [10, 99, 30, 40]
+remove last from xs
+say xs                    # [10, 99, 30]
+remove item 2 from xs
+say xs                    # [10, 30]
 ```
 
 Rules:
@@ -318,16 +324,25 @@ Rules:
 - `add VALUE to LIST` needs a list variable whose item kind matches `VALUE`.
   Adding an owned text value moves it into the list; `copy of` keeps the
   original. Adding to a constant is an error.
-- Asking for an item outside the list is a **runtime error**:
+- `remove last from LIST` and `remove item N from LIST` need a list variable
+  that is not a constant. The name keeps ownership, and later items shift down
+  to fill the gap.
+- Asking for an item outside the list, or removing from an empty list, is a
+  **runtime error**:
 
   ```console
   burnt: line 4: an item outside the list
+  burnt: line 5: there's nothing to remove
   ```
 
 - A list value is owned by one name at a time. `let ys be xs` moves the list
   from `xs` to `ys`; `ys` and `xs` never alias. Use `let ys be copy of xs` when
-  you want two independent lists. `add VALUE to LIST` grows the list in place
+  you want two independent lists. `add` and `remove` change the list in place
   from the program's point of view; the name keeps ownership.
+- Lists have a capacity behind the scenes. `add` uses spare capacity when it
+  can and otherwise reallocates with at least four slots or twice the old
+  capacity. `remove` never shrinks the capacity, and the old block is not
+  reclaimed when a list grows.
 - Lists do not compare with `is` or the ordering operators yet.
 
 ## 7. Blocks
@@ -554,7 +569,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.6.0 — an English-like language
+Rusk 0.7.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -695,12 +710,15 @@ Function calls use the standard AArch64 shape, assembled by hand: arguments in
 in `X29`. Each frame stores the caller's `X29`/`X30` at `sp+0`/`sp+8`, then its
 parameters and locals above that, so recursion gets a fresh set of slots.
 
-A list is a pointer to `[len: u64][item: i64]...`, allocated from the same bump
-heap as joined text. The ownership pass guarantees that only one live name
-refers to a list, so assigning a list never creates an alias; `copy of` makes a
-new list and copies every item. `array_get` and `array_set` check the 1-based
-index against the stored length and report `an item outside the list` on
-failure.
+A list is a pointer to `[len: u64][capacity: u64][item: i64]...`, allocated
+from the same bump heap as joined text. The ownership pass guarantees that only
+one live name refers to a list, so assigning a list never creates an alias;
+`copy of` makes a new list and copies every item. `array_get` and `array_set`
+check the 1-based index against the stored length and report `an item outside
+the list` on failure. `array_add` writes into spare capacity, or allocates a
+larger block and copies the items when the list is full. `array_remove_last`
+and `array_remove_at` reduce the length and shift later items left; removing
+from an empty list reports `there's nothing to remove`.
 
 ### Guarantees
 
@@ -718,15 +736,17 @@ failure.
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.6, worth relocating later.
+  collide. Fine for v0.7, worth relocating later.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
 - Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
   is reclaimed; exhausting it is reported, but memory is not reused.
 - Ownership is single-owner, not borrowing: there is no way to lend a value to
   two readers at once. `copy of` is the escape hatch.
-- Lists are homogeneous and flat: no nested lists, and no `pop` or `remove`.
-  They can grow with `add VALUE to LIST`, which copies the whole list to fresh
-  heap space; there is no capacity headroom.
+- Lists are homogeneous and flat: no nested lists. They can grow with
+  `add VALUE to LIST`, which uses spare capacity or copies the whole list to
+  fresh heap space, and shrink with `remove last from LIST` or
+  `remove item N from LIST`. Capacity never shrinks, and the heap never
+  reclaims old blocks.
 - System I/O covers text files and the three standard streams. There are no
   directories, sockets, processes, or random-access file positions, and a path
   is limited to 4095 bytes.
@@ -739,7 +759,7 @@ failure.
 
 ## 16. Roadmap (not implemented)
 
-- nested lists, `pop`/`remove`, and list capacity
+- nested lists
 - borrowing and shared read-only views
 - module namespaces and selective imports
 - function values and closures

@@ -23,20 +23,15 @@ kernel through `write(2)` and `exit(2)` syscalls.
 
 ## Status
 
-v0.6 adds **memory safety by ownership** and **system I/O**. Every text value
-and every list has exactly one owner; `let`, `set`, function arguments, list
-literals, and `give back` move that owner, using a name after it has moved is a
-compile error, and `copy of` makes a fresh value instead. The runtime also
-reports division by zero, heap exhaustion, and runaway recursion as Rusk
-errors instead of crashing. Programs can read command-line arguments,
-environment variables, standard input, and files, and can write files, warn on
-standard error, and choose an exit status. The `rusk` tool also ships a
-full-screen session built on its own native terminal module, with raw mode,
-ANSI frames, and key decoding, written without a TUI crate. Everything from
-v0.5 — constants, homogeneous lists, `import`, text operations, and the
-interactive session — still works. The compiler is a lexer, parser, import
-expander, type checker, ownership checker, AArch64 code generator, and ELF
-writer, with 165 tests. It targets **AArch64 Linux** only.
+v0.7 adds **list removal and capacity**. Lists now carry a capacity alongside
+their length, so `add VALUE to LIST` appends in place while there is room and
+only copies to fresh heap space when it must grow. `remove last from LIST` and
+`remove item N from LIST` shorten a list in place and shift later items left,
+with runtime checks for an empty list or an item number outside it. Everything
+from v0.6 — ownership, system I/O, and the full-screen session — still works.
+The compiler is a lexer, parser, import expander, type checker, ownership
+checker, AArch64 code generator, and ELF writer, with 177 tests. It targets
+**AArch64 Linux** only.
 
 ## Quick start
 
@@ -121,6 +116,10 @@ for each name in names:
     say "one " + name + " loaf"
 add "spelt" to names
 say names                     # [rye, wheat, spelt]
+remove last from names
+say names                     # [rye, wheat]
+remove item 1 from names
+say names                     # [wheat]
 
 let empty be an empty list of numbers
 say empty                     # []
@@ -212,7 +211,8 @@ through recursion. A function with no `give back` gives nothing back and
 cannot be used as a value.
 
 Everything is line-based, blocks are colon-plus-indentation, and `#` starts a
-comment. Full reference: [docs/SPEC.md](docs/SPEC.md).
+comment. Full reference: [docs/SPEC.md](docs/SPEC.md). A hands-on tour lives in
+the [guide](guide/README.md).
 
 ## The prompt
 
@@ -224,7 +224,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.6.0 — an English-like language
+Rusk 0.7.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -320,11 +320,15 @@ Runtime facts worth knowing:
 - Strings are stored as `[len: u64][bytes...]`, so a string value is just a
   pointer to its length. Joining two strings bumps a 1 MiB heap in the data
   area and copies both byte blobs into it.
-- Lists are stored as `[len: u64][item: i64]...` in the same bump heap. A list
-  value is a pointer, but the ownership checker allows only one live name for
-  it, so `let b be a` moves the list and `copy of a` makes a new one. Item and
-  bounds checks happen in the runtime helper `array_get` / `array_set`;
-  `array_add` copies the list one item longer and leaves the old block behind.
+- Lists are stored as `[len: u64][capacity: u64][item: i64]...` in the same
+  bump heap. A list value is a pointer, but the ownership checker allows only
+  one live name for it, so `let b be a` moves the list and `copy of a` makes a
+  new one. Item and bounds checks happen in the runtime helper `array_get` /
+  `array_set`. `array_add` appends in place while the length is below the
+  capacity; when it must grow it allocates a new block with at least four
+  slots, or twice the old capacity, and leaves the old block behind.
+  `array_remove_last` and `array_remove_at` shorten the list in place, shift
+  later items left, and keep the capacity unchanged.
 - Text compares byte by byte (unsigned), then by length, so `"b"` is more than
   `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order. Lists do
   not compare yet.
@@ -344,7 +348,7 @@ Runtime facts worth knowing:
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.6 doesn't do yet
+## What v0.7 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -353,10 +357,10 @@ Honest list, so the docs don't lie:
 - There is no borrow checker and no shared borrowing: a value has one owner at
   a time, and `copy of` deep-copies text and lists. That is simpler than Rust,
   and it rules out aliasing bugs by refusing to have aliases at all.
-- Lists are homogeneous and flat: no nested lists, and no `pop` or `remove`.
-  Their contents can be replaced with `set item`, and `add VALUE to LIST`
-  appends an item by copying the list to fresh heap space. There is no
-  capacity headroom, so each `add` allocates.
+- Lists are homogeneous and flat: no nested lists. Their contents can be
+  replaced with `set item`, `add VALUE to LIST` appends with spare capacity,
+  and `remove last from LIST` / `remove item N from LIST` shorten them.
+  Capacity never shrinks, and removal does not give memory back to the heap.
 - System I/O is intentionally small: text files and standard streams only, no
   directories, sockets, processes, or random access. A path is limited by the
   4 KiB scratch area, and reading stops when the 1 MiB heap is full.

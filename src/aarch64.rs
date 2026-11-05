@@ -322,8 +322,7 @@ impl Asm {
                     for hw in 0..4u32 {
                         let word = self.code[f.at / 4 + hw as usize];
                         let chunk = ((addr >> (16 * hw)) & 0xFFFF) as u32;
-                        self.code[f.at / 4 + hw as usize] =
-                            (word & !(0xFFFF << 5)) | (chunk << 5);
+                        self.code[f.at / 4 + hw as usize] = (word & !(0xFFFF << 5)) | (chunk << 5);
                     }
                 }
             }
@@ -368,7 +367,10 @@ mod tests {
         a.push_reg(X19);
         a.svc();
         a.ret();
-        assert_eq!(words(a), vec![0xD100_43FF, 0xF900_03F3, 0xD400_0001, 0xD65F_03C0]);
+        assert_eq!(
+            words(a),
+            vec![0xD100_43FF, 0xF900_03F3, 0xD400_0001, 0xD65F_03C0]
+        );
     }
 
     #[test]

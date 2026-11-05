@@ -36,8 +36,7 @@ pub fn bake(source: &str) -> Result<(Vec<u8>, u64), String> {
 /// Bake a `.rk` file, resolving imports relative to it.
 pub fn bake_path(input: &Path) -> Result<(Vec<u8>, u64), String> {
     let program = imports::expand_file(input)?;
-    let baked =
-        codegen::compile(&program).map_err(|e| format!("in {}: {e}", input.display()))?;
+    let baked = codegen::compile(&program).map_err(|e| format!("in {}: {e}", input.display()))?;
     Ok((elf::build(&baked.text, &baked.rodata, baked.bss), baked.bss))
 }
 

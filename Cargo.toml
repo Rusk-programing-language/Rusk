@@ -1,6 +1,6 @@
 [package]
 name = "rusk"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Rusk — an English-like language that bakes ahead of time"
 license = "MIT"

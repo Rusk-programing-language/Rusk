@@ -122,6 +122,8 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
     cg.emit_array_get();
     cg.emit_array_set();
     cg.emit_array_add();
+    cg.emit_array_remove_last();
+    cg.emit_array_remove_at();
     cg.emit_empty_text();
     cg.emit_cstr_copy();
     cg.emit_path_copy();
@@ -287,19 +289,16 @@ impl Codegen {
             Stmt::Const { name, value, line } => {
                 self.declare(name, value, true).map_err(|m| at(*line, m))
             }
-            Stmt::Set { name, value, line } => {
-                self.set(name, value).map_err(|m| at(*line, m))
-            }
+            Stmt::Set { name, value, line } => self.set(name, value).map_err(|m| at(*line, m)),
             Stmt::SetItem {
                 index,
                 array,
                 value,
                 line,
-            } => self
-                .set_item(index, array, value)
-                .map_err(|m| at(*line, m)),
-            Stmt::AddTo { value, name, line } => {
-                self.add_to(value, name).map_err(|m| at(*line, m))
+            } => self.set_item(index, array, value).map_err(|m| at(*line, m)),
+            Stmt::AddTo { value, name, line } => self.add_to(value, name).map_err(|m| at(*line, m)),
+            Stmt::Remove { index, name, line } => {
+                self.remove(index.as_ref(), name).map_err(|m| at(*line, m))
             }
             Stmt::Warn(e, line) => {
                 let ty = self.expr(e).map_err(|m| at(*line, m))?;
@@ -325,9 +324,9 @@ impl Codegen {
                 self.asm.svc();
                 Ok(())
             }
-            Stmt::WriteFile { text, path, line } => self
-                .write_file(text, path)
-                .map_err(|m| at(*line, m)),
+            Stmt::WriteFile { text, path, line } => {
+                self.write_file(text, path).map_err(|m| at(*line, m))
+            }
             Stmt::If {
                 cond,
                 then,
@@ -337,9 +336,7 @@ impl Codegen {
             Stmt::Repeat { count, body, line } => {
                 self.repeat(count, body).map_err(|m| at(*line, m))
             }
-            Stmt::While { cond, body, line } => {
-                self.while_(cond, body).map_err(|m| at(*line, m))
-            }
+            Stmt::While { cond, body, line } => self.while_(cond, body).map_err(|m| at(*line, m)),
             Stmt::ForEach {
                 name,
                 from,
@@ -364,10 +361,7 @@ impl Codegen {
                     self.asm.b_label(&after);
                     Ok(())
                 }
-                None => Err(at(
-                    *line,
-                    "'break' only works inside a loop".to_string(),
-                )),
+                None => Err(at(*line, "'break' only works inside a loop".to_string())),
             },
             Stmt::Continue(line) => match self.loops.last() {
                 Some(labels) => {
@@ -375,10 +369,7 @@ impl Codegen {
                     self.asm.b_label(&next);
                     Ok(())
                 }
-                None => Err(at(
-                    *line,
-                    "'continue' only works inside a loop".to_string(),
-                )),
+                None => Err(at(*line, "'continue' only works inside a loop".to_string())),
             },
             Stmt::Expr(e, line) => self.expr(e).map(|_| ()).map_err(|m| at(*line, m)),
             Stmt::FuncDef { line, .. } => Err(at(
@@ -483,6 +474,49 @@ impl Codegen {
         Ok(())
     }
 
+    fn remove(&mut self, index: Option<&Expr>, name: &str) -> Result<(), String> {
+        let Some(var) = self.vars.get(name).cloned() else {
+            return Err(format!("I don't know a thing called '{name}'"));
+        };
+        if var.constant {
+            return Err(format!("'{name}' is a constant — it can't be changed"));
+        }
+        if var.ty.elem().is_none() {
+            return Err(format!(
+                "'remove' needs a list, but '{name}' holds {}",
+                var.ty
+            ));
+        }
+
+        match index {
+            Some(index) => {
+                let it = self.expr(index)?;
+                if it != Ty::Int {
+                    return Err(format!(
+                        "the item number must be a number, but this is {it}"
+                    ));
+                }
+                self.asm.push_reg(X0);
+                self.load_var(&var);
+                self.asm.mov_reg_reg(X1, X0);
+                self.asm.pop_reg(X0);
+                let msg = self.runtime_message("an item outside the list");
+                let id = self.intern(&msg);
+                self.asm.mov_abs(X4, id);
+                self.asm.bl_label("array_remove_at");
+            }
+            None => {
+                self.load_var(&var);
+                let msg = self.runtime_message("there's nothing to remove");
+                let id = self.intern(&msg);
+                self.asm.mov_abs(X4, id);
+                self.asm.bl_label("array_remove_last");
+            }
+        }
+        self.store_var(&var);
+        Ok(())
+    }
+
     fn write_file(&mut self, text: &Expr, path: &Expr) -> Result<(), String> {
         let tt = self.expr(text)?;
         if tt != Ty::Str {
@@ -503,7 +537,8 @@ impl Codegen {
         Ok(())
     }
 
-    fn if_(&mut self, cond: &Expr, then: &[Stmt], other: &[Stmt]) -> Result<(), String> {        let ty = self.expr(cond)?;
+    fn if_(&mut self, cond: &Expr, then: &[Stmt], other: &[Stmt]) -> Result<(), String> {
+        let ty = self.expr(cond)?;
         if ty != Ty::Bool {
             return Err(format!(
                 "'if' needs a condition that is true or false, but this is {ty}"
@@ -954,20 +989,19 @@ impl Codegen {
                 let mut elem: Option<Elem> = None;
                 for item in items {
                     let t = self.expr(item)?;
-                    let this = match t {
-                        Ty::Int => Elem::Int,
-                        Ty::Str => Elem::Str,
-                        Ty::Bool => Elem::Bool,
-                        Ty::Array(_) => {
-                            return Err(
+                    let this =
+                        match t {
+                            Ty::Int => Elem::Int,
+                            Ty::Str => Elem::Str,
+                            Ty::Bool => Elem::Bool,
+                            Ty::Array(_) => return Err(
                                 "a list can hold numbers, text, or truth values, not other lists"
                                     .to_string(),
-                            )
-                        }
-                        Ty::Nothing => {
-                            return Err("nothing can go in a list".to_string());
-                        }
-                    };
+                            ),
+                            Ty::Nothing => {
+                                return Err("nothing can go in a list".to_string());
+                            }
+                        };
                     if let Some(old) = elem {
                         if old != this {
                             return Err(format!(
@@ -982,21 +1016,22 @@ impl Codegen {
                 }
 
                 let n = items.len() as u64;
-                if n * 8 + 8 >= 4096 * 8 {
+                if n * 8 + 16 >= 4096 * 8 {
                     return Err("this list literal is too long".to_string());
                 }
                 let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
                 self.asm.mov_imm64(X5, heap_ptr);
                 self.asm.ldr(X6, X5, 0);
-                self.asm.mov_imm64(X7, n * 8 + 8);
+                self.asm.mov_imm64(X7, n * 8 + 16);
                 self.asm.add_reg_reg(X7, X6, X7);
                 self.emit_heap_check(X7);
                 self.asm.str(X7, X5, 0);
                 self.asm.mov_imm64(X7, n);
                 self.asm.str(X7, X6, 0);
+                self.asm.str(X7, X6, 8); // capacity starts equal to length
                 for i in (0..n).rev() {
                     self.asm.pop_reg(X0);
-                    self.asm.str(X0, X6, (i * 8 + 8) as u32);
+                    self.asm.str(X0, X6, (i * 8 + 16) as u32);
                 }
                 self.asm.mov_reg_reg(X0, X6);
                 Ok(Ty::Array(elem.unwrap()))
@@ -1005,11 +1040,12 @@ impl Codegen {
                 let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
                 self.asm.mov_imm64(X5, heap_ptr);
                 self.asm.ldr(X6, X5, 0);
-                self.asm.add_imm(X7, X6, 8);
+                self.asm.add_imm(X7, X6, 16);
                 self.emit_heap_check(X7);
                 self.asm.str(X7, X5, 0);
                 self.asm.movz_reg(X7, 0);
-                self.asm.str(X7, X6, 0);
+                self.asm.str(X7, X6, 0); // length
+                self.asm.str(X7, X6, 8); // capacity
                 self.asm.mov_reg_reg(X0, X6);
                 Ok(Ty::Array(*elem))
             }
@@ -1048,9 +1084,10 @@ impl Codegen {
                         Ok(ty)
                     }
                     Ty::Int | Ty::Bool => Ok(ty),
-                    Ty::Nothing => Err(
-                        "there's nothing to copy — that function gives nothing back".to_string(),
-                    ),
+                    Ty::Nothing => {
+                        Err("there's nothing to copy — that function gives nothing back"
+                            .to_string())
+                    }
                 }
             }
             Expr::Argument(index) => {
@@ -1293,7 +1330,8 @@ impl Codegen {
         self.asm.svc();
     }
 
-    /// X0 points at a list: `[len: u64][item: i64]...`. Print `[a, b, c]`.
+    /// X0 points at a list: `[len: u64][capacity: u64][item: i64]...`.
+    /// Print `[a, b, c]`.
     fn emit_say_array(&mut self, elem: Elem, fd: u64) {
         self.asm.sub_imm(SP, SP, 32);
         self.asm.str(X19, SP, 0);
@@ -1302,7 +1340,7 @@ impl Codegen {
 
         self.asm.mov_reg_reg(X19, X0); // list
         self.asm.ldr(X20, X19, 0); // length
-        self.asm.add_imm(X19, X19, 8); // items
+        self.asm.add_imm(X19, X19, 16); // items
         self.emit_write_literal("[", fd);
 
         self.asm.movz_reg(X21, 0); // index
@@ -1646,7 +1684,7 @@ impl Codegen {
         a.add_reg_reg(X0, X0, X0); // *2
         a.add_reg_reg(X0, X0, X0); // *4
         a.add_reg_reg(X0, X0, X0); // *8
-        a.add_imm(X0, X0, 8); // skip the length
+        a.add_imm(X0, X0, 16); // skip the length and capacity
         a.add_reg_reg(X0, X1, X0);
         a.ldr(X0, X0, 0);
         a.ret();
@@ -1673,7 +1711,7 @@ impl Codegen {
         a.add_reg_reg(X0, X0, X0); // *2
         a.add_reg_reg(X0, X0, X0); // *4
         a.add_reg_reg(X0, X0, X0); // *8
-        a.add_imm(X0, X0, 8);
+        a.add_imm(X0, X0, 16);
         a.add_reg_reg(X0, X1, X0);
         a.str(X2, X0, 0);
         a.ret();
@@ -1683,35 +1721,49 @@ impl Codegen {
         a.b_label("runtime_fail");
     }
 
-    /// `array_add`: X0 = list, X1 = new item. Grows the list by one, copying it
-    /// to fresh heap space, and gives back the new list in X0.
+    /// `array_add`: X0 = list, X1 = new item. Appends in place when the list
+    /// has spare capacity; otherwise it copies the items to a fresh block with
+    /// twice the capacity and gives back the new list in X0.
     fn emit_array_add(&mut self) {
         let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("array_add");
         a.ldr(X2, X0, 0); // old length
+        a.ldr(X3, X0, 8); // capacity
+        a.cmp_reg_reg(X2, X3);
+        a.bcond_label(CC_LT, "array_add_room");
+
+        // Grow: new capacity is at least 4, otherwise double the old capacity.
+        a.mov_reg_reg(X5, X3);
+        a.add_reg_reg(X5, X5, X5);
+        a.movz_reg(X6, 4);
+        a.cmp_reg_reg(X5, X6);
+        a.bcond_label(CC_GE, "array_add_capacity_ready");
+        a.mov_reg_reg(X5, X6);
+        a.label("array_add_capacity_ready");
+
+        // Allocate [length][capacity][items...].
         a.mov_imm64(X3, heap_ptr);
         a.ldr(X4, X3, 0); // destination
-
-        // (length + 2) * 8 keeps the length word and one new item.
-        a.mov_reg_reg(X5, X2);
-        a.add_reg_reg(X5, X5, X5); // *2
-        a.add_reg_reg(X5, X5, X5); // *4
-        a.add_reg_reg(X5, X5, X5); // *8
-        a.add_imm(X5, X5, 16);
-
-        a.add_reg_reg(X6, X4, X5);
+        a.mov_reg_reg(X6, X5);
+        a.add_reg_reg(X6, X6, X6); // *2
+        a.add_reg_reg(X6, X6, X6); // *4
+        a.add_reg_reg(X6, X6, X6); // *8
+        a.add_imm(X6, X6, 16);
+        a.add_reg_reg(X7, X4, X6);
         a.mov_imm64(X10, HEAP_END);
-        a.cmp_reg_reg(X6, X10);
+        a.cmp_reg_reg(X7, X10);
         a.bcond_label(CC_GT, "heap_fail");
-        a.str(X6, X3, 0);
+        a.str(X7, X3, 0);
 
         a.movz_reg(X9, 1);
-        a.add_reg_reg(X5, X2, X9);
-        a.str(X5, X4, 0); // new length
-        a.add_imm(X7, X4, 8); // destination items
-        a.add_imm(X8, X0, 8); // source items
+        a.add_reg_reg(X9, X2, X9); // new length
+        a.str(X9, X4, 0);
+        a.str(X5, X4, 8); // new capacity
+
+        a.add_imm(X7, X4, 16); // destination items
+        a.add_imm(X8, X0, 16); // source items
         a.mov_reg_reg(X9, X2);
         a.label("array_add_loop");
         a.cmp_reg_reg(X9, XZR);
@@ -1727,6 +1779,83 @@ impl Codegen {
         a.str(X1, X7, 0); // the new item
         a.mov_reg_reg(X0, X4);
         a.ret();
+
+        // There is room: append at items[length] without allocating.
+        a.label("array_add_room");
+        a.mov_reg_reg(X4, X0);
+        a.mov_reg_reg(X5, X2);
+        a.add_reg_reg(X5, X5, X5); // *2
+        a.add_reg_reg(X5, X5, X5); // *4
+        a.add_reg_reg(X5, X5, X5); // *8
+        a.add_imm(X5, X5, 16);
+        a.add_reg_reg(X5, X4, X5);
+        a.str(X1, X5, 0);
+        a.movz_reg(X6, 1);
+        a.add_reg_reg(X6, X2, X6);
+        a.str(X6, X4, 0); // new length
+        a.mov_reg_reg(X0, X4);
+        a.ret();
+    }
+
+    /// `array_remove_last`: X0 = list, X4 = runtime error. Shortens the list
+    /// by one and returns it in X0. The capacity does not change.
+    fn emit_array_remove_last(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("array_remove_last");
+        a.ldr(X1, X0, 0); // length
+        a.cmp_reg_reg(X1, XZR);
+        a.bcond_label(CC_EQ, "array_remove_last_fail");
+        a.sub_imm(X1, X1, 1);
+        a.str(X1, X0, 0);
+        a.ret();
+
+        a.label("array_remove_last_fail");
+        a.mov_reg_reg(X0, X4);
+        a.b_label("runtime_fail");
+    }
+
+    /// `array_remove_at`: X0 = index (1-based), X1 = list, X4 = runtime error.
+    /// Removes the item, shifts later items left, and returns the list in X0.
+    fn emit_array_remove_at(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("array_remove_at");
+        a.ldr(X2, X1, 0); // length
+        a.movz_reg(X3, 1);
+        a.cmp_reg_reg(X0, X3);
+        a.bcond_label(CC_LT, "array_remove_at_fail");
+        a.cmp_reg_reg(X0, X2);
+        a.bcond_label(CC_GT, "array_remove_at_fail");
+
+        a.sub_reg_reg(X6, X2, X0); // items after the removed one
+        a.sub_imm(X5, X0, 1);
+        a.add_reg_reg(X5, X5, X5); // *2
+        a.add_reg_reg(X5, X5, X5); // *4
+        a.add_reg_reg(X5, X5, X5); // *8
+        a.add_imm(X5, X5, 16);
+        a.add_reg_reg(X7, X1, X5); // destination slot
+        a.add_imm(X8, X7, 8); // source slot
+
+        a.label("array_remove_at_loop");
+        a.cmp_reg_reg(X6, XZR);
+        a.bcond_label(CC_EQ, "array_remove_at_done");
+        a.ldr(X9, X8, 0);
+        a.str(X9, X7, 0);
+        a.add_imm(X8, X8, 8);
+        a.add_imm(X7, X7, 8);
+        a.sub_imm(X6, X6, 1);
+        a.b_label("array_remove_at_loop");
+
+        a.label("array_remove_at_done");
+        a.sub_imm(X2, X2, 1);
+        a.str(X2, X1, 0); // new length
+        a.mov_reg_reg(X0, X1);
+        a.ret();
+
+        a.label("array_remove_at_fail");
+        a.mov_reg_reg(X0, X4);
+        a.b_label("runtime_fail");
     }
 
     /// `empty_text`: a fresh text value with length zero, in X0.
@@ -2120,17 +2249,18 @@ impl Codegen {
         a.add_reg_reg(X7, X7, X7);
         a.add_reg_reg(X7, X7, X7);
         a.add_reg_reg(X7, X7, X7);
-        a.add_imm(X7, X7, 8);
+        a.add_imm(X7, X7, 16);
         a.mov_reg_reg(X9, X6);
         a.add_reg_reg(X9, X9, X7);
         a.mov_imm64(X8, HEAP_END);
         a.cmp_reg_reg(X9, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X5, 0);
-        a.str(X2, X6, 0);
+        a.str(X2, X6, 0); // length
+        a.str(X2, X6, 8); // capacity
 
-        a.add_imm(X1, X1, 8);
-        a.add_imm(X3, X6, 8);
+        a.add_imm(X1, X1, 16);
+        a.add_imm(X3, X6, 16);
         a.mov_reg_reg(X4, X2);
         a.label("acopy_scalar_loop");
         a.cmp_reg_reg(X4, XZR);
@@ -2172,18 +2302,19 @@ impl Codegen {
         a.add_reg_reg(X7, X7, X7);
         a.add_reg_reg(X7, X7, X7);
         a.add_reg_reg(X7, X7, X7);
-        a.add_imm(X7, X7, 8);
+        a.add_imm(X7, X7, 16);
         a.mov_reg_reg(X9, X6);
         a.add_reg_reg(X9, X9, X7);
         a.mov_imm64(X8, HEAP_END);
         a.cmp_reg_reg(X9, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X5, 0);
-        a.str(X21, X6, 0);
+        a.str(X21, X6, 0); // length
+        a.str(X21, X6, 8); // capacity
 
         a.mov_reg_reg(X23, X6); // destination start
-        a.add_imm(X19, X19, 8);
-        a.add_imm(X20, X6, 8);
+        a.add_imm(X19, X19, 16);
+        a.add_imm(X20, X6, 16);
         a.movz_reg(X22, 0);
         a.label("acopy_text_loop");
         a.cmp_reg_reg(X22, X21);

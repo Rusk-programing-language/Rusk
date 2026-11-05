@@ -165,6 +165,12 @@ pub enum Stmt {
         name: String,
         line: usize,
     },
+    /// `remove last from LIST` or `remove item N from LIST`.
+    Remove {
+        index: Option<Expr>,
+        name: String,
+        line: usize,
+    },
     /// `warn VALUE` — print to standard error with a newline.
     Warn(Expr, usize),
     /// `stop with CODE` — end the program with an exit status.
@@ -241,6 +247,7 @@ impl Stmt {
             | Stmt::Set { line, .. }
             | Stmt::SetItem { line, .. }
             | Stmt::AddTo { line, .. }
+            | Stmt::Remove { line, .. }
             | Stmt::WriteFile { line, .. }
             | Stmt::If { line, .. }
             | Stmt::Repeat { line, .. }
