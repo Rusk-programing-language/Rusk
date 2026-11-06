@@ -1,11 +1,11 @@
 # The Rusk Guide
 
 A hands-on guide to **Rusk**, an English-like language that bakes ahead of
-time. You write `.rk` files, the compiler emits AArch64 machine code directly,
-and the result is a standalone static ELF64 Linux executable with no runtime,
-no libc, and no dependencies.
+time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
+directly, and the result is a standalone static ELF64 Linux executable with no
+runtime, no libc, and no dependencies.
 
-This guide is for v0.7. For the exact language rules, see
+This guide is for v0.8. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -31,9 +31,9 @@ This guide is for v0.7. For the exact language rules, see
 ## 1. What makes Rusk different
 
 Rusk is deliberately small. Its whole compiler is a lexer, a recursive-descent
-parser, an import expander, a type checker, an ownership checker, an AArch64
-code generator, and an ELF writer. It does not call an assembler or a linker,
-and baked programs do not link against libc.
+parser, an import expander, a type checker, an ownership checker, two
+machine-code backends (AArch64 and x86-64), and an ELF writer. It does not call
+an assembler or a linker, and baked programs do not link against libc.
 
 The vocabulary is English-shaped:
 
@@ -48,19 +48,22 @@ otherwise:
 The constraints are part of the design:
 
 - **Ahead of time** — no interpreter ships with your program.
-- **AArch64 Linux only** — the backend encodes AArch64 instructions by hand.
+- **Linux on AArch64 or x86-64** — both backends encode machine instructions
+  by hand; the target defaults to the compiler host.
 - **Static ELF64** — one load segment, no dynamic section, no relocations.
 - **No libc** — output and file I/O are raw Linux syscalls.
 - **`.rk` files** — source is UTF-8 and line-based.
 - **One owner** — text and lists are moved, not aliased; `copy of` duplicates.
 - **No external TUI crate** — the full-screen session uses `termios` and ANSI.
 
-A baked hello world is a little over 3 KB.
+A baked hello world is a little over 3 KB on AArch64 and about 12 KB on
+x86-64.
 
 ## 2. Install and build
 
 You need Rust and Cargo. The compiler itself runs on the host; the programs it
-produces run on **AArch64 Linux**.
+produces run on **Linux**, on either **AArch64** or **x86-64**. Bakes default to
+the host architecture.
 
 ```console
 git clone https://github.com/Rusk-programing-language/Rusk.git
@@ -74,13 +77,14 @@ call it directly. During development you can also use `cargo run --`:
 ```console
 cargo run -- --help
 cargo run -- run examples/hello.rk
+cargo run -- build examples/hello.rk --target x86_64
 ```
 
 Check the version:
 
 ```console
 $ rusk version
-rusk 0.7.0 — code, baked ahead of time
+rusk 0.8.0 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -96,7 +100,7 @@ Bake it:
 
 ```console
 $ rusk build hello.rk
-baked hello.rk -> hello (3.1 KB, native, 0 dependencies)
+baked hello.rk -> hello (3.1 KB, native aarch64, 0 dependencies)
 ```
 
 Run it:
@@ -113,8 +117,9 @@ $ rusk run hello.rk
 Hello, world.
 ```
 
-The executable is a real Linux program. `file` reports an ELF64 AArch64
-binary, and it keeps working after you delete the `.rk` file.
+The executable is a real Linux program. `file` reports an ELF64 binary for the
+chosen target (AArch64 here, or x86-64), and it keeps working after you delete
+the `.rk` file.
 
 ## 4. The command-line tools
 
@@ -123,9 +128,12 @@ rusk                              start the interactive session
 rusk repl                         start the interactive session
 rusk tui                          start the full-screen session
 rusk tui demo                     open the terminal module demo
-rusk build <file.rk> [-o <out>]   bake a native executable
-rusk run   <file.rk> [args...]   bake it and run it, passing arguments on
-rusk check <file.rk>              bake without writing an executable
+rusk build <file.rk> [-o <out>] [--target <arch>]
+                                  bake a native executable
+rusk run   [--target <arch>] <file.rk> [args...]
+                                  bake it and run it, passing arguments on
+rusk check <file.rk> [--target <arch>]
+                                  bake without writing an executable
 rusk version
 rusk help
 ```
@@ -137,6 +145,9 @@ Notes:
 - `run` passes later words through to `argument 1`, `argument 2`, and so on.
 - `check` runs the lexer, parser, imports, type checker, ownership checker, and
   code generator, but writes nothing. Use it in scripts and editors.
+- `--target aarch64` or `--target x86_64` picks the instruction set. Without
+  it, the compiler chooses its own architecture. `arm64`, `x86-64`, and `amd64`
+  are accepted aliases.
 - A failed bake writes no output file.
 
 Example with arguments:
@@ -154,6 +165,25 @@ $ rusk run args.rk rye wheat
 rye
 wheat
 ```
+
+### Choosing a target
+
+Normally you do not need to think about this: `rusk build` and `rusk run`
+target the machine the compiler is running on, so the result executes directly.
+
+To produce a binary for the other architecture, pass `--target`:
+
+```console
+$ rusk build hello.rk --target x86_64
+baked hello.rk -> hello (3.1 KB, native x86_64, 0 dependencies)
+$ rusk check hello.rk --target aarch64
+hello.rk looks good — would bake to 3.1 KB (native aarch64, 0 dependencies)
+```
+
+Both outputs are static ELF64 files. The x86-64 file has `e_machine = 62`; the
+AArch64 file has `e_machine = 183`. `rusk run --target ...` works only when the
+host can execute that architecture, for example through `binfmt_misc` or a
+user-mode emulator such as `qemu-x86_64`.
 
 ## 5. Language tour
 
@@ -363,7 +393,7 @@ items over. Old blocks are not reclaimed.
 
 ### Removing
 
-v0.7 adds two removal forms:
+v0.7 added two removal forms, unchanged in v0.8:
 
 ```rusk
 let xs be [10, 20, 30]
@@ -544,7 +574,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.7.0 — an English-like language
+Rusk 0.8.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -637,8 +667,9 @@ and you can continue typing.
 
 - **`command not found: rusk`** — use `cargo run -- ...` from the repository,
   or put `target/release/rusk` on your `PATH`.
-- **The binary won't run** — baked programs are AArch64 Linux only. Check with
-  `uname -m`.
+- **The binary won't run** — baked programs are Linux only, for AArch64 or
+  x86-64. Check the target with `file ./program` and the host with `uname -m`;
+  cross-baked programs need an emulator or `binfmt_misc`.
 - **`rusk build` writes nothing** — baking failed; read the message. `rusk
   check` is useful for editor/CI loops.
 - **A list keeps growing memory usage** — the heap is bump-allocated. Growth
@@ -659,9 +690,11 @@ src/lexer.rs          tokens, indentation markers
 src/parser.rs         recursive-descent parser
 src/types.rs          kinds and return-kind inference
 src/ownership.rs      single-owner checking
-src/codegen.rs        AST to AArch64 machine code
-src/aarch64.rs        hand-written instruction encoder and fixups
-src/elf.rs            static ELF64 writer
+src/codegen.rs        AST to target-independent machine operations
+src/backend.rs        target selection and the common assembly interface
+src/aarch64.rs        hand-written AArch64 instruction encoder and fixups
+src/x86_64.rs         hand-written x86-64 encoder with virtual registers
+src/elf.rs            static ELF64 writer for either target
 src/repl.rs           tree-walking evaluator and line session
 src/tui.rs            native full-screen terminal UI
 src/main.rs           command-line interface
@@ -676,8 +709,15 @@ cargo test
 ```
 
 The suite covers unit tests in each compiler pass, CLI behavior, and
-end-to-end tests that bake real executables and run them. For a quick
-smoke test:
+end-to-end tests that bake real executables and run them. By default the
+end-to-end tests use the host backend. To run them against x86-64 on another
+host, set `RUSK_E2E_TARGET` and `RUSK_E2E_RUNNER`:
+
+```console
+RUSK_E2E_TARGET=x86_64 RUSK_E2E_RUNNER=qemu-x86_64 cargo test --test e2e
+```
+
+For a quick smoke test:
 
 ```console
 cargo run -- run examples/hello.rk
@@ -689,7 +729,7 @@ cargo test --quiet
 
 Implemented and checked:
 
-- AArch64 Linux static ELF64 output, no libc
+- Static ELF64 output for Linux, on AArch64 or x86-64, with no libc
 - English expressions, conditions, loops, and functions
 - Constants, text operations, and imports
 - Homogeneous lists with `item`, `set item`, `add`, `remove last`, and
@@ -704,7 +744,7 @@ Not implemented yet:
 - Borrowing and shared read-only views
 - Module namespaces and selective imports
 - Function values and closures
-- An x86-64 backend
+- A register-allocating x86-64 backend (the current one is memory-backed)
 - Relocation-aware data layout
 - Self-hosting Rusk in Rusk
 

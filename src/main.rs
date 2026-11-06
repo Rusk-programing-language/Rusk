@@ -6,12 +6,13 @@
 //! rusk tui                          start the full-screen session
 //! rusk tui demo                     open the terminal module demo
 //! rusk build <file.rk> [-o <out>]   bake a native executable
-//! rusk run   <file.rk> [args...]  bake and run it, passing the arguments on
+//! rusk run   [--target <arch>] <file.rk> [args...]
+//!                                   bake and run it, passing arguments on
 //! rusk check <file.rk>              bake without writing anything
 //! rusk version
 //! ```
 
-use rusk::elf;
+use rusk::{elf, Target};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -43,21 +44,22 @@ fn run(args: &[String]) -> Result<(), String> {
             }
         }
         "build" => {
-            let (input, output) = parse_targets(&args[1..])?;
-            let bytes = bake_bytes(&input)?;
+            let (input, output, target) = parse_targets(&args[1..])?;
+            let bytes = bake_bytes(&input, target)?;
             let out = output.unwrap_or_else(|| default_output(&input));
             elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
             println!(
-                "baked {} -> {} ({}, native, 0 dependencies)",
+                "baked {} -> {} ({}, native {}, 0 dependencies)",
                 input.display(),
                 out.display(),
-                size(bytes.len())
+                size(bytes.len()),
+                target.name()
             );
             Ok(())
         }
         "run" => {
-            let (input, program_args) = parse_run_target(&args[1..])?;
-            let bytes = bake_bytes(&input)?;
+            let (input, program_args, target) = parse_run_target(&args[1..])?;
+            let bytes = bake_bytes(&input, target)?;
             let out = std::env::temp_dir().join(format!("rusk-run-{}", std::process::id()));
             elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
             let status = Command::new(&out)
@@ -71,12 +73,13 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "check" => {
-            let (input, _) = parse_targets(&args[1..])?;
-            let bytes = bake_bytes(&input)?;
+            let (input, _, target) = parse_targets(&args[1..])?;
+            let bytes = bake_bytes(&input, target)?;
             println!(
-                "{} looks good — would bake to {} (native, 0 dependencies)",
+                "{} looks good — would bake to {} (native {}, 0 dependencies)",
                 input.display(),
-                size(bytes.len())
+                size(bytes.len()),
+                target.name()
             );
             Ok(())
         }
@@ -103,32 +106,49 @@ USAGE
   rusk repl                         start the interactive session
   rusk tui                          start the full-screen session
   rusk tui demo                     open the terminal module demo
-  rusk build <file.rk> [-o <out>]   bake a native executable
-  rusk run   <file.rk> [args...]   bake it and run it, passing arguments on
-  rusk check <file.rk>              bake without writing an executable
+  rusk build <file.rk> [-o <out>] [--target <arch>]
+                                    bake a native executable
+  rusk run   [--target <arch>] <file.rk> [args...]
+                                    bake it and run it, passing arguments on
+  rusk check <file.rk> [--target <arch>]
+                                    bake without writing an executable
   rusk version
   rusk help
 
-Rusk bakes straight to AArch64 machine code in an ELF file.
+Targets: aarch64 or x86_64 (default: the architecture running the compiler).
+
+Rusk bakes straight to machine code in a static ELF file.
 No C, no assembler, no linker, no libc — just syscalls.
 The REPL is a tree-walking session over the same syntax and type checker."
     );
 }
 
 /// `run` takes one file and then any number of program arguments.
-fn parse_run_target(args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
-    let Some(first) = args.first() else {
-        return Err("I need a .rk file to bake".to_string());
-    };
-    if first.starts_with('-') {
-        return Err(format!("I don't know the option '{first}'"));
+fn parse_run_target(args: &[String]) -> Result<(PathBuf, Vec<String>, Target), String> {
+    let mut target = Target::host();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--target" => {
+                let Some(name) = args.get(i + 1) else {
+                    return Err("'--target' needs an architecture after it".to_string());
+                };
+                target = parse_target(name)?;
+                i += 2;
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("I don't know the option '{flag}'"));
+            }
+            first => return Ok((PathBuf::from(first), args[i + 1..].to_vec(), target)),
+        }
     }
-    Ok((PathBuf::from(first), args[1..].to_vec()))
+    Err("I need a .rk file to bake".to_string())
 }
 
-fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> {
+fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>, Target), String> {
     let mut input: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut target = Target::host();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -137,6 +157,13 @@ fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> 
                     return Err("'-o' needs a path after it".to_string());
                 };
                 output = Some(PathBuf::from(path));
+                i += 2;
+            }
+            "--target" => {
+                let Some(name) = args.get(i + 1) else {
+                    return Err("'--target' needs an architecture after it".to_string());
+                };
+                target = parse_target(name)?;
                 i += 2;
             }
             flag if flag.starts_with('-') => {
@@ -152,7 +179,12 @@ fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), String> 
         }
     }
     let input = input.ok_or_else(|| "I need a .rk file to bake".to_string())?;
-    Ok((input, output))
+    Ok((input, output, target))
+}
+
+fn parse_target(name: &str) -> Result<Target, String> {
+    Target::parse(name)
+        .ok_or_else(|| format!("I don't know the target '{name}' — try 'aarch64' or 'x86_64'"))
 }
 
 fn default_output(input: &Path) -> PathBuf {
@@ -165,8 +197,8 @@ fn default_output(input: &Path) -> PathBuf {
     }
 }
 
-fn bake_bytes(input: &Path) -> Result<Vec<u8>, String> {
-    rusk::bake_path(input).map(|(bytes, _)| bytes)
+fn bake_bytes(input: &Path, target: Target) -> Result<Vec<u8>, String> {
+    rusk::bake_path_with_target(input, target).map(|(bytes, _)| bytes)
 }
 
 fn size(bytes: usize) -> String {

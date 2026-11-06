@@ -201,6 +201,10 @@ impl Asm {
         self.emit(0x9AC0_0C00 | ((rm as u32) << 16) | ((rn as u32) << 5) | rd as u32);
     }
 
+    pub fn udiv_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.emit(0x9AC0_0800 | ((rm as u32) << 16) | ((rn as u32) << 5) | rd as u32);
+    }
+
     /// `msub rd, rn, rm, ra` computes `ra - rn * rm`.
     pub fn msub_reg_reg(&mut self, rd: u8, rn: u8, rm: u8, ra: u8) {
         self.emit(

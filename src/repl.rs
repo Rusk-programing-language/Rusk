@@ -441,11 +441,13 @@ impl Session {
                         Flow::Break => return Ok(Flow::Normal),
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                     },
-                    other => return Err(format!(
+                    other => {
+                        return Err(format!(
                         "line {}: 'while' needs a condition that is true or false, but this is {}",
                         self.line,
                         kind_name(&other)
-                    )),
+                    ))
+                    }
                 }
             },
             Stmt::ForEach {

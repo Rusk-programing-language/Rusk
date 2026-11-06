@@ -1,11 +1,11 @@
-# The Rusk Language — Specification v0.7
+# The Rusk Language — Specification v0.8
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.7
+emits native machine code directly. This document describes exactly what v0.8
 accepts and what it guarantees.
 
-Status: **v0.7, AArch64 Linux**. Everything here is implemented and tested;
-anything not here does not exist yet.
+Status: **v0.8, Linux on AArch64 and x86-64**. Everything here is implemented
+and tested; anything not here does not exist yet.
 
 ---
 
@@ -37,7 +37,7 @@ Blank lines are ignored.
 | Truth | `true`, `false` | The result of comparisons and `not` |
 | List | `[1, 2, 3]`, `["a", "b"]`, `[true, false]` | Growable, one kind of item, positions count from 1 |
 
-Numbers are integers only. There is no floating point in v0.7.
+Numbers are integers only. There is no floating point in v0.8.
 
 Text and lists live on a heap and are **owned**: a name holds one of them at a
 time. Ownership is what makes the language memory-safe without a garbage
@@ -569,7 +569,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.7.0 — an English-like language
+Rusk 0.8.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -596,7 +596,7 @@ finishes it.
 :load <file.rk>  run a file in the session
 ```
 
-The session is a tree-walking evaluator over the same AST, not the AArch64
+The session is a tree-walking evaluator over the same AST, not a machine-code
 backend. Every submission is still lexed, parsed, type checked, and ownership
 checked against the whole session before any of it runs, so a session accepts
 the same programs the compiler does. Text operations use byte positions here
@@ -686,29 +686,40 @@ status and prints no message.
 
 ## 15. Compilation model
 
-`rusk build file.rk` writes an executable next to the source with the extension
-removed (`-o` overrides the destination).
+`rusk build file.rk [-o OUT] [--target aarch64|x86_64]` writes an executable
+next to the source with the extension removed (`-o` overrides the destination).
+`rusk check` accepts the same target flag. With no `--target`, Rusk bakes for
+the architecture running the compiler, so `rusk run` can execute the result.
+`rusk run` also accepts `--target`, but then the host must be able to execute
+that architecture, for example through `binfmt_misc` or QEMU.
 
-The output is a static ELF64 executable:
+The output is a static ELF64 executable for the selected target:
 
-- machine: AArch64 (`EM_AARCH64`), Linux syscall ABI;
+- machine: `EM_AARCH64` (183) or `EM_X86_64` (62), Linux syscall ABI;
 - one `PT_LOAD` segment mapping the whole image read/write/execute;
 - code at virtual address `0x400000 + 0x78`;
 - writable data (variables, number buffer, text and list heap) at `0x410000`,
   zero-filled by the kernel;
 - no interpreter, no dynamic section, no relocations, no libc.
 
-Because there is no libc, `say` and `warn` are direct `write` syscalls
-(`x8 = 64`) to descriptors 1 and 2, and program exit is `exit` (`x8 = 93`).
-Standard input and files use `read` (`x8 = 63`); files are opened with
-`openat` (`x8 = 56`) and closed with `close` (`x8 = 57`). The initial stack
-pointer is saved in the data area at entry so command-line arguments and
-environment variables can be walked without a C startup routine.
+Because there is no libc, output and file I/O are direct Linux syscalls.
+AArch64 uses `x8` for the number: `write` is `64`, `exit` is `93`, `read` is
+`63`, `openat` is `56`, and `close` is `57`. x86-64 uses `rax`: `write` is `1`,
+`exit` is `60`, `read` is `0`, `openat` is `257`, and `close` is `3`. The
+initial stack pointer is saved in the data area at entry so command-line
+arguments and environment variables can be walked without a C startup routine.
 
-Function calls use the standard AArch64 shape, assembled by hand: arguments in
-`X0..X7`, the result in `X0`, the return address in `X30`, and the frame pointer
-in `X29`. Each frame stores the caller's `X29`/`X30` at `sp+0`/`sp+8`, then its
-parameters and locals above that, so recursion gets a fresh set of slots.
+The code generator is written against one small virtual-register language:
+arguments in `X0..X7`, the result in `X0`, the frame pointer in `X29`, and a
+zero register `XZR`. On AArch64 those are the real registers, the return
+address rides in `X30`, and each frame stores the caller's `X29`/`X30` at
+`sp+0`/`sp+8`, then its parameters and locals above that. On x86-64 the encoder
+keeps the virtual registers in a zeroed 256-byte block at `0x418000`, uses the
+real `rsp` for `SP`, and uses the processor's `call`/`ret` stack for return
+addresses. Syscall arguments are loaded into `rdi`, `rsi`, `rdx`, `r10`, `r8`,
+and `r9`; AArch64 syscall numbers written by the code generator are translated
+to their x86-64 equivalents. Both backends therefore run the same generated
+program logic and get the same runtime behavior.
 
 A list is a pointer to `[len: u64][capacity: u64][item: i64]...`, allocated
 from the same bump heap as joined text. The ownership pass guarantees that only
@@ -736,7 +747,7 @@ from an empty list reports `there's nothing to remove`.
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.7, worth relocating later.
+  collide. Fine for v0.8, worth relocating later.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
 - Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
   is reclaimed; exhausting it is reported, but memory is not reused.
@@ -752,6 +763,10 @@ from an empty list reports `there's nothing to remove`.
   is limited to 4095 bytes.
 - The native TUI uses Linux `termios` and ANSI escapes. It is for the `rusk`
   tool only; baked programs have no terminal primitives yet.
+- Only Linux is supported. The two backends are AArch64 and x86-64; there is no
+  macOS, Windows, or 32-bit output. The x86-64 backend is a correctness-first
+  translation layer that keeps virtual registers in memory, so its code is
+  larger and slower than the AArch64 output.
 - At most 8 parameters per function; no function values, closures, or
   overloading.
 - Imports are textual inclusion in one global namespace; there are no module
@@ -763,6 +778,7 @@ from an empty list reports `there's nothing to remove`.
 - borrowing and shared read-only views
 - module namespaces and selective imports
 - function values and closures
-- an x86-64 encoder behind the same AST and codegen
+- a register-allocating x86-64 encoder (the current one keeps virtual
+  registers in memory)
 - a real relocation-aware data layout
 - self-hosting: writing Rusk in Rusk

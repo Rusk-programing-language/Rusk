@@ -1,4 +1,4 @@
-//! Writes a static ELF64 executable for Linux/x86-64.
+//! Writes a static ELF64 executable for Linux (AArch64 or x86-64).
 //!
 //! One `PT_LOAD` segment covers everything: headers, code, strings, and the
 //! zero-filled data area. No interpreter, no dynamic linking, no sections.
@@ -6,6 +6,7 @@
 //! raw syscalls.
 
 use crate::aarch64::{IMAGE_BASE, TEXT_OFFSET};
+use crate::backend::Target;
 use std::fs;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -26,9 +27,14 @@ fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
-/// Build the executable bytes. `bss` is how many zeroed bytes the program
-/// needs above `DATA_BASE`.
+/// Build the executable bytes for the host's default target.
 pub fn build(text: &[u8], rodata: &[u8], bss: u64) -> Vec<u8> {
+    build_for(Target::host(), text, rodata, bss)
+}
+
+/// Build the executable bytes for a chosen target. `bss` is how many zeroed
+/// bytes the program needs above `DATA_BASE`.
+pub fn build_for(target: Target, text: &[u8], rodata: &[u8], bss: u64) -> Vec<u8> {
     let filesz = TEXT_OFFSET + text.len() as u64 + rodata.len() as u64;
     let file_end = IMAGE_BASE + filesz;
     // Lay the writable data out above the file so the kernel zero-fills it.
@@ -51,7 +57,7 @@ pub fn build(text: &[u8], rodata: &[u8], bss: u64) -> Vec<u8> {
     out.push(0); // ELFOSABI_SYSV
     out.extend_from_slice(&[0; 8]);
     put_u16(&mut out, 2); // ET_EXEC
-    put_u16(&mut out, 183); // EM_AARCH64
+    put_u16(&mut out, target.machine());
     put_u32(&mut out, 1); // EV_CURRENT
     put_u64(&mut out, entry);
     put_u64(&mut out, 64); // e_phoff
@@ -113,5 +119,13 @@ mod tests {
         let elf = build(&[0xC3], b"", 16);
         let memsz = u64::from_le_bytes(elf[64 + 40..64 + 48].try_into().unwrap());
         assert_eq!(memsz, DATA_BASE + 16 - IMAGE_BASE);
+    }
+
+    #[test]
+    fn machine_word_follows_the_target() {
+        let aarch64 = build_for(Target::AArch64, &[0xC3], b"", 16);
+        let x86 = build_for(Target::X86_64, &[0xC3], b"", 16);
+        assert_eq!(u16::from_le_bytes(aarch64[18..20].try_into().unwrap()), 183);
+        assert_eq!(u16::from_le_bytes(x86[18..20].try_into().unwrap()), 62);
     }
 }

@@ -1,4 +1,4 @@
-//! Walks the AST and emits AArch64 machine code.
+//! Walks the AST and emits machine code through the selected backend.
 //!
 //! Expressions are evaluated with a stack of temporaries: every expression
 //! leaves its value in `X0`, binary operators push the left side, evaluate the
@@ -20,8 +20,8 @@
 //! hand-built itoa loop at the end of the text section, and the program ends
 //! with `exit(2)`.
 
-use crate::aarch64::*;
 use crate::ast::{BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
+use crate::backend::*;
 use crate::elf::DATA_BASE;
 use crate::types::Sig;
 use std::collections::HashMap;
@@ -73,12 +73,17 @@ pub struct Baked {
     pub text: Vec<u8>,
     pub rodata: Vec<u8>,
     pub bss: u64,
+    pub target: Target,
 }
 
 pub fn compile(program: &Program) -> Result<Baked, String> {
+    compile_for(program, Target::host())
+}
+
+pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     let funcs = crate::types::check(program)?;
     crate::ownership::check(program, &funcs)?;
-    let mut cg = Codegen::new(funcs);
+    let mut cg = Codegen::new(funcs, target);
     cg.heap_error = cg.intern(HEAP_ERROR);
 
     cg.asm.label("_start");
@@ -144,7 +149,12 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
 
     let bss = cg.bss_size();
     let (text, rodata) = cg.asm.finish();
-    Ok(Baked { text, rodata, bss })
+    Ok(Baked {
+        text,
+        rodata,
+        bss,
+        target,
+    })
 }
 
 struct Codegen {
@@ -172,9 +182,9 @@ struct LoopLabels {
 }
 
 impl Codegen {
-    fn new(funcs: HashMap<String, Sig>) -> Self {
+    fn new(funcs: HashMap<String, Sig>, target: Target) -> Self {
         Codegen {
-            asm: Asm::new(),
+            asm: Asm::new(target),
             vars: HashMap::new(),
             funcs,
             frame: None,
@@ -1427,7 +1437,7 @@ impl Codegen {
         a.label("pi_digits");
         a.label("pi_loop");
         a.movz_reg(X5, 10);
-        a.sdiv_reg_reg(X7, X3, X5); // X7 = value / 10
+        a.udiv_reg_reg(X7, X3, X5); // X7 = magnitude / 10
         a.msub_reg_reg(X6, X7, X5, X3); // X6 = value - X7*10
         a.add_imm(X6, X6, 48); // -> ASCII
         a.sub_imm(X1, X1, 1);

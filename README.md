@@ -12,26 +12,29 @@ say "Hello, world."
 
 ```console
 $ rusk build hello.rk
-baked hello.rk -> hello (366 B, native, 0 dependencies)
+baked hello.rk -> hello (3.1 KB, native aarch64, 0 dependencies)
 $ ./hello
 Hello, world.
 ```
 
-That binary is a static ELF file containing hand-encoded AArch64 machine code.
-No C, no LLVM, no assembler, no linker, no libc — the program talks to the
-kernel through `write(2)` and `exit(2)` syscalls.
+That binary is a static ELF file containing hand-encoded AArch64 or x86-64
+machine code, chosen when you bake. No C, no LLVM, no assembler, no linker, no
+libc — the program talks to the kernel through `write(2)` and `exit(2)`
+syscalls.
 
 ## Status
 
-v0.7 adds **list removal and capacity**. Lists now carry a capacity alongside
-their length, so `add VALUE to LIST` appends in place while there is room and
-only copies to fresh heap space when it must grow. `remove last from LIST` and
-`remove item N from LIST` shorten a list in place and shift later items left,
-with runtime checks for an empty list or an item number outside it. Everything
-from v0.6 — ownership, system I/O, and the full-screen session — still works.
+v0.8 adds an **x86-64 backend**. The same code generator now feeds either a
+hand-written AArch64 encoder or a hand-written x86-64 encoder, and
+`--target aarch64|x86_64` chooses which ELF machine word and instruction set
+end up in the file. Bakes default to the architecture running the compiler, so
+`rusk run` works out of the box; cross-bakes work too. v0.7's list capacity and
+`remove last` / `remove item N` behavior is unchanged.
+
 The compiler is a lexer, parser, import expander, type checker, ownership
-checker, AArch64 code generator, and ELF writer, with 177 tests. It targets
-**AArch64 Linux** only.
+checker, target-selecting code generator, two machine-code backends, and an ELF
+writer, with **191 tests**. The end-to-end suite also runs against x86-64 under
+QEMU. It targets **Linux on AArch64 and x86-64**.
 
 ## Quick start
 
@@ -42,6 +45,7 @@ cargo run -- run examples/hello.rk       # bake and run
 cargo run -- tui                          # start the full-screen session
 cargo run -- tui demo                     # try the terminal module demo
 cargo run -- build examples/loop.rk      # write ./examples/loop
+cargo run -- build examples/hello.rk --target x86_64  # cross-bake
 cargo run -- check examples/numbers.rk   # bake without writing anything
 ```
 
@@ -224,7 +228,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.7.0 — an English-like language
+Rusk 0.8.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -287,7 +291,7 @@ instead of escapes.
 ownership   one owner per text value and list
    │
    ▼
- codegen    AArch64 machine code, one word at a time
+ codegen    AArch64 or x86-64 machine code
    │
    ▼
  elf        ELF64 header + one PT_LOAD + your code
@@ -304,8 +308,10 @@ ownership   one owner per text value and list
 | `src/types.rs` | Type checking and return-kind inference (fixed point) |
 | `src/ownership.rs` | Flow-sensitive single-owner checking for text and lists |
 | `src/codegen.rs` | AST to machine code; stack-machine expression evaluation, stack frames |
-| `src/aarch64.rs` | Hand-written instruction encoder and branch/address fixups |
-| `src/elf.rs` | Static ELF64 executable writer |
+| `src/backend.rs` | Target selection and the common assembly interface |
+| `src/aarch64.rs` | Hand-written AArch64 encoder and branch/address fixups |
+| `src/x86_64.rs` | Hand-written x86-64 encoder with memory-backed virtual registers |
+| `src/elf.rs` | Static ELF64 executable writer for either target |
 | `src/repl.rs` | Interactive session: tree-walking evaluator, line prompt, and full-screen loop |
 | `src/tui.rs` | Native terminal UI: raw mode, ANSI frames, key decoding, resize fallback |
 | `src/main.rs` | The `rusk` CLI |
@@ -314,9 +320,12 @@ Runtime facts worth knowing:
 
 - Code starts at `0x400000 + 0x78`; top-level variables and the number buffer
   live at `0x410000` in the zero-filled part of the same segment.
-- Function arguments go in `X0..X7`, results come back in `X0`, and the return
-  address rides in `X30`. Each call gets a frame at `X29` holding the saved
-  `X29`/`X30`, its parameters, and its locals.
+- The code generator speaks one small virtual-register language: arguments go
+  in `X0..X7`, results come back in `X0`, and the frame pointer is `X29`.
+  AArch64 uses those registers directly. x86-64 keeps the virtual registers in
+  a zeroed block at `0x418000`, uses the real `rsp` for `SP`, and lowers every
+  instruction to one or more x86-64 operations. The return address lives on the
+  process stack rather than in `X30`.
 - Strings are stored as `[len: u64][bytes...]`, so a string value is just a
   pointer to its length. Joining two strings bumps a 1 MiB heap in the data
   area and copies both byte blobs into it.
@@ -338,7 +347,9 @@ Runtime facts worth knowing:
   input and files are read with `read(2)`; files are written with
   `openat(2)`/`write(2)`/`close(2)`.
 - `say` of a number calls a hand-built itoa loop that divides by ten and writes
-  digits backwards into a 32-byte buffer.
+  digits backwards into a 32-byte buffer. Syscall numbers are translated per
+  target: AArch64 `write`/`exit`/`read`/`openat`/`close` are
+  `64`/`93`/`63`/`56`/`57`, and x86-64 uses `1`/`60`/`0`/`257`/`3`.
 - Before code generation, `ownership` walks every path and rejects a use of a
   moved name. A move in one arm of an `if` counts as a move after it; a `give
   back` ends that path. `copy of` is the only way to duplicate an owned value.
@@ -348,7 +359,7 @@ Runtime facts worth knowing:
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.7 doesn't do yet
+## What v0.8 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -370,8 +381,10 @@ Honest list, so the docs don't lie:
 - Text positions count bytes, not Unicode characters.
 - At most 8 parameters per function, and no closures, anonymous functions, or
   function values.
-- AArch64 Linux only. The codegen is written so an x86-64 encoder can slot in
-  behind the same AST.
+- Linux only, on AArch64 or x86-64. There is no macOS, Windows, or 32-bit
+  backend.
+- The x86-64 backend keeps virtual registers in memory, so it is slower and
+  larger than the AArch64 output. It is correct first, fast later.
 - The single load segment is RWX, which is convenient but not hardened.
 
 ## Why the name

@@ -1,9 +1,56 @@
 //! End-to-end: bake a `.rk` program to a real executable and run it.
+//!
+//! By default the tests bake for the host architecture. Set
+//! `RUSK_E2E_TARGET=x86_64` (or `aarch64`) to exercise another backend, and
+//! point `RUSK_E2E_RUNNER` at a user-mode emulator such as `qemu-x86_64` when
+//! that target is not the host. The runner is also found on `PATH`.
 
 use std::process::Command;
 
+fn e2e_target() -> rusk::Target {
+    match std::env::var("RUSK_E2E_TARGET").ok().as_deref() {
+        Some("x86_64") | Some("x86-64") | Some("amd64") => rusk::Target::X86_64,
+        Some("aarch64") | Some("arm64") => rusk::Target::AArch64,
+        _ => rusk::Target::host(),
+    }
+}
+
+fn bake_src(src: &str) -> Result<(Vec<u8>, u64), String> {
+    rusk::bake_with_target(src, e2e_target())
+}
+
+fn find_in_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// A command that runs a baked program, through an emulator when the bake
+/// target differs from the host.
+fn program_command(path: &std::path::Path) -> Command {
+    let target = e2e_target();
+    if target == rusk::Target::host() {
+        return Command::new(path);
+    }
+    let runner = std::env::var_os("RUSK_E2E_RUNNER")
+        .map(std::path::PathBuf::from)
+        .or_else(|| find_in_path(&format!("qemu-{}", target.name())))
+        .or_else(|| find_in_path(&format!("qemu-{}-static", target.name())))
+        .unwrap_or_else(|| {
+            panic!(
+                "set RUSK_E2E_RUNNER to a {} user-mode emulator (for example qemu-{})",
+                target.name(),
+                target.name()
+            )
+        });
+    let mut command = Command::new(runner);
+    command.arg(path);
+    command
+}
+
 fn bake_to_disk(name: &str, src: &str) -> std::path::PathBuf {
-    let (bytes, _) = rusk::bake(src).unwrap_or_else(|e| panic!("{name} failed to bake: {e}"));
+    let (bytes, _) = bake_src(src).unwrap_or_else(|e| panic!("{name} failed to bake: {e}"));
     let dir = std::env::temp_dir().join(format!("rusk-e2e-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
@@ -18,7 +65,9 @@ fn run(name: &str, src: &str) -> (String, i32) {
 
 fn run_full(name: &str, src: &str) -> (String, String, i32) {
     let path = bake_to_disk(name, src);
-    let out = Command::new(&path).output().expect("program should start");
+    let out = program_command(&path)
+        .output()
+        .expect("program should start");
     let _ = std::fs::remove_file(&path);
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -118,7 +167,7 @@ say both with true and false
 
 #[test]
 fn and_needs_truth_values() {
-    let err = rusk::bake("say 1 and 2\n").unwrap_err();
+    let err = bake_src("say 1 and 2\n").unwrap_err();
     assert!(err.contains("joins truth values"), "{err}");
 }
 
@@ -136,14 +185,14 @@ fn big_and_small_numbers() {
 
 #[test]
 fn syntax_errors_point_at_a_line() {
-    let err = rusk::bake("let x 5\n").unwrap_err();
+    let err = bake_src("let x 5\n").unwrap_err();
     assert!(err.contains("line 1"), "{err}");
     assert!(err.contains("expected 'be'"), "{err}");
 }
 
 #[test]
 fn unknown_names_are_explained() {
-    let err = rusk::bake("say nope\n").unwrap_err();
+    let err = bake_src("say nope\n").unwrap_err();
     assert!(err.contains("let nope be"), "{err}");
 }
 
@@ -230,13 +279,13 @@ to double with n as a number:
     give back n * 2
 say double with 1 and 2
 ";
-    let err = rusk::bake(src).unwrap_err();
+    let err = bake_src(src).unwrap_err();
     assert!(err.contains("takes 1 thing"), "{err}");
 }
 
 #[test]
 fn give_back_outside_a_function_is_an_error() {
-    let err = rusk::bake("give back 1\n").unwrap_err();
+    let err = bake_src("give back 1\n").unwrap_err();
     assert!(err.contains("inside a function"), "{err}");
 }
 
@@ -391,13 +440,13 @@ for each i from 1 to 2:
 
 #[test]
 fn break_outside_a_loop_is_rejected() {
-    let err = rusk::bake("break\n").unwrap_err();
+    let err = bake_src("break\n").unwrap_err();
     assert!(err.contains("only works inside a loop"), "{err}");
 }
 
 #[test]
 fn continue_outside_a_loop_is_rejected() {
-    let err = rusk::bake("continue\n").unwrap_err();
+    let err = bake_src("continue\n").unwrap_err();
     assert!(err.contains("only works inside a loop"), "{err}");
 }
 
@@ -616,13 +665,13 @@ say doubled with [1, 2, 3]
 
 #[test]
 fn adding_text_moves_it_into_the_list() {
-    let err = rusk::bake("let a be \"hi\"\nlet xs be [\"x\"]\nadd a to xs\nsay a\n").unwrap_err();
+    let err = bake_src("let a be \"hi\"\nlet xs be [\"x\"]\nadd a to xs\nsay a\n").unwrap_err();
     assert!(err.contains("moved already"), "{err}");
 }
 
 #[test]
 fn add_checks_the_item_kind() {
-    let err = rusk::bake("let xs be [1]\nadd \"two\" to xs\n").unwrap_err();
+    let err = bake_src("let xs be [1]\nadd \"two\" to xs\n").unwrap_err();
     assert!(err.contains("this list holds a number"), "{err}");
 }
 
@@ -726,34 +775,34 @@ fn removing_an_item_outside_the_list_stops_the_program() {
 
 #[test]
 fn remove_checks_the_target_and_index_kinds() {
-    let err = rusk::bake("let n be 1\nremove last from n\n").unwrap_err();
+    let err = bake_src("let n be 1\nremove last from n\n").unwrap_err();
     assert!(err.contains("'remove' needs a list"), "{err}");
 
-    let err = rusk::bake("let xs be [1]\nremove item \"one\" from xs\n").unwrap_err();
+    let err = bake_src("let xs be [1]\nremove item \"one\" from xs\n").unwrap_err();
     assert!(err.contains("item number must be a number"), "{err}");
 
-    let err = rusk::bake("constant xs be [1]\nremove last from xs\n").unwrap_err();
+    let err = bake_src("constant xs be [1]\nremove last from xs\n").unwrap_err();
     assert!(err.contains("constant"), "{err}");
 }
 
 #[test]
 fn a_constant_list_cannot_grow() {
-    let err = rusk::bake("constant xs be [1]\nadd 2 to xs\n").unwrap_err();
+    let err = bake_src("constant xs be [1]\nadd 2 to xs\n").unwrap_err();
     assert!(err.contains("constant"), "{err}");
 }
 
 #[test]
 fn a_constant_cannot_be_set() {
-    let err = rusk::bake("constant pi be 3\nset pi to 4\n").unwrap_err();
+    let err = bake_src("constant pi be 3\nset pi to 4\n").unwrap_err();
     assert!(err.contains("constant"), "{err}");
 }
 
 #[test]
 fn lists_are_homogeneous_and_empty_lists_need_a_kind() {
-    let err = rusk::bake("let xs be [1, \"two\"]\n").unwrap_err();
+    let err = bake_src("let xs be [1, \"two\"]\n").unwrap_err();
     assert!(err.contains("mixes"), "{err}");
 
-    let err = rusk::bake("let xs be []\n").unwrap_err();
+    let err = bake_src("let xs be []\n").unwrap_err();
     assert!(err.contains("empty list needs a kind"), "{err}");
 }
 
@@ -780,10 +829,10 @@ fn a_program_can_import_several_modules() {
     )
     .unwrap();
 
-    let (bytes, _) = rusk::bake_path(&main).unwrap();
+    let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
     let out = dir.join("main");
     rusk::elf::write(&out, &bytes).unwrap();
-    let result = Command::new(&out)
+    let result = program_command(&out)
         .output()
         .expect("imported program should start");
     let _ = std::fs::remove_dir_all(&dir);
@@ -817,7 +866,7 @@ let xs be [1, 2]
 let ys be xs
 say xs
 ";
-    let err = rusk::bake(src).unwrap_err();
+    let err = bake_src(src).unwrap_err();
     assert!(err.contains("moved already"), "{err}");
     assert!(err.contains("line 3"), "{err}");
 }
@@ -857,7 +906,7 @@ say greeting
 
 #[test]
 fn a_constant_cannot_be_moved() {
-    let err = rusk::bake("constant greeting be \"hi\"\nlet a be greeting\n").unwrap_err();
+    let err = bake_src("constant greeting be \"hi\"\nlet a be greeting\n").unwrap_err();
     assert!(err.contains("constant"), "{err}");
     assert!(err.contains("copy of"), "{err}");
 }
@@ -872,6 +921,22 @@ fn dividing_by_zero_stops_with_a_sentence() {
         stderr.contains("line 2: I can't divide by zero"),
         "{stderr}"
     );
+}
+
+#[test]
+fn the_smallest_number_prints_and_divides() {
+    let src = "\
+let smallest be 0 - 9223372036854775807 - 1
+say smallest
+say smallest / -1
+say smallest + 1
+";
+    let (stdout, code) = run("min_int", src);
+    assert_eq!(
+        stdout,
+        "-9223372036854775808\n-9223372036854775808\n-9223372036854775807\n"
+    );
+    assert_eq!(code, 0);
 }
 
 #[test]
@@ -915,7 +980,7 @@ fn run_with(
     use std::process::Stdio;
 
     let path = bake_to_disk(name, src);
-    let mut command = Command::new(&path);
+    let mut command = program_command(&path);
     command.args(args);
     for (key, value) in envs {
         command.env(key, value);

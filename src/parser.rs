@@ -1,6 +1,6 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.7):
+//! Grammar (v0.8):
 //!
 //! ```text
 //! program    := (import_stmt | stmt)*
