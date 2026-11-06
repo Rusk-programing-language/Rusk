@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.8
+# The Rusk Language — Specification v0.9
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.8
+emits native machine code directly. This document describes exactly what v0.9
 accepts and what it guarantees.
 
-Status: **v0.8, Linux on AArch64 and x86-64**. Everything here is implemented
+Status: **v0.9, Linux on AArch64 and x86-64**. Everything here is implemented
 and tested; anything not here does not exist yet.
 
 ---
@@ -35,9 +35,9 @@ Blank lines are ignored.
 | Number | `42`, `-7` | Signed 64-bit integer (two's complement) |
 | Text | `"hello"` | Immutable; escapes `\n`, `\t`, `\r`, `\0`, `\\`, `\"` |
 | Truth | `true`, `false` | The result of comparisons and `not` |
-| List | `[1, 2, 3]`, `["a", "b"]`, `[true, false]` | Growable, one kind of item, positions count from 1 |
+| List | `[1, 2, 3]`, `["a", "b"]`, `[[1], [2]]` | Growable, one kind of item, positions count from 1; lists may nest |
 
-Numbers are integers only. There is no floating point in v0.8.
+Numbers are integers only. There is no floating point in v0.9.
 
 Text and lists live on a heap and are **owned**: a name holds one of them at a
 time. Ownership is what makes the language memory-safe without a garbage
@@ -276,19 +276,34 @@ let names be ["rye", "wheat"]
 let flags be [true, false, true]
 ```
 
-Every item must have the same kind: a list holds numbers, text, or truth
-values, never a mixture and never other lists. An empty list cannot guess its
-kind, so write it down:
+Every item must have the same kind: a list holds numbers, text, truth values,
+or other lists. A list of lists may nest to any depth, as long as every sibling
+has the same shape. An empty list cannot guess its kind, so write it down:
 
 ```rusk
 let empty_numbers be an empty list of numbers
 let empty_names be an empty list of text
 let empty_flags be an empty list of truth values
+let grid be an empty list of lists of numbers
+let cube be an empty list of lists of lists of truth values
 ```
 
 `an` is optional: `empty list of text` reads the same. The kind is also written
-in function parameters as `a list of numbers`, `a list of text`, or
-`a list of truth values`.
+in function parameters as `a list of numbers`, `a list of lists of numbers`, and
+so on. The innermost kind is one of `numbers`, `text`, or `truth values`; each
+`lists of` adds one level of nesting.
+
+```rusk
+let rows be [[1, 2], [3, 4], an empty list of numbers]
+say item 2 of item 1 of rows        # 2
+set item 3 of rows to [5]
+add [6, 7] to rows
+say rows                            # [[1, 2], [3, 4], [5], [6, 7]]
+```
+
+`say` prints nested lists with brackets, commas, and spaces. `copy of` is a
+deep copy: every nested list and every text item is duplicated, so changing one
+copy never changes the other.
 
 Six forms work on lists, all counting from **1**:
 
@@ -477,8 +492,9 @@ to roll:
 - `give back VALUE` ends the function and hands `VALUE` to the caller.
 
 Kinds are written `a number`, `text`, `a truth value` (`a boolean` works too),
-and `a list of numbers` / `a list of text` / `a list of truth values`. The
-`a`/`an` is optional: `n as number` reads the same.
+and list kinds such as `a list of numbers`, `a list of text`,
+`a list of truth values`, or `a list of lists of numbers`. The `a`/`an` is
+optional: `n as number` reads the same.
 
 Calling uses the same `with ... and ...` shape:
 
@@ -528,19 +544,51 @@ Resolution order, for a relative path:
 3. relative to the current directory;
 4. inside a `ruskmods/` folder in the current directory.
 
-An absolute path is used as written. A file is expanded **at most once** per
-bake, so several modules can import the same helper without defining it twice.
-Imports are recursive: an imported file may import others. A cycle is an error
-and names the chain:
+An absolute path is used as written. A file and a namespace are expanded **at
+most once** per bake, so several modules can import the same helper without
+defining it twice. Imports are recursive: an imported file may import others. A
+cycle is an error and names the chain:
 
 ```console
 burnt: in lib/b.rk: line 1: this import makes a cycle: main.rk -> lib/a.rk -> lib/b.rk -> lib/a.rk
 ```
 
-`import` only works at the top level, not inside a block. Imported definitions
-join one global namespace, so functions should use a prefix (`text_`, `math_`)
-until namespaces exist. A missing file, an unreadable file, or a syntax error
-inside an imported file names the file it came from.
+`import` and `from` only work at the top level, not inside a block. A missing
+file, an unreadable file, or a syntax error inside an imported file names the
+file it came from.
+
+### Module namespaces
+
+A plain `import` still joins one global namespace. Two forms keep modules apart:
+
+```rusk
+import "math" as math           # math.double, math.answer, ...
+from "math" import double       # bring double in without a prefix
+from "math" import double as twice
+```
+
+With `import ... as NAME`, every top-level definition in the file is given the
+`NAME.` prefix and must be referred to that way. With `from`, the compiler
+imports the file under a namespace made from its file stem (`math` here), then
+rewrites the chosen names to their qualified form. `as` gives a local alias;
+the original name is not introduced. Several names may follow one `from`:
+
+```rusk
+from "math" import double, add as plus
+say double with 21
+say plus with 2 and 3
+```
+
+A namespaced module's own plain imports are **private**: they inherit the same
+prefix, so a helper cannot leak into the program that imported the module. If
+two `from` imports resolve to files with the same stem, the second namespace
+gets `_2`, `_3`, and so on. Two selective imports cannot introduce the same
+local name — give one an `as` alias — and two `as` aliases must be distinct.
+
+```rusk
+import "lib/thing" as thing
+say thing.use_hidden with 4     # hidden lives inside thing, not here
+```
 
 ## 12. Whole programs
 
@@ -569,7 +617,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.8.0 — an English-like language
+Rusk 0.9.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -724,12 +772,14 @@ program logic and get the same runtime behavior.
 A list is a pointer to `[len: u64][capacity: u64][item: i64]...`, allocated
 from the same bump heap as joined text. The ownership pass guarantees that only
 one live name refers to a list, so assigning a list never creates an alias;
-`copy of` makes a new list and copies every item. `array_get` and `array_set`
-check the 1-based index against the stored length and report `an item outside
-the list` on failure. `array_add` writes into spare capacity, or allocates a
-larger block and copies the items when the list is full. `array_remove_last`
-and `array_remove_at` reduce the length and shift later items left; removing
-from an empty list reports `there's nothing to remove`.
+`copy of` makes a new list and copies every item. For nested lists the code
+generator emits one recursive copy routine and one recursive printer per list
+shape the program actually uses. `array_get` and `array_set` check the 1-based
+index against the stored length and report `an item outside the list` on
+failure. `array_add` writes into spare capacity, or allocates a larger block and
+copies the items when the list is full. `array_remove_last` and `array_remove_at`
+reduce the length and shift later items left; removing from an empty list
+reports `there's nothing to remove`.
 
 ### Guarantees
 
@@ -747,13 +797,13 @@ from an empty list reports `there's nothing to remove`.
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.8, worth relocating later.
+  collide. Fine for v0.9, worth relocating later.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
 - Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
   is reclaimed; exhausting it is reported, but memory is not reused.
 - Ownership is single-owner, not borrowing: there is no way to lend a value to
   two readers at once. `copy of` is the escape hatch.
-- Lists are homogeneous and flat: no nested lists. They can grow with
+- Lists are homogeneous but may nest to any depth. They can grow with
   `add VALUE to LIST`, which uses spare capacity or copies the whole list to
   fresh heap space, and shrink with `remove last from LIST` or
   `remove item N from LIST`. Capacity never shrinks, and the heap never
@@ -769,14 +819,10 @@ from an empty list reports `there's nothing to remove`.
   larger and slower than the AArch64 output.
 - At most 8 parameters per function; no function values, closures, or
   overloading.
-- Imports are textual inclusion in one global namespace; there are no module
-  namespaces or selective imports.
 
 ## 16. Roadmap (not implemented)
 
-- nested lists
 - borrowing and shared read-only views
-- module namespaces and selective imports
 - function values and closures
 - a register-allocating x86-64 encoder (the current one keeps virtual
   registers in memory)

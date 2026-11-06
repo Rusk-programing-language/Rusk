@@ -21,3 +21,20 @@ for each name in names:
 let empty be an empty list of numbers
 say length of empty         # 0
 say empty                   # []
+
+# Lists may hold lists. Every sibling has the same shape.
+let rows be [[1, 2], [3, 4], an empty list of numbers]
+say rows                    # [[1, 2], [3, 4], []]
+say item 2 of item 1 of rows  # 2
+set item 1 of rows to [9, 8, 7]
+add [5] to rows
+say rows                    # [[9, 8, 7], [3, 4], [], [5]]
+
+# `copy of` copies every level, so the copies are independent.
+let spare be copy of rows
+remove item 1 from spare
+say rows                    # [[9, 8, 7], [3, 4], [], [5]]
+say spare                   # [[3, 4], [], [5]]
+
+let cube be [[[1, 2], [3]], [[4]]]
+say cube                    # [[[1, 2], [3]], [[4]]]

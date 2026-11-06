@@ -842,6 +842,121 @@ fn a_program_can_import_several_modules() {
 }
 
 #[test]
+fn modules_can_be_named_and_selectively_imported() {
+    let dir = std::env::temp_dir().join(format!("rusk-e2e-modules-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("math.rk"),
+        "let answer be 42\nto double with n as a number:\n    give back n * 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("text.rk"),
+        "to bang with s as text:\n    give back s + \"!\"\n",
+    )
+    .unwrap();
+    let main = dir.join("main.rk");
+    std::fs::write(
+        &main,
+        "import \"math\" as math\nfrom \"text\" import bang\nfrom \"math\" import double as twice\nsay math.double with 21\nsay math.answer\nsay twice with 5\nsay bang with \"hi\"\n",
+    )
+    .unwrap();
+
+    let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
+    let out = dir.join("main");
+    rusk::elf::write(&out, &bytes).unwrap();
+    let result = program_command(&out)
+        .output()
+        .expect("module program should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n10\nhi!\n");
+    assert_eq!(result.status.code(), Some(0));
+}
+
+#[test]
+fn a_namespaced_modules_own_imports_stay_private() {
+    let dir = std::env::temp_dir().join(format!("rusk-e2e-private-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helper.rk"), "to hidden:\n    give back 7\n").unwrap();
+    std::fs::write(
+        dir.join("thing.rk"),
+        "import \"helper\"\nto use_hidden:\n    give back hidden\n",
+    )
+    .unwrap();
+    let main = dir.join("main.rk");
+    std::fs::write(&main, "import \"thing\" as thing\nsay thing.use_hidden\n").unwrap();
+
+    let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
+    let out = dir.join("main");
+    rusk::elf::write(&out, &bytes).unwrap();
+    let result = program_command(&out)
+        .output()
+        .expect("private import program should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "7\n");
+    assert_eq!(result.status.code(), Some(0));
+}
+
+#[test]
+fn nested_lists_nest_and_deep_copy() {
+    let src = "\
+let rows be [[1, 2], [3, 4], an empty list of numbers]
+say rows
+say item 2 of item 1 of rows
+set item 3 of rows to [5]
+add [6, 7] to rows
+say rows
+let echo be copy of rows
+remove last from rows
+say rows
+say echo
+let deep be [[[1, 2], [3]], [[4]]]
+say deep
+let deep_echo be copy of deep
+remove item 1 from deep
+say deep
+say deep_echo
+let empties be an empty list of lists of text
+add [\"a\"] to empties
+say empties
+for each row in echo:
+    say row
+";
+    let (stdout, code) = run("nested_lists", src);
+    assert_eq!(
+        stdout,
+        "\
+[[1, 2], [3, 4], []]
+2
+[[1, 2], [3, 4], [5], [6, 7]]
+[[1, 2], [3, 4], [5]]
+[[1, 2], [3, 4], [5], [6, 7]]
+[[[1, 2], [3]], [[4]]]
+[[[4]]]
+[[[1, 2], [3]], [[4]]]
+[[a]]
+[1, 2]
+[3, 4]
+[5]
+[6, 7]
+"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn nested_list_kinds_are_still_homogeneous() {
+    let err = bake_src("let xs be [[1], [\"two\"]]\n").unwrap_err();
+    assert!(err.contains("mixes"), "{err}");
+
+    let err = bake_src("let xs be an empty list of lists of numbers\nadd 1 to xs\n").unwrap_err();
+    assert!(err.contains("this list holds"), "{err}");
+    assert!(err.contains("list of numbers"), "{err}");
+}
+
+#[test]
 fn a_function_can_give_back_a_list() {
     let src = "\
 to pair with n as a number:

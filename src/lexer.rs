@@ -18,6 +18,7 @@ pub enum Tok {
     Dedent,
     Colon,
     Comma,
+    Dot,
     LParen,
     RParen,
     LBracket,
@@ -49,6 +50,7 @@ impl Tok {
             Tok::Dedent => "a dedent".to_string(),
             Tok::Colon => "':'".to_string(),
             Tok::Comma => "','".to_string(),
+            Tok::Dot => "'.'".to_string(),
             Tok::LParen => "'('".to_string(),
             Tok::RParen => "')'".to_string(),
             Tok::LBracket => "'['".to_string(),
@@ -235,6 +237,13 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             ',' => {
                 toks.push(Token {
                     tok: Tok::Comma,
+                    line,
+                });
+                i += 1;
+            }
+            '.' => {
+                toks.push(Token {
+                    tok: Tok::Dot,
                     line,
                 });
                 i += 1;

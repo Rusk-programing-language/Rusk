@@ -5,7 +5,7 @@ time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies.
 
-This guide is for v0.8. For the exact language rules, see
+This guide is for v0.9. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -84,7 +84,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 0.8.0 — code, baked ahead of time
+rusk 0.9.0 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -334,19 +334,26 @@ A function with no `give back` gives nothing back and cannot be used as a
 value. At most 8 parameters are allowed. There are no closures or function
 values.
 
-Declared kinds are `a number`, `text`, `a truth value`, `a list of numbers`,
-`a list of text`, and `a list of truth values`.
+Declared kinds are `a number`, `text`, `a truth value`, and list kinds such as
+`a list of numbers`, `a list of text`, `a list of truth values`, or
+`a list of lists of numbers`.
 
 ## 6. Lists, growth, and removal
 
-A list is homogeneous: numbers, text, or truth values, never a mixture and
-never nested lists.
+A list is homogeneous: all its items have the same kind. That kind can itself
+be a list, so lists nest to any depth.
 
 ```rusk
 let loaves be [3, 6, 9]
 let names be ["rye", "wheat"]
 let flags be [true, false, true]
+
+let grid be [[1, 2], [3, 4], an empty list of numbers]
+let cube be [[[1, 2]], [[3, 4]]]
 ```
+
+Every sibling must have the same shape: `[[1], [2, 3]]` is fine, but
+`[[1], "two"]` is not.
 
 An empty list needs its kind written down:
 
@@ -354,9 +361,11 @@ An empty list needs its kind written down:
 let empty_numbers be an empty list of numbers
 let empty_names be an empty list of text
 let empty_flags be an empty list of truth values
+let empty_grid be an empty list of lists of numbers
 ```
 
-`an` is optional: `empty list of text` also works.
+`an` is optional: `empty list of text` also works. Each `lists of` adds one level
+of nesting, and the innermost word is `numbers`, `text`, or `truth values`.
 
 ### Length, items, and replacement
 
@@ -393,7 +402,7 @@ items over. Old blocks are not reclaimed.
 
 ### Removing
 
-v0.7 added two removal forms, unchanged in v0.8:
+v0.7 added two removal forms, unchanged in v0.9:
 
 ```rusk
 let xs be [10, 20, 30]
@@ -438,7 +447,16 @@ say ys                      # [1, 3]
 ```
 
 The copy is independent. Plain `let ys be xs` moves the list instead; `xs`
-cannot be used after that.
+cannot be used after that. For nested lists, `copy of` walks every level, so
+the copy shares no inner list with the original.
+
+```rusk
+let grid be [[1, 2], [3]]
+let spare be copy of grid
+set item 2 of item 1 of spare to 9
+say grid                    # [[1, 2], [3]]
+say spare                   # [[1, 9], [3]]
+```
 
 ## 7. Ownership
 
@@ -560,9 +578,40 @@ say greeting with "world"
 say math_square with 12
 ```
 
-Imports are textual inclusion into one global namespace. There are no module
-namespaces or selective imports, so modules prefix their names (`math_square`,
-`text_trim`).
+A plain import is textual inclusion into one global namespace. Modules that
+want separation use a name:
+
+```rusk
+import "lib/math" as math
+
+say math.double with 21
+say math.answer
+```
+
+Every top-level definition in `lib/math.rk` now lives under `math.`, and the
+module refers to its own names normally. A namespaced module's own plain
+imports are private: helpers it pulls in get the same prefix and do not leak
+into your program.
+
+Selective imports bring just the names you ask for, with no prefix:
+
+```rusk
+from "lib/math" import double
+from "lib/text" import trim, pad as pad_left
+
+say double with 21
+say pad_left with "x"
+```
+
+`from` gives the file a namespace based on its stem (`math`, `text`) and
+rewrites the chosen names. `as` makes a local alias. Two selective imports
+cannot claim the same local name; give one an alias. If two files share a stem,
+the second namespace becomes `math_2`, then `math_3`, and so on.
+
+```rusk
+import "lib/thing" as thing
+say thing.use_hidden with 4   # hidden belongs to thing
+```
 
 ## 10. The interactive session
 
@@ -574,7 +623,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.8.0 — an English-like language
+Rusk 0.9.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -685,7 +734,7 @@ README.md             overview and quick start
 docs/SPEC.md          exact language specification
 guide/README.md       this guide
 examples/             small runnable .rk programs
-src/imports.rs        resolve and expand imports
+src/imports.rs        resolve imports and apply module namespaces
 src/lexer.rs          tokens, indentation markers
 src/parser.rs         recursive-descent parser
 src/types.rs          kinds and return-kind inference
@@ -732,17 +781,16 @@ Implemented and checked:
 - Static ELF64 output for Linux, on AArch64 or x86-64, with no libc
 - English expressions, conditions, loops, and functions
 - Constants, text operations, and imports
-- Homogeneous lists with `item`, `set item`, `add`, `remove last`, and
-  `remove item N`
+- Homogeneous lists, including nested lists, with `item`, `set item`, `add`,
+  `remove last`, and `remove item N`
+- Module namespaces (`import ... as`) and selective imports (`from ... import`)
 - Single-owner checking with `copy of`
 - Arguments, environment, standard input, files, `warn`, and `stop with`
 - Line REPL and native full-screen TUI
 
 Not implemented yet:
 
-- Nested lists
 - Borrowing and shared read-only views
-- Module namespaces and selective imports
 - Function values and closures
 - A register-allocating x86-64 backend (the current one is memory-backed)
 - Relocation-aware data layout

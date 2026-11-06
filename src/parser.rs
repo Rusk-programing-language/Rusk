@@ -1,10 +1,12 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.8):
+//! Grammar (v0.9):
 //!
 //! ```text
 //! program    := (import_stmt | stmt)*
-//! import_stmt:= "import" (TEXT | NAME) NEWLINE
+//! import_stmt:= "import" (TEXT | NAME) ("as" NAME)?
+//!             | "from" (TEXT | NAME) "import" NAME ("as" NAME)? ("," NAME ("as" NAME)?)*
+//!              NEWLINE
 //! stmt       := say_stmt | let_stmt | const_stmt | set_stmt | add_stmt
 //!             | remove_stmt | if_stmt | repeat_stmt | while_stmt
 //!             | for_each_stmt | func_def | give_back | break_stmt
@@ -60,7 +62,7 @@
 //! as words when the sentence around them fits, so they can still be names.
 //! ```
 
-use crate::ast::{BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
+use crate::ast::{Base, BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
 use crate::lexer::{Tok, Token};
 
 pub struct Parser {
@@ -78,7 +80,7 @@ pub fn parse(toks: Vec<Token>) -> Result<Program, String> {
         if p.peek() == &Tok::Eof {
             break;
         }
-        if p.is_word("import") {
+        if p.is_word("import") || p.is_word("from") {
             stmts.push(p.import_stmt()?);
         } else {
             stmts.push(p.stmt()?);
@@ -182,7 +184,9 @@ impl Parser {
 
     fn import_stmt(&mut self) -> Result<Stmt, String> {
         let line = self.line();
-        self.bump(); // "import"
+        let from = self.is_word("from");
+        self.bump(); // "import" or "from"
+
         let path = match self.peek().clone() {
             Tok::Str(s) => {
                 self.bump();
@@ -200,16 +204,52 @@ impl Parser {
                 ))
             }
         };
+
+        if from {
+            self.need_word("import", "after the file name in 'from',")?;
+            let mut names = Vec::new();
+            loop {
+                let name = self.name("after 'from ... import'")?;
+                let alias = if self.eat_word("as") {
+                    Some(self.name("after 'as'")?)
+                } else {
+                    None
+                };
+                names.push((name, alias));
+                if self.peek() != &Tok::Comma {
+                    break;
+                }
+                self.bump();
+            }
+            self.end_of_line()?;
+            return Ok(Stmt::Import {
+                path,
+                alias: None,
+                names,
+                line,
+            });
+        }
+
+        let alias = if self.eat_word("as") {
+            Some(self.name("after 'as'")?)
+        } else {
+            None
+        };
         self.end_of_line()?;
-        Ok(Stmt::Import { path, line })
+        Ok(Stmt::Import {
+            path,
+            alias,
+            names: Vec::new(),
+            line,
+        })
     }
 
     fn stmt(&mut self) -> Result<Stmt, String> {
         let line = self.line();
 
-        if self.is_word("import") {
+        if self.is_word("import") || self.is_word("from") {
             return Err(format!(
-                "line {}: 'import' only works at the top level, not inside a block",
+                "line {}: imports only work at the top level, not inside a block",
                 self.line()
             ));
         }
@@ -299,7 +339,7 @@ impl Parser {
             self.bump();
             let value = self.expr(true)?;
             self.need_word("to", "after the value in 'add',")?;
-            let name = self.name("after 'add ... to'")?;
+            let name = self.qualified_name("after 'add ... to'")?;
             self.end_of_line()?;
             return Ok(Stmt::AddTo { value, name, line });
         }
@@ -318,7 +358,7 @@ impl Parser {
                 ));
             };
             self.need_word("from", "after 'remove last' or the item number,")?;
-            let name = self.name("after 'remove ... from'")?;
+            let name = self.qualified_name("after 'remove ... from'")?;
             self.end_of_line()?;
             return Ok(Stmt::Remove { index, name, line });
         }
@@ -363,7 +403,7 @@ impl Parser {
                     line,
                 });
             }
-            let name = self.name("after 'set'")?;
+            let name = self.qualified_name("after 'set'")?;
             self.need_word("to", &format!("after 'set {name}',"))?;
             let value = self.expr(true)?;
             self.end_of_line()?;
@@ -453,18 +493,7 @@ impl Parser {
                 if word == "list" {
                     self.bump();
                     self.need_word("of", "after 'list',")?;
-                    let inner = self.type_name("after 'list of',")?;
-                    let elem = match inner {
-                        Ty::Int => Elem::Int,
-                        Ty::Str => Elem::Str,
-                        Ty::Bool => Elem::Bool,
-                        other => {
-                            return Err(format!(
-                                "line {}: {after} a list can hold numbers, text, or truth values, not {other}",
-                                self.line()
-                            ))
-                        }
-                    };
+                    let elem = self.elem_name("after 'list of',")?;
                     return Ok(Ty::Array(elem));
                 }
                 if word == "truth" {
@@ -496,6 +525,46 @@ impl Parser {
         }
     }
 
+    /// The plural item phrase after "of", such as `numbers`, `text`,
+    /// `truth values`, or `lists of numbers`.
+    fn elem_name(&mut self, after: &str) -> Result<Elem, String> {
+        match self.peek().clone() {
+            Tok::Ident(word) => {
+                if word == "list" || word == "lists" {
+                    self.bump();
+                    self.need_word("of", "after 'lists',")?;
+                    let inner = self.elem_name("after 'lists of',")?;
+                    return Ok(inner.nested());
+                }
+                let base = match word.as_str() {
+                    "number" | "numbers" => Base::Int,
+                    "text" => Base::Str,
+                    "truth" => {
+                        self.bump();
+                        if !self.eat_word("value") {
+                            self.eat_word("values");
+                        }
+                        return Ok(Elem::BOOL);
+                    }
+                    "boolean" | "booleans" => Base::Bool,
+                    _ => {
+                        return Err(format!(
+                            "line {}: {after} I expected 'numbers', 'text', 'truth values', or 'lists of ...', but found '{word}'",
+                            self.line()
+                        ))
+                    }
+                };
+                self.bump();
+                Ok(Elem::new(base, 0))
+            }
+            other => Err(format!(
+                "line {}: {after} I expected a kind of item ('numbers', 'text', 'truth values', or 'lists of ...'), but found {}",
+                self.line(),
+                other.describe()
+            )),
+        }
+    }
+
     fn name(&mut self, after: &str) -> Result<String, String> {
         match self.peek().clone() {
             Tok::Ident(s) => {
@@ -508,6 +577,19 @@ impl Parser {
                 other.describe()
             )),
         }
+    }
+
+    /// A name, optionally followed by `.part` pieces. Dots only appear in
+    /// references to an imported module's names; declarations stay plain.
+    fn qualified_name(&mut self, after: &str) -> Result<String, String> {
+        let mut name = self.name(after)?;
+        while self.peek() == &Tok::Dot {
+            self.bump();
+            let part = self.name("after '.'")?;
+            name.push('.');
+            name.push_str(&part);
+        }
+        Ok(name)
     }
 
     fn block(&mut self, what: &str) -> Result<Vec<Stmt>, String> {
@@ -697,18 +779,7 @@ impl Parser {
                     self.bump(); // "empty"
                     self.need_word("list", "after 'empty',")?;
                     self.need_word("of", "after 'empty list',")?;
-                    let inner = self.type_name("after 'empty list of',")?;
-                    let elem = match inner {
-                        Ty::Int => Elem::Int,
-                        Ty::Str => Elem::Str,
-                        Ty::Bool => Elem::Bool,
-                        other => {
-                            return Err(format!(
-                                "line {}: an empty list can hold numbers, text, or truth values, not {other}",
-                                self.line()
-                            ))
-                        }
-                    };
+                    let elem = self.elem_name("after 'empty list of',")?;
                     return Ok(Expr::EmptyArray(elem));
                 }
                 if word == "length" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
@@ -796,17 +867,27 @@ impl Parser {
                 match word.as_str() {
                     "true" => Ok(Expr::Bool(true)),
                     "false" => Ok(Expr::Bool(false)),
-                    _ if self.eat_word("with") => {
-                        let mut args = Vec::new();
-                        loop {
-                            args.push(self.expr(false)?);
-                            if !self.eat_word("and") {
-                                break;
-                            }
+                    _ => {
+                        let mut name = word;
+                        while self.peek() == &Tok::Dot {
+                            self.bump();
+                            let part = self.name("after '.'")?;
+                            name.push('.');
+                            name.push_str(&part);
                         }
-                        Ok(Expr::Call(word, args))
+                        if self.eat_word("with") {
+                            let mut args = Vec::new();
+                            loop {
+                                args.push(self.expr(false)?);
+                                if !self.eat_word("and") {
+                                    break;
+                                }
+                            }
+                            Ok(Expr::Call(name, args))
+                        } else {
+                            Ok(Expr::Var(name))
+                        }
                     }
-                    _ => Ok(Expr::Var(word)),
                 }
             }
             other => Err(format!(
@@ -946,7 +1027,7 @@ mod tests {
         let prog = p("let empty be an empty list of text\n");
         match &prog.stmts[0] {
             Stmt::Let {
-                value: Expr::EmptyArray(Elem::Str),
+                value: Expr::EmptyArray(Elem::STR),
                 ..
             } => {}
             other => panic!("unexpected: {other:?}"),
@@ -969,7 +1050,7 @@ mod tests {
 
         let prog = p("to takes with xs as a list of numbers:\n    give back length of xs\n");
         match &prog.stmts[0] {
-            Stmt::FuncDef { params, .. } => assert_eq!(params[0].ty, Ty::Array(Elem::Int)),
+            Stmt::FuncDef { params, .. } => assert_eq!(params[0].ty, Ty::Array(Elem::INT)),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -1027,7 +1108,7 @@ mod tests {
 
         let prog = p("import \"lib/helpers\"\n");
         match &prog.stmts[0] {
-            Stmt::Import { path, line } => {
+            Stmt::Import { path, line, .. } => {
                 assert_eq!(path, "lib/helpers");
                 assert_eq!(*line, 1);
             }
@@ -1042,5 +1123,73 @@ mod tests {
             &prog.stmts[1],
             Stmt::Say(Expr::Binary(BinOp::Add, ..), _)
         ));
+    }
+
+    #[test]
+    fn named_and_selective_imports_parse() {
+        let prog = p("import \"math\" as math\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Import { path, alias: Some(alias), names, .. }
+                if path == "math" && alias == "math" && names.is_empty()
+        ));
+
+        let prog = p("from \"math\" import double\n");
+        match &prog.stmts[0] {
+            Stmt::Import {
+                path, alias, names, ..
+            } => {
+                assert_eq!(path, "math");
+                assert!(alias.is_none());
+                assert_eq!(names, &vec![("double".to_string(), None)]);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+
+        let prog = p("from \"math\" import double as twice, pi\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Import { names, .. }
+                if names == &vec![
+                    ("double".to_string(), Some("twice".to_string())),
+                    ("pi".to_string(), None),
+                ]
+        ));
+    }
+
+    #[test]
+    fn dotted_names_are_references() {
+        let prog = p("say math.double with 2\nsay math.answer\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Say(Expr::Call(name, args), _)
+                if name == "math.double" && args.len() == 1
+        ));
+        assert!(matches!(
+            &prog.stmts[1],
+            Stmt::Say(Expr::Var(name), _) if name == "math.answer"
+        ));
+    }
+
+    #[test]
+    fn nested_list_types_parse() {
+        let prog = p("let xs be an empty list of lists of numbers\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Let {
+                value: Expr::EmptyArray(elem),
+                ..
+            } if elem.depth() == 1 && elem.base() == Base::Int
+        ));
+
+        let prog = p("to rows with xs as a list of lists of text:\n    give back xs\n");
+        match &prog.stmts[0] {
+            Stmt::FuncDef { params, .. } => {
+                let elem = params[0].ty.elem().unwrap();
+                assert_eq!(elem.depth(), 1);
+                assert_eq!(elem.base(), Base::Str);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 }

@@ -20,7 +20,7 @@
 //! hand-built itoa loop at the end of the text section, and the program ends
 //! with `exit(2)`.
 
-use crate::ast::{BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
+use crate::ast::{Base, BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
 use crate::backend::*;
 use crate::elf::DATA_BASE;
 use crate::types::Sig;
@@ -119,6 +119,8 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
         }
     }
 
+    cg.emit_nested_helpers();
+
     cg.emit_print_int();
     cg.emit_text_concat();
     cg.emit_text_compare();
@@ -171,6 +173,9 @@ struct Codegen {
     heap_error: usize,
     /// Labels for the loops we are inside, innermost last.
     loops: Vec<LoopLabels>,
+    /// Nested list shapes whose recursive copy/print helpers are needed.
+    copy_shapes: Vec<Elem>,
+    show_shapes: Vec<Elem>,
 }
 
 #[derive(Clone)]
@@ -194,12 +199,54 @@ impl Codegen {
             line: 0,
             heap_error: 0,
             loops: Vec::new(),
+            copy_shapes: Vec::new(),
+            show_shapes: Vec::new(),
         }
     }
 
     fn new_label(&mut self, hint: &str) -> String {
         self.label_counter += 1;
         format!("{hint}_{}", self.label_counter)
+    }
+
+    fn shape_tag(elem: Elem) -> String {
+        format!("{}_{}", elem.base().word(), elem.depth())
+    }
+
+    fn show_array_label(&mut self, elem: Elem) -> String {
+        self.ensure_show_shape(elem);
+        format!("show_array_{}", Self::shape_tag(elem))
+    }
+
+    fn ensure_show_shape(&mut self, elem: Elem) {
+        if self.show_shapes.contains(&elem) {
+            return;
+        }
+        self.show_shapes.push(elem);
+        if elem.depth() > 0 {
+            self.ensure_show_shape(Elem::new(elem.base(), elem.depth() - 1));
+        }
+    }
+
+    /// The routine that deep-copies a list whose items have this shape.
+    /// A depth of 0 means the items are plain values.
+    fn list_copy_label(&mut self, elem: Elem) -> String {
+        match (elem.base(), elem.depth()) {
+            (Base::Int | Base::Bool, 0) => "array_copy_scalar".to_string(),
+            (Base::Str, 0) => "array_copy_text".to_string(),
+            _ => {
+                self.ensure_copy_shape(elem);
+                format!("array_copy_{}", Self::shape_tag(elem))
+            }
+        }
+    }
+
+    fn ensure_copy_shape(&mut self, elem: Elem) {
+        if elem.depth() == 0 || self.copy_shapes.contains(&elem) {
+            return;
+        }
+        self.copy_shapes.push(elem);
+        self.ensure_copy_shape(Elem::new(elem.base(), elem.depth() - 1));
     }
 
     fn bss_size(&self) -> u64 {
@@ -999,19 +1046,10 @@ impl Codegen {
                 let mut elem: Option<Elem> = None;
                 for item in items {
                     let t = self.expr(item)?;
-                    let this =
-                        match t {
-                            Ty::Int => Elem::Int,
-                            Ty::Str => Elem::Str,
-                            Ty::Bool => Elem::Bool,
-                            Ty::Array(_) => return Err(
-                                "a list can hold numbers, text, or truth values, not other lists"
-                                    .to_string(),
-                            ),
-                            Ty::Nothing => {
-                                return Err("nothing can go in a list".to_string());
-                            }
-                        };
+                    let this = match Elem::from_ty(t) {
+                        Some(e) => e,
+                        None => return Err("nothing can go in a list".to_string()),
+                    };
                     if let Some(old) = elem {
                         if old != this {
                             return Err(format!(
@@ -1087,10 +1125,8 @@ impl Codegen {
                         Ok(Ty::Str)
                     }
                     Ty::Array(elem) => {
-                        match elem {
-                            Elem::Str => self.asm.bl_label("array_copy_text"),
-                            Elem::Int | Elem::Bool => self.asm.bl_label("array_copy_scalar"),
-                        }
+                        let label = self.list_copy_label(elem);
+                        self.asm.bl_label(&label);
                         Ok(ty)
                     }
                     Ty::Int | Ty::Bool => Ok(ty),
@@ -1343,6 +1379,14 @@ impl Codegen {
     /// X0 points at a list: `[len: u64][capacity: u64][item: i64]...`.
     /// Print `[a, b, c]`.
     fn emit_say_array(&mut self, elem: Elem, fd: u64) {
+        if elem.depth() > 0 {
+            let label = self.show_array_label(elem);
+            self.asm.mov_imm64(X9, fd);
+            self.asm.bl_label(&label);
+            self.emit_newline(fd);
+            return;
+        }
+
         self.asm.sub_imm(SP, SP, 32);
         self.asm.str(X19, SP, 0);
         self.asm.str(X20, SP, 8);
@@ -1367,13 +1411,30 @@ impl Codegen {
         self.asm.label(&l_first);
 
         self.asm.ldr(X0, X19, 0);
-        match elem {
-            Elem::Int => {
+        self.emit_scalar_item(elem.base(), fd);
+
+        self.asm.add_imm(X19, X19, 8);
+        self.asm.add_imm(X21, X21, 1);
+        self.asm.b_label(&l_loop);
+
+        self.asm.label(&l_done);
+        self.emit_write_literal("]", fd);
+        self.asm.ldr(X19, SP, 0);
+        self.asm.ldr(X20, SP, 8);
+        self.asm.ldr(X21, SP, 16);
+        self.asm.add_imm(SP, SP, 32);
+        self.emit_newline(fd);
+    }
+
+    /// Print one scalar list item that is already in X0.
+    fn emit_scalar_item(&mut self, base: Base, fd: u64) {
+        match base {
+            Base::Int => {
                 self.asm.mov_imm64(X9, fd);
                 self.asm.bl_label("print_int");
             }
-            Elem::Str => self.emit_write_text_value(fd),
-            Elem::Bool => {
+            Base::Str => self.emit_write_text_value(fd),
+            Base::Bool => {
                 let l_false = self.new_label("say_item_false");
                 let l_after = self.new_label("say_item_after");
                 self.asm.cmp_reg_reg(X0, XZR);
@@ -1388,18 +1449,187 @@ impl Codegen {
                 self.emit_write_text_value(fd);
             }
         }
+    }
+
+    /// Write a literal using the file descriptor already in X9.
+    fn emit_write_literal_x9(&mut self, s: &str) {
+        let id = self.intern(s);
+        self.asm.mov_abs(X1, id);
+        self.asm.add_imm(X1, X1, 8);
+        self.asm.mov_imm64(X2, s.len() as u64);
+        self.asm.mov_reg_reg(X0, X9);
+        self.asm.mov_imm64(X8, SYS_WRITE);
+        self.asm.svc();
+    }
+
+    /// Write the text in X0 using the file descriptor already in X9.
+    fn emit_write_text_value_x9(&mut self) {
+        self.asm.ldr(X2, X0, 0);
+        self.asm.add_imm(X1, X0, 8);
+        self.asm.mov_reg_reg(X0, X9);
+        self.asm.mov_imm64(X8, SYS_WRITE);
+        self.asm.svc();
+    }
+
+    /// Print one scalar item in X0 when the file descriptor is already in X9.
+    fn emit_scalar_item_x9(&mut self, base: Base) {
+        match base {
+            Base::Int => self.asm.bl_label("print_int"),
+            Base::Str => self.emit_write_text_value_x9(),
+            Base::Bool => {
+                let l_false = self.new_label("show_item_false");
+                let l_after = self.new_label("show_item_after");
+                self.asm.cmp_reg_reg(X0, XZR);
+                self.asm.bcond_label(CC_EQ, &l_false);
+                let t = self.intern("true");
+                self.asm.mov_abs(X0, t);
+                self.asm.b_label(&l_after);
+                self.asm.label(&l_false);
+                let f = self.intern("false");
+                self.asm.mov_abs(X0, f);
+                self.asm.label(&l_after);
+                self.emit_write_text_value_x9();
+            }
+        }
+    }
+
+    /// Emit the recursive helpers discovered while compiling expressions.
+    fn emit_nested_helpers(&mut self) {
+        let mut copies = self.copy_shapes.clone();
+        copies.sort_by_key(|elem| elem.depth());
+        for elem in copies {
+            self.emit_array_copy_nested(elem);
+        }
+
+        let mut shows = self.show_shapes.clone();
+        shows.sort_by_key(|elem| elem.depth());
+        for elem in shows {
+            self.emit_show_array_helper(elem);
+        }
+    }
+
+    /// A list of lists (or deeper) is copied item by item, recursively.
+    fn emit_array_copy_nested(&mut self, elem: Elem) {
+        let label = format!("array_copy_{}", Self::shape_tag(elem));
+        let l_loop = self.new_label("acopy_nested_loop");
+        let l_done = self.new_label("acopy_nested_done");
+        let child = Elem::new(elem.base(), elem.depth() - 1);
+        let child_label = self.list_copy_label(child);
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let a = &mut self.asm;
+
+        a.label(&label);
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        a.str(X30, SP, 40);
+
+        a.mov_reg_reg(X19, X0); // source list
+        a.ldr(X21, X19, 0); // length
+        a.mov_imm64(X5, heap_ptr);
+        a.ldr(X6, X5, 0); // destination start
+        a.mov_reg_reg(X7, X21);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_reg_reg(X7, X7, X7);
+        a.add_imm(X7, X7, 16);
+        a.mov_reg_reg(X9, X6);
+        a.add_reg_reg(X9, X9, X7);
+        a.mov_imm64(X8, HEAP_END);
+        a.cmp_reg_reg(X9, X8);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X9, X5, 0);
+        a.str(X21, X6, 0);
+        a.str(X21, X6, 8);
+
+        a.mov_reg_reg(X23, X6); // destination start
+        a.add_imm(X19, X19, 16); // source items
+        a.add_imm(X20, X6, 16); // destination items
+        a.movz_reg(X22, 0);
+        a.label(&l_loop);
+        a.cmp_reg_reg(X22, X21);
+        a.bcond_label(CC_GE, &l_done);
+        a.ldr(X0, X19, 0);
+        a.bl_label(&child_label);
+        a.str(X0, X20, 0);
+        a.add_imm(X19, X19, 8);
+        a.add_imm(X20, X20, 8);
+        a.add_imm(X22, X22, 1);
+        a.b_label(&l_loop);
+
+        a.label(&l_done);
+        a.mov_reg_reg(X0, X23);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.ldr(X30, SP, 40);
+        a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// Print a list whose items have shape `elem` without a newline, using
+    /// the descriptor in X9.
+    fn emit_show_array_helper(&mut self, elem: Elem) {
+        let label = format!("show_array_{}", Self::shape_tag(elem));
+        let l_loop = self.new_label("show_list");
+        let l_first = self.new_label("show_first");
+        let l_done = self.new_label("show_done");
+        let child_label = if elem.depth() > 0 {
+            let child = Elem::new(elem.base(), elem.depth() - 1);
+            Some((child, self.show_array_label(child)))
+        } else {
+            None
+        };
+
+        self.asm.label(&label);
+        self.asm.sub_imm(SP, SP, 48);
+        self.asm.str(X19, SP, 0);
+        self.asm.str(X20, SP, 8);
+        self.asm.str(X21, SP, 16);
+        self.asm.str(X22, SP, 24);
+        self.asm.str(X23, SP, 32);
+        self.asm.str(X30, SP, 40);
+
+        self.asm.mov_reg_reg(X19, X0);
+        self.asm.ldr(X20, X19, 0);
+        self.asm.add_imm(X19, X19, 16);
+        self.emit_write_literal_x9("[");
+
+        self.asm.movz_reg(X21, 0);
+        self.asm.label(&l_loop);
+        self.asm.cmp_reg_reg(X21, X20);
+        self.asm.bcond_label(CC_GE, &l_done);
+        self.asm.cmp_reg_reg(X21, XZR);
+        self.asm.bcond_label(CC_EQ, &l_first);
+        self.emit_write_literal_x9(", ");
+        self.asm.label(&l_first);
+
+        self.asm.ldr(X0, X19, 0);
+        if let Some((_, label)) = &child_label {
+            self.asm.bl_label(label);
+        } else {
+            self.emit_scalar_item_x9(elem.base());
+        }
 
         self.asm.add_imm(X19, X19, 8);
         self.asm.add_imm(X21, X21, 1);
         self.asm.b_label(&l_loop);
 
         self.asm.label(&l_done);
-        self.emit_write_literal("]", fd);
+        self.emit_write_literal_x9("]");
         self.asm.ldr(X19, SP, 0);
         self.asm.ldr(X20, SP, 8);
         self.asm.ldr(X21, SP, 16);
-        self.asm.add_imm(SP, SP, 32);
-        self.emit_newline(fd);
+        self.asm.ldr(X22, SP, 24);
+        self.asm.ldr(X23, SP, 32);
+        self.asm.ldr(X30, SP, 40);
+        self.asm.add_imm(SP, SP, 48);
+        self.asm.ret();
     }
 
     fn emit_newline(&mut self, fd: u64) {

@@ -19,16 +19,29 @@ An imported file is included once per bake, even when several modules import it.
 A path without `.rk` is fine. Imports resolve next to the importing file first,
 then in `ruskmods/`.
 
-In the interactive session, `import "ruskmods/text"` works at the prompt, or
-load a whole program with:
+A plain import shares one global namespace, so the bundled modules keep their
+prefixes. You can also give a module a name or pull names out selectively:
 
-```console
-rusk> :load examples/imports.rk
+```rusk
+import "ruskmods/math" as math
+say math.math_square with 12
+
+from "ruskmods/text" import text_is_empty
+say text_is_empty with ""
 ```
 
-Because all names share one global namespace, module functions use a prefix:
-`text_`, `math_`, and so on. The prefix is the namespace until the language
-grows real ones.
+The bundled modules keep their `text_` / `math_` names for compatibility, but a
+module you write yourself can use a plain name when it is imported `as`:
+
+```rusk
+# lib/units.rk
+to convert with n as a number:
+    give back n * 100
+
+# main.rk
+import "lib/units" as units
+say units.convert with 3
+```
 
 ## Modules
 
@@ -53,6 +66,6 @@ printing, syscalls, list indexing) are not modules. Those live in `rusktime/`.
 
 ## Roadmap
 
-- per-module namespaces so prefixes can disappear
-- selective imports (`import text_is_empty from "ruskmods/text"`)
-- a standard library index that `rpms` can resolve packages against
+- package manifests and a standard-library index that `rpms` can resolve
+  packages against
+- re-exports, so a module can hand a name on from another module

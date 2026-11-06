@@ -2,30 +2,110 @@
 
 use std::fmt;
 
-/// The kinds a list can hold. Lists are homogeneous and hold one of these.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Elem {
+/// The plain kinds a list can ultimately hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Base {
     Int,
     Str,
     Bool,
 }
 
-impl Elem {
-    pub fn ty(self) -> Ty {
+impl Base {
+    fn plural(self) -> &'static str {
         match self {
-            Elem::Int => Ty::Int,
-            Elem::Str => Ty::Str,
-            Elem::Bool => Ty::Bool,
+            Base::Int => "numbers",
+            Base::Str => "text",
+            Base::Bool => "truth values",
         }
     }
 
-    /// The plural used after "a list of".
-    pub fn plural(self) -> &'static str {
+    pub fn word(self) -> &'static str {
         match self {
-            Elem::Int => "numbers",
-            Elem::Str => "text",
-            Elem::Bool => "truth values",
+            Base::Int => "int",
+            Base::Str => "str",
+            Base::Bool => "bool",
         }
+    }
+}
+
+/// The kind of one list item. A depth of 0 is a plain value; each extra level
+/// wraps it in another list, so `{Int, depth: 2}` is a list of lists of
+/// numbers. Keeping this compact and `Copy` lets `Ty` stay cheap even though
+/// lists nest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Elem {
+    base: Base,
+    depth: u8,
+}
+
+impl Elem {
+    pub const INT: Elem = Elem {
+        base: Base::Int,
+        depth: 0,
+    };
+    pub const STR: Elem = Elem {
+        base: Base::Str,
+        depth: 0,
+    };
+    pub const BOOL: Elem = Elem {
+        base: Base::Bool,
+        depth: 0,
+    };
+
+    pub fn new(base: Base, depth: u8) -> Self {
+        Elem { base, depth }
+    }
+
+    pub fn base(self) -> Base {
+        self.base
+    }
+
+    pub fn depth(self) -> u8 {
+        self.depth
+    }
+
+    /// One more list around this item.
+    pub fn nested(self) -> Self {
+        Elem {
+            base: self.base,
+            depth: self.depth + 1,
+        }
+    }
+
+    /// The kind of a value with this element shape.
+    pub fn ty(self) -> Ty {
+        if self.depth == 0 {
+            match self.base {
+                Base::Int => Ty::Int,
+                Base::Str => Ty::Str,
+                Base::Bool => Ty::Bool,
+            }
+        } else {
+            Ty::Array(Elem {
+                base: self.base,
+                depth: self.depth - 1,
+            })
+        }
+    }
+
+    /// The element shape of a value kind, if it can sit in a list.
+    pub fn from_ty(ty: Ty) -> Option<Self> {
+        match ty {
+            Ty::Int => Some(Elem::INT),
+            Ty::Str => Some(Elem::STR),
+            Ty::Bool => Some(Elem::BOOL),
+            Ty::Array(elem) => Some(elem.nested()),
+            Ty::Nothing => None,
+        }
+    }
+
+    /// The phrase used after "a list of", e.g. `lists of numbers`.
+    pub fn plural(self) -> String {
+        let mut out = self.base.plural().to_string();
+        for _ in 0..self.depth {
+            out = format!("lists of {out}");
+        }
+        out
     }
 }
 
@@ -35,7 +115,7 @@ pub enum Ty {
     Int,
     Str,
     Bool,
-    /// A homogeneous list: a pointer to `[len][item...]` at runtime.
+    /// A homogeneous list: a pointer to `[len][capacity][item...]` at runtime.
     Array(Elem),
     /// What a function "gives back" when it uses no `give back` at all.
     Nothing,
@@ -213,9 +293,12 @@ pub enum Stmt {
         body: Vec<Stmt>,
         line: usize,
     },
-    /// `import "file.rk"` — expanded before type checking.
+    /// `import "file.rk"`, `import "file.rk" as name`, or
+    /// `from "file.rk" import name, other as alias`.
     Import {
         path: String,
+        alias: Option<String>,
+        names: Vec<(String, Option<String>)>,
         line: usize,
     },
     FuncDef {

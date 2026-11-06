@@ -644,19 +644,11 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             for item in items {
                 match type_of(item, scope, sigs)? {
                     None => unknown = true,
-                    Some(Ty::Array(_)) => {
-                        return Err(
-                            "a list can hold numbers, text, or truth values, not other lists"
-                                .to_string(),
-                        )
+                    Some(Ty::Nothing) => {
+                        return Err("nothing can go in a list".to_string());
                     }
                     Some(t) => {
-                        let this = match t {
-                            Ty::Int => Elem::Int,
-                            Ty::Str => Elem::Str,
-                            Ty::Bool => Elem::Bool,
-                            _ => unreachable!(),
-                        };
+                        let this = Elem::from_ty(t).expect("checked non-nothing value");
                         match elem {
                             Some(old) if old != this => {
                                 return Err(format!(
@@ -673,7 +665,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             if unknown {
                 return Ok(None);
             }
-            Ok(elem.map(|e| Ty::Array(e)))
+            Ok(elem.map(Ty::Array))
         }
         Expr::EmptyArray(elem) => Ok(Some(Ty::Array(*elem))),
         Expr::Copy(inner) => {
@@ -999,13 +991,32 @@ say c + middle
         let err = check_src("let xs be [1, \"two\"]\n").unwrap_err();
         assert!(err.contains("mixes"), "{err}");
 
-        let err = check_src("let xs be [1, [2]]\n").unwrap_err();
-        assert!(err.contains("not other lists"), "{err}");
+        let err = check_src("let xs be [[1], [\"two\"]]\n").unwrap_err();
+        assert!(err.contains("mixes"), "{err}");
 
         let err = check_src("let xs be []\n").unwrap_err();
         assert!(err.contains("empty list needs a kind"), "{err}");
 
         check_src("let xs be an empty list of truth values\n").unwrap();
+    }
+
+    #[test]
+    fn lists_can_nest() {
+        check_src("let xs be [[1, 2], [3], an empty list of numbers]\n").unwrap();
+        check_src("let xs be [[[1]], [[2, 3]]]\n").unwrap();
+        check_src("let xs be an empty list of lists of text\n").unwrap();
+        check_src("let xs be an empty list of lists of lists of numbers\n").unwrap();
+        check_src("let xs be [true, [false]]\n").unwrap_err();
+
+        check_src(
+            "\
+to rows with xs as a list of lists of numbers:
+    give back xs
+let ys be rows with [[1, 2], [3]]
+say length of ys
+",
+        )
+        .unwrap();
     }
 
     #[test]

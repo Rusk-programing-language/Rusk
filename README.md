@@ -24,16 +24,16 @@ syscalls.
 
 ## Status
 
-v0.8 adds an **x86-64 backend**. The same code generator now feeds either a
-hand-written AArch64 encoder or a hand-written x86-64 encoder, and
-`--target aarch64|x86_64` chooses which ELF machine word and instruction set
-end up in the file. Bakes default to the architecture running the compiler, so
-`rusk run` works out of the box; cross-bakes work too. v0.7's list capacity and
-`remove last` / `remove item N` behavior is unchanged.
+v0.9 adds **nested lists** and **module namespaces**. Lists may hold lists to
+any depth, with matching types, deep copies, and bracket printing. `import
+"math" as math` keeps a module's definitions under `math.`, and `from "math"
+import double` (optionally `as twice`) pulls names in selectively. A namespaced
+module's own imports stay private. v0.8's x86-64 backend and v0.7's list
+behavior are unchanged.
 
 The compiler is a lexer, parser, import expander, type checker, ownership
 checker, target-selecting code generator, two machine-code backends, and an ELF
-writer, with **191 tests**. The end-to-end suite also runs against x86-64 under
+writer, with **205 tests**. The end-to-end suite also runs against x86-64 under
 QEMU. It targets **Linux on AArch64 and x86-64**.
 
 ## Quick start
@@ -177,11 +177,17 @@ as a Rusk error. `rusk run file.rk one two` passes `one` and `two` through to
 A file can pull in several modules; each file is included at most once:
 
 ```rusk
-import "lib/greetings"
-import "../ruskmods/math"
+import "lib/greetings"          # plain inclusion, global names
+import "../ruskmods/math"       # math_square, ...
+
+import "lib/units" as units     # units.convert, units.ratio, ...
+from "lib/text" import trim     # trim, without a prefix
+from "lib/text" import pad as pad_left
 
 say greeting with "world"
 say math_square with 12
+say units.convert with 3
+say pad_left with "x"
 ```
 
 Functions name a piece of work and can hand a value back:
@@ -228,7 +234,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.8.0 — an English-like language
+Rusk 0.9.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -302,7 +308,7 @@ ownership   one owner per text value and list
 
 | File | Job |
 |---|---|
-| `src/imports.rs` | Find files, expand imports recursively, detect cycles, include once |
+| `src/imports.rs` | Find files, expand plain/named/selective imports, detect cycles, include once |
 | `src/lexer.rs` | Source to tokens; keywords are plain words matched by the parser |
 | `src/parser.rs` | Recursive descent over the English grammar |
 | `src/types.rs` | Type checking and return-kind inference (fixed point) |
@@ -332,12 +338,14 @@ Runtime facts worth knowing:
 - Lists are stored as `[len: u64][capacity: u64][item: i64]...` in the same
   bump heap. A list value is a pointer, but the ownership checker allows only
   one live name for it, so `let b be a` moves the list and `copy of a` makes a
-  new one. Item and bounds checks happen in the runtime helper `array_get` /
-  `array_set`. `array_add` appends in place while the length is below the
-  capacity; when it must grow it allocates a new block with at least four
-  slots, or twice the old capacity, and leaves the old block behind.
-  `array_remove_last` and `array_remove_at` shorten the list in place, shift
-  later items left, and keep the capacity unchanged.
+  new one. Nested lists are pointers too; `copy of` and `say` use recursive
+  routines that the code generator emits once per list shape. Item and bounds
+  checks happen in the runtime helper `array_get` / `array_set`. `array_add`
+  appends in place while the length is below the capacity; when it must grow it
+  allocates a new block with at least four slots, or twice the old capacity,
+  and leaves the old block behind. `array_remove_last` and `array_remove_at`
+  shorten the list in place, shift later items left, and keep the capacity
+  unchanged.
 - Text compares byte by byte (unsigned), then by length, so `"b"` is more than
   `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order. Lists do
   not compare yet.
@@ -359,7 +367,7 @@ Runtime facts worth knowing:
 - Everything is position-independent-free and fixed-address; there is no
   relocation pass at runtime.
 
-## What v0.8 doesn't do yet
+## What v0.9 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -368,16 +376,17 @@ Honest list, so the docs don't lie:
 - There is no borrow checker and no shared borrowing: a value has one owner at
   a time, and `copy of` deep-copies text and lists. That is simpler than Rust,
   and it rules out aliasing bugs by refusing to have aliases at all.
-- Lists are homogeneous and flat: no nested lists. Their contents can be
-  replaced with `set item`, `add VALUE to LIST` appends with spare capacity,
-  and `remove last from LIST` / `remove item N from LIST` shorten them.
-  Capacity never shrinks, and removal does not give memory back to the heap.
+- Lists are homogeneous and may nest, but they cannot be compared. Their
+  contents can be replaced with `set item`, `add VALUE to LIST` appends with
+  spare capacity, and `remove last from LIST` / `remove item N from LIST`
+  shorten them. Capacity never shrinks, and removal does not give memory back
+  to the heap.
 - System I/O is intentionally small: text files and standard streams only, no
   directories, sockets, processes, or random access. A path is limited by the
   4 KiB scratch area, and reading stops when the 1 MiB heap is full.
-- Imports are textual inclusion with one global namespace. There are no module
-  namespaces, selective imports, or aliases, so modules prefix their names
-  (`text_`, `math_`).
+- Imports have two styles: plain textual inclusion in one global namespace, or
+  named/selective modules. There are no re-exports, package manifests, or a
+  standard module registry.
 - Text positions count bytes, not Unicode characters.
 - At most 8 parameters per function, and no closures, anonymous functions, or
   function values.
