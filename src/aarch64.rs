@@ -83,6 +83,12 @@ pub struct Asm {
     strings: Vec<Vec<u8>>,
 }
 
+impl Default for Asm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Asm {
     pub fn new() -> Self {
         Asm {
@@ -177,13 +183,13 @@ impl Asm {
 
     /// `ldr rd, [rn, #disp]` — disp must be a multiple of 8.
     pub fn ldr(&mut self, rd: u8, rn: u8, disp: u32) {
-        debug_assert!(disp % 8 == 0 && disp / 8 < 4096);
+        debug_assert!(disp.is_multiple_of(8) && disp / 8 < 4096);
         self.emit(0xF940_0000 | ((disp / 8) << 10) | ((rn as u32) << 5) | rd as u32);
     }
 
     /// `str rt, [rn, #disp]` — disp must be a multiple of 8.
     pub fn str(&mut self, rt: u8, rn: u8, disp: u32) {
-        debug_assert!(disp % 8 == 0 && disp / 8 < 4096);
+        debug_assert!(disp.is_multiple_of(8) && disp / 8 < 4096);
         self.emit(0xF900_0000 | ((disp / 8) << 10) | ((rn as u32) << 5) | rt as u32);
     }
 

@@ -284,8 +284,7 @@ impl Codegen {
 
     /// Reserve an 8-byte slot, in the current frame or at top level.
     fn alloc_var(&mut self, ty: Ty, constant: bool) -> Var {
-        if self.frame.is_some() {
-            let frame = self.frame.as_mut().unwrap();
+        if let Some(frame) = self.frame.as_mut() {
             let slot = frame.next_slot;
             frame.next_slot += 1;
             Var {
@@ -896,7 +895,7 @@ impl Codegen {
 
         let slots = 1 + params.len() as u64 + captures.len() as u64 + count_slots(body);
         let frame_size = FRAME_HEADER + slots * 8;
-        let frame_size = (frame_size + 15) / 16 * 16;
+        let frame_size = frame_size.div_ceil(16) * 16;
         if frame_size > 4000 {
             return Err(format!("'{what}' has too many things to keep track of"));
         }

@@ -1349,7 +1349,7 @@ fn read_line<R: BufRead>(
 }
 
 fn trim_newline(line: &str) -> &str {
-    line.trim_end_matches(|c| c == '\n' || c == '\r')
+    line.trim_end_matches(['\n', '\r'])
 }
 
 /// How many characters (not bytes) a string holds.

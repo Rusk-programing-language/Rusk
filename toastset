@@ -1,0 +1,251 @@
+#!/bin/sh
+# toastset — the Rusk toolchain installer.
+#
+# Install the latest Rusk release:
+#
+#   curl --proto '=https' --tlsv1.2 -sSf \
+#     https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset | sh
+#
+# Pick a version, target, or installation directory:
+#
+#   sh toastset --version 1.1.0
+#   sh toastset --target aarch64-unknown-linux-gnu
+#   sh toastset --bin-dir "$HOME/.local/bin"
+#
+# Environment:
+#   TOASTSET_VERSION   release to install (default: latest)
+#   TOASTSET_TARGET    release target (default: detected)
+#   TOASTSET_HOME      toolchain home (default: $HOME/.toastset)
+#   TOASTSET_BIN_DIR   where to put the `rusk` binary
+#   TOASTSET_NO_MODIFY_PATH=1
+#                      do not edit a shell profile
+#
+# Rusk is distributed under the MIT license.
+
+set -eu
+
+REPO="Rusk-programing-language/Rusk"
+BASE_URL="${TOASTSET_DOWNLOAD_BASE:-https://github.com/${REPO}/releases/download}"
+API_URL="${TOASTSET_API_URL:-https://api.github.com/repos/${REPO}/releases/latest}"
+
+VERSION="${TOASTSET_VERSION:-}"
+TARGET="${TOASTSET_TARGET:-}"
+TOASTSET_HOME="${TOASTSET_HOME:-$HOME/.toastset}"
+BIN_DIR="${TOASTSET_BIN_DIR:-}"
+VERIFY=1
+MODIFY_PATH=1
+EXPLICIT_BIN_DIR=0
+[ -n "${TOASTSET_BIN_DIR:-}" ] && EXPLICIT_BIN_DIR=1
+[ "${TOASTSET_NO_MODIFY_PATH:-0}" = "1" ] && MODIFY_PATH=0
+
+say() { printf '%s\n' "$*"; }
+info() { printf 'toastset: %s\n' "$*"; }
+warn() { printf 'toastset: warning: %s\n' "$*" >&2; }
+die() {
+    printf 'toastset: error: %s\n' "$*" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+toastset — install the Rusk compiler and toolchain
+
+USAGE:
+  toastset [OPTIONS]
+
+OPTIONS:
+  --version VERSION   install a specific release (for example 1.1.0)
+  --target TARGET     install a specific target (x86_64-unknown-linux-gnu or
+                      aarch64-unknown-linux-gnu)
+  --home DIR          toolchain home (default: $HOME/.toastset)
+  --bin-dir DIR       install the `rusk` binary into DIR
+  --no-verify         skip SHA-256 verification
+  --no-modify-path    do not edit a shell profile
+  --uninstall         remove a previous toastset installation
+  -h, --help          show this help
+
+EXAMPLES:
+  sh toastset
+  sh toastset --version 1.1.0 --bin-dir "$HOME/.local/bin"
+
+The script works when piped from curl:
+  curl --proto '=https' --tlsv1.2 -sSf \
+    https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset | sh
+EOF
+}
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || die "I need '$1' but it isn't installed"
+}
+
+download() {
+    url="$1"
+    out="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$out"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$url" -O "$out"
+    else
+        die "I need curl or wget to download Rusk"
+    fi
+}
+
+latest_version() {
+    tmp="$(mktemp "${TMPDIR:-/tmp}/toastset-latest.XXXXXX")"
+    if ! download "$API_URL" "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        die "I couldn't reach GitHub to find the latest release; pass --version"
+    fi
+    version="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' "$tmp" | head -n 1)"
+    rm -f "$tmp"
+    [ -n "$version" ] || die "I couldn't read the latest release from GitHub; pass --version"
+    printf '%s\n' "$version"
+}
+
+detect_target() {
+    os="$(uname -s 2>/dev/null || echo unknown)"
+    [ "$os" = "Linux" ] || die "Rusk currently ships only for Linux (found $os)"
+    arch="$(uname -m 2>/dev/null || echo unknown)"
+    case "$arch" in
+        x86_64 | amd64) printf '%s\n' "x86_64-unknown-linux-gnu" ;;
+        aarch64 | arm64) printf '%s\n' "aarch64-unknown-linux-gnu" ;;
+        *) die "Rusk doesn't have a build for this machine ($arch)" ;;
+    esac
+}
+
+path_line() {
+    printf 'export PATH="%s:$PATH"' "$BIN_DIR"
+}
+
+add_to_profile() {
+    [ "$MODIFY_PATH" = "1" ] || return 0
+    [ "$EXPLICIT_BIN_DIR" = "1" ] && return 0
+    for profile in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+        [ -e "$profile" ] || continue
+        if grep -F -q "$BIN_DIR" "$profile" 2>/dev/null; then
+            return 0
+        fi
+        {
+            printf '\n# Added by toastset (Rusk)\n'
+            path_line
+            printf '\n'
+        } >>"$profile"
+        info "added $BIN_DIR to PATH in $profile"
+        return 0
+    done
+}
+
+uninstall() {
+    [ -n "$BIN_DIR" ] || BIN_DIR="$TOASTSET_HOME/bin"
+    rm -f "$BIN_DIR/rusk"
+    rm -rf "$TOASTSET_HOME"
+    info "removed Rusk from $BIN_DIR and $TOASTSET_HOME"
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --version)
+            [ "$#" -ge 2 ] || die "--version needs a value"
+            VERSION="${2#v}"
+            shift 2
+            ;;
+        --target)
+            [ "$#" -ge 2 ] || die "--target needs a value"
+            TARGET="$2"
+            shift 2
+            ;;
+        --home)
+            [ "$#" -ge 2 ] || die "--home needs a value"
+            TOASTSET_HOME="$2"
+            shift 2
+            ;;
+        --bin-dir)
+            [ "$#" -ge 2 ] || die "--bin-dir needs a value"
+            BIN_DIR="$2"
+            EXPLICIT_BIN_DIR=1
+            shift 2
+            ;;
+        --no-verify) VERIFY=0; shift ;;
+        --no-modify-path) MODIFY_PATH=0; shift ;;
+        --uninstall) uninstall; exit 0 ;;
+        -h | --help) usage; exit 0 ;;
+        *) die "I don't know '$1' — run 'toastset --help'" ;;
+    esac
+done
+
+[ -n "$TARGET" ] || TARGET="$(detect_target)"
+if [ -z "$VERSION" ]; then
+    info "looking up the latest Rusk release"
+    VERSION="$(latest_version)"
+fi
+
+case "$TARGET" in
+    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu) ;;
+    *) die "unknown target '$TARGET'" ;;
+esac
+
+name="rusk-v${VERSION}-${TARGET}"
+archive="${name}.tar.gz"
+url="${BASE_URL}/v${VERSION}/${archive}"
+
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/toastset.XXXXXX")"
+cleanup() { rm -rf "$tmpdir"; }
+trap cleanup EXIT INT TERM
+
+info "downloading Rusk ${VERSION} for ${TARGET}"
+download "$url" "$tmpdir/$archive" || die "I couldn't download $url"
+
+if [ "$VERIFY" = "1" ]; then
+    if download "${BASE_URL}/v${VERSION}/SHA256SUMS" "$tmpdir/SHA256SUMS" 2>/dev/null; then
+        expected="$(sed -n "s/^\([0-9a-fA-F]*\)[[:space:]][[:space:]]*.*${archive}$/\1/p" "$tmpdir/SHA256SUMS" | head -n 1)"
+        if [ -n "$expected" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+                actual="$(sha256sum "$tmpdir/$archive" | awk '{print $1}')"
+            elif command -v shasum >/dev/null 2>&1; then
+                actual="$(shasum -a 256 "$tmpdir/$archive" | awk '{print $1}')"
+            else
+                warn "no sha256sum or shasum; skipping verification"
+                actual="$expected"
+            fi
+            [ "$actual" = "$expected" ] || die "the download's checksum doesn't match"
+            info "checksum verified"
+        else
+            warn "no checksum for $archive; continuing"
+        fi
+    else
+        warn "SHA256SUMS isn't available; continuing without verification"
+    fi
+fi
+
+tar -xzf "$tmpdir/$archive" -C "$tmpdir"
+[ -f "$tmpdir/$name/rusk" ] || die "the archive didn't contain the rusk binary"
+
+if [ -z "$BIN_DIR" ]; then
+    BIN_DIR="$TOASTSET_HOME/bin"
+fi
+mkdir -p "$BIN_DIR"
+install -m 755 "$tmpdir/$name/rusk" "$BIN_DIR/rusk"
+
+# Keep a copy of the installer for `toastset --uninstall` and upgrades.
+mkdir -p "$TOASTSET_HOME/bin"
+install -m 755 "$tmpdir/$name/toastset" "$TOASTSET_HOME/bin/toastset" 2>/dev/null || true
+printf '%s\n' "$VERSION" >"$TOASTSET_HOME/version"
+
+add_to_profile
+
+info "installed rusk $VERSION to $BIN_DIR/rusk"
+case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *)
+        say ""
+        say "Add Rusk to your PATH:"
+        say "  $(path_line)"
+        say ""
+        say "Then start a new shell, or run:"
+        say "  export PATH=\"$BIN_DIR:\$PATH\""
+        ;;
+esac
+say ""
+say "Try it:"
+say "  rusk version"
+say "  rusk run examples/hello.rk"
