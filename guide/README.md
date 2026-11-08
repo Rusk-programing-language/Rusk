@@ -5,7 +5,7 @@ time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies.
 
-This guide is for v0.9. For the exact language rules, see
+This guide is for v1.0. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -84,7 +84,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 0.9.0 — code, baked ahead of time
+rusk 1.0.0 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -331,12 +331,85 @@ say factorial with 5        # 120
 ```
 
 A function with no `give back` gives nothing back and cannot be used as a
-value. At most 8 parameters are allowed. There are no closures or function
-values.
+value. At most 8 parameters are allowed.
 
 Declared kinds are `a number`, `text`, `a truth value`, and list kinds such as
 `a list of numbers`, `a list of text`, `a list of truth values`, or
 `a list of lists of numbers`.
+
+#### Function values
+
+A named function can be kept as a value and called later:
+
+```rusk
+to double with n as a number:
+    give back n * 2
+
+let twice be the function double
+say call twice with 21      # 42
+say twice with 4            # the ordinary spelling works too
+```
+
+`call VALUE with ...` calls any function value. A function value may be stored
+with `let` or `constant`, but not put in a list, compared, copied, printed, or
+given back, and there are no function-typed parameters yet.
+
+#### Closures
+
+A function written with `a function with ...:` is a closure. It remembers the
+names that were visible where it was created:
+
+```rusk
+let base be 10
+let add_base be a function with n as a number:
+    give back n + base
+
+say call add_base with 5    # 15
+```
+
+Numbers and truth values are copied into the closure. Text and lists are
+captured read-only, so the closure can read them but cannot move or change them.
+Closures can be nested and can capture other function values:
+
+```rusk
+to make_adder with n as a number:
+    let add be a function with x as a number:
+        give back x + n
+    give back call add with 5
+
+say make_adder with 100     # 105
+```
+
+A function value cannot give back another function value in v1.0. A dynamic
+call checks how many arguments it gets, but not their kinds.
+
+#### Borrowed views
+
+A parameter written `as a view of ...` borrows its argument instead of moving
+it:
+
+```rusk
+to total with xs as a view of a list of numbers:
+    let sum be 0
+    for each x in xs:
+        set sum to sum + x
+    give back sum
+
+let loaves be [3, 6, 9]
+say total with loaves       # 18
+say length of loaves        # 3; the call did not move it
+```
+
+A view is read-only: it can be read, indexed, measured, iterated, and passed to
+another view, but not changed or moved. `a view of VALUE` makes a shared alias
+with the same rules:
+
+```rusk
+let loaves be [3, 6, 9]
+let shared be a view of loaves
+say item 2 of shared        # 6
+say loaves                  # [3, 6, 9]; loaves is still the owner
+```
 
 ## 6. Lists, growth, and removal
 
@@ -402,7 +475,7 @@ items over. Old blocks are not reclaimed.
 
 ### Removing
 
-v0.7 added two removal forms, unchanged in v0.9:
+v0.7 added two removal forms, unchanged in v1.0:
 
 ```rusk
 let xs be [10, 20, 30]
@@ -502,8 +575,20 @@ The checker is flow-sensitive. A move in one branch of an `if` counts as a move
 after the `if`, and `give back` ends the current path. The rule is checked
 before code generation, so a rejected program never produces an executable.
 
-There is no borrowing and no shared read-only view: a value has one owner at a
-time. That rules out aliasing bugs by refusing to have aliases at all.
+There is one exception to one-owner-at-a-time: a **view** lends a value
+read-only. A borrowed parameter (`as a view of ...`) or `a view of VALUE` may
+read the value but cannot move, change, or store it. The owner keeps using its
+value, and the view never becomes a second writer. Use `copy of` when you need
+an independent value to change or keep.
+
+```rusk
+let words be ["rye", "wheat"]
+let shared be a view of words   # shared reads the same list
+say item 1 of shared            # rye
+say length of words             # 2; words was not moved
+
+# add "spelt" to shared         # compile error: a view is read-only
+```
 
 ## 8. Talking to the system
 
@@ -623,7 +708,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.9.0 — an English-like language
+Rusk 1.0.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -785,13 +870,14 @@ Implemented and checked:
   `remove last`, and `remove item N`
 - Module namespaces (`import ... as`) and selective imports (`from ... import`)
 - Single-owner checking with `copy of`
+- Shared read-only views (`a view of ..., as a view of ...`)
+- Function values (`the function NAME`, `call ... with ...`) and closures
 - Arguments, environment, standard input, files, `warn`, and `stop with`
 - Line REPL and native full-screen TUI
 
 Not implemented yet:
 
-- Borrowing and shared read-only views
-- Function values and closures
+- Function-typed parameters and function values inside lists
 - A register-allocating x86-64 backend (the current one is memory-backed)
 - Relocation-aware data layout
 - Self-hosting Rusk in Rusk
@@ -803,6 +889,8 @@ Backend limits worth knowing:
 - Lists and joined text share a 1 MiB bump heap. Nothing is reclaimed.
 - List capacity never shrinks.
 - A list can hold at most one kind, and lists cannot be compared.
+- Function values cannot be returned, compared, copied, printed, or passed as
+  arguments. Dynamic calls check arity, not argument kinds.
 - At most 8 parameters per function.
 - The single load segment is RWX.
 

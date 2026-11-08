@@ -36,7 +36,21 @@ enum Value {
     /// A list is owned by one name at a time, just as a pointer is moved in a
     /// baked program. `copy of` makes a new list instead of aliasing.
     Array(Rc<RefCell<Vec<Value>>>),
+    /// A named function or closure. Captures are shared: scalars were copied
+    /// away, and lists keep the same `Rc` the enclosing scope holds.
+    Func(Rc<FuncValue>),
     Nothing,
+}
+
+/// A function value in the evaluator. The REPL has no heap records, so the
+/// captures live beside the body instead of in an environment block.
+#[derive(Debug, Clone, PartialEq)]
+struct FuncValue {
+    /// How to name this function in messages.
+    label: String,
+    params: Vec<Param>,
+    body: Vec<Stmt>,
+    captures: HashMap<String, Value>,
 }
 
 impl Value {
@@ -51,6 +65,7 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(Value::display).collect();
                 format!("[{}]", parts.join(", "))
             }
+            Value::Func(_) => "<function>".to_string(),
             Value::Nothing => "nothing".to_string(),
         }
     }
@@ -619,12 +634,67 @@ impl Session {
                 ))
             }
             Expr::Call(name, args) => {
+                // `f with 1` reads like a named call, but `f` may hold a
+                // function value. Prefer the named function when there is one.
+                if !self.funcs.contains_key(name) {
+                    if let Some(Value::Func(func)) = env.get(name).cloned() {
+                        let mut values = Vec::with_capacity(args.len());
+                        for arg in args {
+                            values.push(self.eval(arg, env)?);
+                        }
+                        return self.call_func(&func, values);
+                    }
+                }
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval(arg, env)?);
                 }
                 self.call(name, values)
             }
+            Expr::CallValue { func, args } => {
+                let func = match self.eval(func, env)? {
+                    Value::Func(func) => func,
+                    other => {
+                        return Err(format!(
+                            "line {}: 'call' needs a function value, but this is {}",
+                            self.line,
+                            kind_name(&other)
+                        ))
+                    }
+                };
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval(arg, env)?);
+                }
+                self.call_func(&func, values)
+            }
+            Expr::FuncRef(name) => match self.funcs.get(name).cloned() {
+                Some(func) => Ok(Value::Func(Rc::new(FuncValue {
+                    label: name.clone(),
+                    params: func.params.clone(),
+                    body: func.body.clone(),
+                    captures: HashMap::new(),
+                }))),
+                None => Err(format!(
+                    "line {}: I don't know a function called '{name}'",
+                    self.line
+                )),
+            },
+            Expr::Lambda { params, body } => {
+                let mut captures = HashMap::new();
+                for name in lambda_free_names(params, body) {
+                    if let Some(value) = env.get(&name) {
+                        captures.insert(name, value.clone());
+                    }
+                }
+                Ok(Value::Func(Rc::new(FuncValue {
+                    label: "a function value".to_string(),
+                    params: params.clone(),
+                    body: body.clone(),
+                    captures,
+                })))
+            }
+            Expr::View(inner) => self.eval(inner, env),
             Expr::Length(inner) => match self.eval(inner, env)? {
                 Value::Str(bytes) => Ok(Value::Int(bytes.len() as i64)),
                 Value::Array(items) => Ok(Value::Int(items.borrow().len() as i64)),
@@ -697,6 +767,7 @@ impl Session {
                 }
                 Value::Int(n) => Ok(Value::Int(n)),
                 Value::Bool(b) => Ok(Value::Bool(b)),
+                Value::Func(func) => Ok(Value::Func(func)),
                 Value::Nothing => Err(format!(
                     "line {}: there's nothing to copy — that function gives nothing back",
                     self.line
@@ -944,6 +1015,59 @@ impl Session {
         result
     }
 
+    /// Call a function value: run its body with captured names visible
+    /// read-only, then bind the arguments over them.
+    fn call_func(&mut self, func: &FuncValue, args: Vec<Value>) -> Result<Value, String> {
+        if args.len() != func.params.len() {
+            return Err(format!(
+                "line {}: {} takes {} thing{}, but got {}",
+                self.line,
+                func.label,
+                func.params.len(),
+                if func.params.len() == 1 { "" } else { "s" },
+                args.len()
+            ));
+        }
+        if self.depth >= MAX_DEPTH {
+            return Err(format!(
+                "line {}: {} is nested too deeply — try a smaller problem",
+                self.line, func.label
+            ));
+        }
+
+        let mut env = func.captures.clone();
+        for (param, value) in func.params.iter().zip(args) {
+            env.insert(param.name.clone(), value);
+        }
+
+        let saved_line = self.line;
+        self.depth += 1;
+        let mut result = Ok(Value::Nothing);
+        for stmt in &func.body {
+            match self.exec_stmt(stmt, &mut env) {
+                Ok(Flow::Normal) => {}
+                Ok(Flow::Return(value)) => {
+                    result = Ok(value);
+                    break;
+                }
+                Ok(Flow::Break) | Ok(Flow::Continue) => {
+                    result = Err(format!(
+                        "line {}: that control word only works inside a loop",
+                        self.line
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        self.depth -= 1;
+        self.line = saved_line;
+        result
+    }
+
     // ---- commands --------------------------------------------------------
 
     /// Returns `false` when the session should end.
@@ -1047,6 +1171,7 @@ fn copy_value(value: &Value) -> Value {
             let copied = items.borrow().iter().map(copy_value).collect();
             Value::Array(Rc::new(RefCell::new(copied)))
         }
+        Value::Func(func) => Value::Func(func.clone()),
         Value::Nothing => Value::Nothing,
     }
 }
@@ -1068,6 +1193,7 @@ fn kind_name(value: &Value) -> &'static str {
         Value::Str(_) => "text",
         Value::Bool(_) => "a truth value",
         Value::Array(_) => "a list",
+        Value::Func(_) => "a function",
         Value::Nothing => "nothing",
     }
 }
@@ -1116,6 +1242,7 @@ fn write_value_impl<W: Write>(out: &mut W, value: &Value, newline: bool) -> io::
             }
             out.write_all(b"]")?;
         }
+        Value::Func(_) => out.write_all(b"<function>")?,
         Value::Nothing => {}
     }
     if newline {
@@ -1164,6 +1291,7 @@ fn write_value_to<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {
             }
             out.write_all(b"]")?;
         }
+        Value::Func(_) => out.write_all(b"<function>")?,
         Value::Nothing => {}
     }
     Ok(())
@@ -1862,5 +1990,34 @@ mod tests {
             Value::Str(b"from the prompt".to_vec())
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn function_values_and_closures_run_at_the_prompt() {
+        let mut session = Session::new();
+        session
+            .submit("to double with n as a number:\n    give back n * 2\n")
+            .unwrap();
+        session.submit("let f be the function double\n").unwrap();
+        session.submit("let out be call f with 21\n").unwrap();
+        assert_eq!(session.globals["out"], Value::Int(42));
+
+        session.submit("let x be 10\n").unwrap();
+        session
+            .submit("let addx be a function with n as a number:\n    give back n + x\n")
+            .unwrap();
+        session.submit("let sum be call addx with 5\n").unwrap();
+        assert_eq!(session.globals["sum"], Value::Int(15));
+        session.submit("let by_name be addx with 1\n").unwrap();
+        assert_eq!(session.globals["by_name"], Value::Int(11));
+    }
+
+    #[test]
+    fn a_view_reads_the_same_value_at_the_prompt() {
+        let mut session = Session::new();
+        session.submit("let xs be [1, 2]\n").unwrap();
+        session.submit("let shared be a view of xs\n").unwrap();
+        session.submit("let second be item 2 of shared\n").unwrap();
+        assert_eq!(session.globals["second"], Value::Int(2));
     }
 }

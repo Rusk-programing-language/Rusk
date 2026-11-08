@@ -1,6 +1,6 @@
 //! Recursive-descent parser for the English surface syntax.
 //!
-//! Grammar (v0.9):
+//! Grammar (v1.0):
 //!
 //! ```text
 //! program    := (import_stmt | stmt)*
@@ -19,8 +19,8 @@
 //! stop_stmt  := "stop" "with" expr NEWLINE
 //! write_stmt := "write" expr "to" "file" expr NEWLINE
 //! say_stmt   := "say" expr NEWLINE
-//! let_stmt   := ("let" | "variable") NAME "be" expr NEWLINE
-//! const_stmt := "constant" NAME "be" expr NEWLINE
+//! let_stmt   := ("let" | "variable") NAME "be" (expr | func_value) NEWLINE
+//! const_stmt := "constant" NAME "be" (expr | func_value) NEWLINE
 //! set_stmt   := "set" NAME "to" expr NEWLINE
 //!             | "set" "item" expr "of" primary "to" expr NEWLINE
 //! if_stmt    := "if" expr ":" block ("otherwise" ("if" expr ":" block | ":" block))?
@@ -28,7 +28,8 @@
 //! while_stmt := "while" expr ":" block
 //! for_each   := "for" "each" NAME ("from" expr "to" expr | "in" expr) ":" block
 //! func_def   := "to" NAME ("with" param ("and" param)*)? ":" block
-//! param      := NAME "as" ("a"|"an")? TYPE
+//! func_value := ("a"|"an")? "function" ("with" param ("and" param)*)? ":" block
+//! param      := NAME "as" ("a"|"an")? ("view" "of")? TYPE
 //! give_back  := "give" "back" expr NEWLINE
 //! block      := NEWLINE INDENT stmt* DEDENT
 //! expr       := or_expr
@@ -41,6 +42,9 @@
 //! term       := unary (("*" | "/") unary)*
 //! unary      := ("-" | "not") unary | primary
 //! primary    := INT | TEXT | "true" | "false" | NAME ("with" expr ("and" expr)*)?
+//!             | ("a")? "view" "of" primary
+//!             | "the" "function" NAME
+//!             | "call" call_target ("with" expr ("and" expr)*)?
 //!             | "length" "of" primary
 //!             | "letter" expr "of" primary
 //!             | "part" expr "to" expr "of" primary
@@ -53,6 +57,7 @@
 //!             | "[" (expr ("," expr)*)? "]"
 //!             | ("an")? "empty" "list" "of" TYPE
 //!             | "(" expr ")"
+//! call_target:= NAME | "(" expr ")" | "the" "function" NAME
 //! TYPE       := "a number" | "text" | "a truth value"
 //!             | "a list of" ("numbers" | "text" | "truth values")
 //!
@@ -257,22 +262,11 @@ impl Parser {
         if self.is_word("to") {
             self.bump();
             let name = self.name("after 'to'")?;
-            let mut params = Vec::new();
-            if self.eat_word("with") {
-                loop {
-                    let pname = self.name("after 'with'")?;
-                    self.need_word("as", &format!("after the parameter '{pname}',"))?;
-                    // "a number", "an answer" and bare "number" all read fine.
-                    if !self.eat_word("a") {
-                        self.eat_word("an");
-                    }
-                    let ty = self.type_name(&format!("for the parameter '{pname}',"))?;
-                    params.push(Param { name: pname, ty });
-                    if !self.eat_word("and") {
-                        break;
-                    }
-                }
-            }
+            let params = if self.eat_word("with") {
+                self.param_list()?
+            } else {
+                Vec::new()
+            };
             self.need(Tok::Colon, "after the function header,")?;
             let body = self.block("this 'to'")?;
             return Ok(Stmt::FuncDef {
@@ -372,8 +366,14 @@ impl Parser {
             self.bump();
             let name = self.name(&format!("after '{word}'"))?;
             self.need_word("be", &format!("after '{word} {name}',"))?;
-            let value = self.expr(true)?;
-            self.end_of_line()?;
+            let value = if self.is_lambda_start() {
+                self.lambda_expr()?
+            } else {
+                self.expr(true)?
+            };
+            if !matches!(value, Expr::Lambda { .. }) {
+                self.end_of_line()?;
+            }
             return Ok(Stmt::Let { name, value, line });
         }
 
@@ -381,8 +381,14 @@ impl Parser {
             self.bump();
             let name = self.name("after 'constant'")?;
             self.need_word("be", &format!("after 'constant {name}',"))?;
-            let value = self.expr(true)?;
-            self.end_of_line()?;
+            let value = if self.is_lambda_start() {
+                self.lambda_expr()?
+            } else {
+                self.expr(true)?
+            };
+            if !matches!(value, Expr::Lambda { .. }) {
+                self.end_of_line()?;
+            }
             return Ok(Stmt::Const { name, value, line });
         }
 
@@ -592,6 +598,90 @@ impl Parser {
         Ok(name)
     }
 
+    /// The parameters after `with`, including borrowed views written
+    /// `as a view of ...`.
+    fn param_list(&mut self) -> Result<Vec<Param>, String> {
+        let mut params = Vec::new();
+        loop {
+            let pname = self.name("after 'with'")?;
+            self.need_word("as", &format!("after the parameter '{pname}',"))?;
+            // "a number", "an answer" and bare "number" all read fine.
+            if !self.eat_word("a") {
+                self.eat_word("an");
+            }
+            let borrowed = if self.is_word("view") {
+                self.bump();
+                self.need_word("of", "after 'view',")?;
+                if !self.eat_word("a") {
+                    self.eat_word("an");
+                }
+                true
+            } else {
+                false
+            };
+            let ty = self.type_name(&format!("for the parameter '{pname}',"))?;
+            params.push(Param {
+                name: pname,
+                ty,
+                borrowed,
+            });
+            if !self.eat_word("and") {
+                break;
+            }
+        }
+        Ok(params)
+    }
+
+    /// Does the current token start `a function with ...:` or `function ...:`?
+    fn is_lambda_start(&self) -> bool {
+        self.is_word("function")
+            || ((self.is_word("a") || self.is_word("an"))
+                && matches!(self.peek_at(1), Tok::Ident(s) if s == "function"))
+    }
+
+    /// Parse a function value after `be`; the caller knows the `be` is there.
+    fn lambda_expr(&mut self) -> Result<Expr, String> {
+        if !self.eat_word("a") {
+            self.eat_word("an");
+        }
+        self.need_word("function", "to start a function value,")?;
+        let params = if self.eat_word("with") {
+            self.param_list()?
+        } else {
+            Vec::new()
+        };
+        self.need(Tok::Colon, "after the function value header,")?;
+        let body = self.block("this function value")?;
+        Ok(Expr::Lambda { params, body })
+    }
+
+    /// The value part of `call VALUE with ...`. This deliberately does not use
+    /// the full primary parser: `call f with 1` must not turn `f with 1` into
+    /// an ordinary call.
+    fn call_target(&mut self) -> Result<Expr, String> {
+        if self.is_word("the") && matches!(self.peek_at(1), Tok::Ident(s) if s == "function") {
+            self.bump(); // "the"
+            self.bump(); // "function"
+            let name = self.qualified_name("after 'the function'")?;
+            return Ok(Expr::FuncRef(name));
+        }
+        if self.peek() == &Tok::LParen {
+            self.bump();
+            let inner = self.expr(true)?;
+            self.need(Tok::RParen, "to close this '('")?;
+            return Ok(inner);
+        }
+        if matches!(self.peek(), Tok::Ident(_)) {
+            let name = self.qualified_name("after 'call'")?;
+            return Ok(Expr::Var(name));
+        }
+        Err(format!(
+            "line {}: after 'call' I expected a function value, but found {}",
+            self.line(),
+            self.peek().describe()
+        ))
+    }
+
     fn block(&mut self, what: &str) -> Result<Vec<Stmt>, String> {
         self.need(Tok::Newline, &format!("after the ':' on {what} line,"))?;
         self.need(Tok::Indent, &format!("to open the body of {what},"))?;
@@ -770,6 +860,48 @@ impl Parser {
                 Ok(Expr::Array(items))
             }
             Tok::Ident(word) => {
+                if word == "view" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
+                    self.bump(); // "view"
+                    self.bump(); // "of"
+                    let inner = self.primary()?;
+                    return Ok(Expr::View(Box::new(inner)));
+                }
+                if word == "a"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "view")
+                    && matches!(self.peek_at(2), Tok::Ident(s) if s == "of")
+                {
+                    self.bump(); // "a"
+                    self.bump(); // "view"
+                    self.bump(); // "of"
+                    let inner = self.primary()?;
+                    return Ok(Expr::View(Box::new(inner)));
+                }
+                if word == "the" && matches!(self.peek_at(1), Tok::Ident(s) if s == "function") {
+                    self.bump(); // "the"
+                    self.bump(); // "function"
+                    let name = self.qualified_name("after 'the function'")?;
+                    return Ok(Expr::FuncRef(name));
+                }
+                if word == "call"
+                    && (matches!(self.peek_at(1), Tok::Ident(s) if s != "with")
+                        || self.peek_at(1) == &Tok::LParen)
+                {
+                    self.bump(); // "call"
+                    let func = self.call_target()?;
+                    let mut args = Vec::new();
+                    if self.eat_word("with") {
+                        loop {
+                            args.push(self.expr(false)?);
+                            if !self.eat_word("and") {
+                                break;
+                            }
+                        }
+                    }
+                    return Ok(Expr::CallValue {
+                        func: Box::new(func),
+                        args,
+                    });
+                }
                 if (word == "empty" && matches!(self.peek_at(1), Tok::Ident(s) if s == "list"))
                     || (word == "an"
                         && matches!(self.peek_at(1), Tok::Ident(s) if s == "empty")
@@ -1191,5 +1323,60 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn borrowed_parameters_parse_as_views() {
+        let prog =
+            p("to total with xs as a view of a list of numbers:\n    give back item 1 of xs\n");
+        match &prog.stmts[0] {
+            Stmt::FuncDef { params, .. } => {
+                assert!(params[0].borrowed);
+                assert_eq!(params[0].ty, Ty::Array(Elem::INT));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn function_values_parse() {
+        let prog = p("let add be a function with n as a number:\n    give back n + 1\n");
+        match &prog.stmts[0] {
+            Stmt::Let {
+                value: Expr::Lambda { params, body },
+                ..
+            } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].ty, Ty::Int);
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn views_named_functions_and_indirect_calls_parse() {
+        let prog = p("let f be the function double\nsay call f with 2\nlet v be a view of xs\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Let {
+                value: Expr::FuncRef(name),
+                ..
+            } if name == "double"
+        ));
+        assert!(matches!(
+            &prog.stmts[1],
+            Stmt::Say(
+                Expr::CallValue { func, args },
+                _
+            ) if matches!(&**func, Expr::Var(name) if name == "f") && args.len() == 1
+        ));
+        assert!(matches!(
+            &prog.stmts[2],
+            Stmt::Let {
+                value: Expr::View(inner),
+                ..
+            } if matches!(&**inner, Expr::Var(name) if name == "xs")
+        ));
     }
 }

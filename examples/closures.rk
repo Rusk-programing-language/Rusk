@@ -1,0 +1,31 @@
+# closures.rk — function values, closures, and borrowed views
+
+to double with n as a number:
+    give back n * 2
+
+let twice be the function double
+say call twice with 21
+say twice with 4
+
+let base be 10
+let add_base be a function with n as a number:
+    give back n + base
+
+say call add_base with 5
+
+to total with xs as a view of a list of numbers:
+    let sum be 0
+    for each x in xs:
+        set sum to sum + x
+    give back sum
+
+let loaves be [3, 6, 9]
+say total with loaves
+say length of loaves
+
+to make_adder with n as a number:
+    let add be a function with x as a number:
+        give back x + n
+    give back call add with 5
+
+say make_adder with 100

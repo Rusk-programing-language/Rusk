@@ -51,6 +51,11 @@ enum Fixup {
         at: usize,
         id: usize,
     },
+    /// Absolute address of a code label, patched at finish.
+    LabelAddr {
+        at: usize,
+        label: String,
+    },
 }
 
 pub struct Asm {
@@ -298,6 +303,22 @@ impl Asm {
         let at = self.code.len();
         self.u64(0);
         self.fixups.push(Fixup::Str { at, id: string_id });
+        self.store_vreg(rd, RAX);
+    }
+
+    /// Load the absolute address of a code label, patched at finish.
+    pub fn mov_label_addr(&mut self, rd: u8, label: &str) {
+        if rd == XZR {
+            return;
+        }
+        self.u8(0x48);
+        self.u8(0xB8);
+        let at = self.code.len();
+        self.u64(0);
+        self.fixups.push(Fixup::LabelAddr {
+            at,
+            label: label.to_string(),
+        });
         self.store_vreg(rd, RAX);
     }
 
@@ -551,6 +572,13 @@ impl Asm {
         });
     }
 
+    /// `call reg` — call the address held in a virtual register.
+    pub fn call_reg(&mut self, reg: u8) {
+        self.load_vreg(RAX, reg);
+        self.u8(0xFF);
+        self.u8(0xD0);
+    }
+
     pub fn bcond_label(&mut self, cond: u8, label: &str) {
         let at = self.code.len();
         let op = match cond {
@@ -614,6 +642,14 @@ impl Asm {
                 }
                 Fixup::Str { at, id } => {
                     let addr = string_base + offsets[*id] as u64;
+                    self.patch_u64(*at, addr);
+                }
+                Fixup::LabelAddr { at, label } => {
+                    let target = *labels
+                        .get(label)
+                        .unwrap_or_else(|| panic!("internal: address of unknown label '{label}'"))
+                        as u64;
+                    let addr = IMAGE_BASE + TEXT_OFFSET + target;
                     self.patch_u64(*at, addr);
                 }
             }

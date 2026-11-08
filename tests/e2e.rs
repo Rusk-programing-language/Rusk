@@ -1212,3 +1212,81 @@ fn an_unreadable_file_stops_with_a_sentence() {
     assert_eq!(code, 1);
     assert!(stderr.contains("I can't open that file"), "{stderr}");
 }
+
+#[test]
+fn function_values_and_closures_run() {
+    let src = "\
+to double with n as a number:
+    give back n * 2
+
+let f be the function double
+say call f with 21
+say f with 4
+
+let base be 10
+let add_base be a function with n as a number:
+    give back n + base
+
+say call add_base with 5
+
+to make_adder with n as a number:
+    let add be a function with x as a number:
+        give back x + n
+    give back call add with 5
+
+say make_adder with 100
+";
+    let (stdout, code) = run("closures", src);
+    assert_eq!(stdout, "42\n8\n15\n105\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn borrowed_views_share_a_list_without_moving_it() {
+    let src = "\
+to total with xs as a view of a list of numbers:
+    let sum be 0
+    for each x in xs:
+        set sum to sum + x
+    give back sum
+
+let loaves be [3, 6, 9]
+say total with loaves
+say length of loaves
+
+let shared be a view of loaves
+say item 2 of shared
+";
+    let (stdout, code) = run("views", src);
+    assert_eq!(stdout, "18\n3\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_view_cannot_be_changed() {
+    let src = "\
+let xs be [1, 2]
+let shared be a view of xs
+add 3 to shared
+";
+    let err = bake_src(src).unwrap_err();
+    assert!(err.contains("view"), "{err}");
+}
+
+#[test]
+fn closures_capture_lists_and_nest() {
+    let src = "\
+to make with xs as a view of a list of numbers:
+    let outer be a function with a as a number:
+        let inner be a function with b as a number:
+            give back a + b + item 1 of xs
+        give back call inner with 2
+    give back call outer with 1
+
+let xs be [3]
+say make with xs
+";
+    let (stdout, code) = run("nested_closures", src);
+    assert_eq!(stdout, "6\n");
+    assert_eq!(code, 0);
+}

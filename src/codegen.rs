@@ -20,7 +20,9 @@
 //! hand-built itoa loop at the end of the text section, and the program ends
 //! with `exit(2)`.
 
-use crate::ast::{Base, BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
+use crate::ast::{
+    lambda_free_names, Base, BinOp, Elem, Expr, FuncTy, Param, Program, RetTy, Stmt, Ty, UnOp,
+};
 use crate::backend::*;
 use crate::elf::DATA_BASE;
 use crate::types::Sig;
@@ -119,6 +121,14 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
         }
     }
 
+    // Closure bodies come next. A closure can create another closure, so keep
+    // draining the queue. This happens before the list helpers so any nested
+    // shapes the bodies copy or print are discovered in time.
+    while !cg.pending_lambdas.is_empty() {
+        let pending = cg.pending_lambdas.remove(0);
+        cg.lambda_body(pending)?;
+    }
+
     cg.emit_nested_helpers();
 
     cg.emit_print_int();
@@ -176,6 +186,8 @@ struct Codegen {
     /// Nested list shapes whose recursive copy/print helpers are needed.
     copy_shapes: Vec<Elem>,
     show_shapes: Vec<Elem>,
+    /// Closure bodies waiting to be emitted, in discovery order.
+    pending_lambdas: Vec<PendingLambda>,
 }
 
 #[derive(Clone)]
@@ -184,6 +196,19 @@ struct LoopLabels {
     after: String,
     /// Where `continue` jumps: this loop's next-turn label.
     next: String,
+}
+
+/// A closure body is emitted after the program and its named functions, so its
+/// record can be built while the normal expression walk is running.
+struct PendingLambda {
+    label: String,
+    ret_label: String,
+    params: Vec<Param>,
+    body: Vec<Stmt>,
+    /// Captured names with the kind they had in the enclosing scope. The
+    /// enclosing locals are gone by the time this body is emitted.
+    captures: Vec<(String, Ty)>,
+    ret: Ty,
 }
 
 impl Codegen {
@@ -201,6 +226,7 @@ impl Codegen {
             loops: Vec::new(),
             copy_shapes: Vec::new(),
             show_shapes: Vec::new(),
+            pending_lambdas: Vec::new(),
         }
     }
 
@@ -832,27 +858,58 @@ impl Codegen {
         let Some(sig) = self.funcs.get(name).cloned() else {
             return Err(format!("internal: no signature for '{name}'"));
         };
+        let label = format!("fn_{name}");
+        let ret_label = format!("ret_{name}");
+        self.emit_body(&label, &ret_label, params, sig.ret, body, &[], Some(name))
+    }
+
+    fn lambda_body(&mut self, pending: PendingLambda) -> Result<(), String> {
+        self.emit_body(
+            &pending.label,
+            &pending.ret_label,
+            &pending.params,
+            pending.ret,
+            &pending.body,
+            &pending.captures,
+            None,
+        )
+    }
+
+    /// Emit one function body. Named functions and closures share this frame:
+    /// slot 0 holds the closure environment pointer, parameters follow, then
+    /// any captured values, then ordinary locals.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_body(
+        &mut self,
+        label: &str,
+        ret_label: &str,
+        params: &[Param],
+        ret_ty: Ty,
+        body: &[Stmt],
+        captures: &[(String, Ty)],
+        name: Option<&str>,
+    ) -> Result<(), String> {
+        let what = name.unwrap_or("a function value");
         if params.len() > 8 {
-            return Err(format!("'{name}' has too many parameters (8 at most)"));
+            return Err(format!("'{what}' has too many parameters (8 at most)"));
         }
 
-        let slots = params.len() as u64 + count_slots(body);
+        let slots = 1 + params.len() as u64 + captures.len() as u64 + count_slots(body);
         let frame_size = FRAME_HEADER + slots * 8;
         let frame_size = (frame_size + 15) / 16 * 16;
         if frame_size > 4000 {
-            return Err(format!("'{name}' has too many things to keep track of"));
+            return Err(format!("'{what}' has too many things to keep track of"));
         }
 
-        let ret_label = format!("ret_{name}");
         let saved_vars = std::mem::take(&mut self.vars);
         let saved_frame = self.frame.take();
         self.frame = Some(Frame {
-            ret_label: ret_label.clone(),
-            ret_ty: sig.ret,
-            next_slot: params.len() as u64,
+            ret_label: ret_label.to_string(),
+            ret_ty,
+            next_slot: 1 + params.len() as u64,
         });
 
-        self.asm.label(&format!("fn_{name}"));
+        self.asm.label(label);
         self.asm.sub_imm(SP, SP, frame_size as u32);
         self.asm.str(X29, SP, 0);
         self.asm.str(X30, SP, 8);
@@ -874,17 +931,39 @@ impl Codegen {
         self.asm.add_imm(X10, X10, 1);
         self.asm.str(X10, X9, 0);
 
+        // Slot 0 is the environment pointer a closure body reads captures
+        // through. Named functions are called with it zeroed.
+        self.asm.str(X17, X29, frame_offset(0));
+
         for (i, p) in params.iter().enumerate() {
             self.vars.insert(
                 p.name.clone(),
                 Var {
-                    slot: i as u64,
+                    slot: i as u64 + 1,
                     ty: p.ty,
                     local: true,
                     constant: false,
                 },
             );
-            self.asm.str(i as u8, X29, frame_offset(i as u64));
+            self.asm.str(i as u8, X29, frame_offset(i as u64 + 1));
+        }
+
+        // Copy captures out of the environment record into ordinary frame
+        // slots, so the rest of the body looks like any other function.
+        for (i, (capture, ty)) in captures.iter().enumerate() {
+            let slot = self.frame.as_mut().unwrap().next_slot;
+            self.frame.as_mut().unwrap().next_slot += 1;
+            self.asm.ldr(X0, X17, (i * 8) as u32);
+            self.asm.str(X0, X29, frame_offset(slot));
+            self.vars.insert(
+                capture.clone(),
+                Var {
+                    slot,
+                    ty: *ty,
+                    local: true,
+                    constant: false,
+                },
+            );
         }
 
         let mut result = Ok(());
@@ -897,7 +976,7 @@ impl Codegen {
 
         // Falling off the end gives 0, so a procedure's result is harmless.
         self.asm.mov_imm64(X0, 0);
-        self.asm.label(&ret_label);
+        self.asm.label(ret_label);
         // Give the depth counter back before tearing down the frame.
         self.asm.mov_imm64(X1, DATA_BASE + DEPTH_OFFSET);
         self.asm.ldr(X2, X1, 0);
@@ -915,6 +994,82 @@ impl Codegen {
     }
 
     // ---- expressions -----------------------------------------------------
+
+    /// The type checker's view of one expression in the current codegen scope.
+    /// Closures need this to know what their body gives back before the body
+    /// itself is emitted.
+    fn expr_type(&self, e: &Expr) -> Result<Option<Ty>, String> {
+        let vars: HashMap<String, Ty> = self
+            .vars
+            .iter()
+            .map(|(name, var)| (name.clone(), var.ty))
+            .collect();
+        crate::types::type_of_with(e, &vars, &self.funcs)
+    }
+
+    /// Build `[code][capture count][capture...]` on the heap and leave its
+    /// pointer in X0.
+    fn emit_function_record(&mut self, code_label: &str, captures: &[String]) {
+        let count = captures.len() as u64;
+        let size = 16 + count * 8;
+        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        self.asm.mov_imm64(X5, heap_ptr);
+        self.asm.ldr(X6, X5, 0);
+        self.asm.mov_imm64(X7, size);
+        self.asm.add_reg_reg(X7, X6, X7);
+        self.emit_heap_check(X7);
+        self.asm.str(X7, X5, 0);
+        self.asm.mov_label_addr(X7, code_label);
+        self.asm.str(X7, X6, 0);
+        self.asm.mov_imm64(X7, count);
+        self.asm.str(X7, X6, 8);
+        for (i, name) in captures.iter().enumerate() {
+            let var = self.vars.get(name).cloned().expect("filtered capture");
+            self.load_var(&var);
+            self.asm.str(X0, X6, (16 + i * 8) as u32);
+        }
+        self.asm.mov_reg_reg(X0, X6);
+    }
+
+    /// Call a function value: `[code][capture count][capture...]`. The code
+    /// pointer goes in X14 and the environment pointer in X17.
+    fn dynamic_call(&mut self, func: &Expr, args: &[Expr]) -> Result<Ty, String> {
+        let ft = match self.expr(func)? {
+            Ty::Func(ft) => ft,
+            Ty::Nothing => {
+                return Err("there's nothing here to call — that gives nothing back".to_string())
+            }
+            other => {
+                return Err(format!(
+                    "'call' needs a function value, but this is {other}"
+                ));
+            }
+        };
+        if args.len() != ft.arity as usize {
+            return Err(format!(
+                "this function value takes {} thing{}, but got {}",
+                ft.arity,
+                if ft.arity == 1 { "" } else { "s" },
+                args.len()
+            ));
+        }
+        if args.len() > 8 {
+            return Err("a call can pass at most 8 things".to_string());
+        }
+        self.asm.push_reg(X0);
+        for arg in args {
+            self.expr(arg)?;
+            self.asm.push_reg(X0);
+        }
+        for i in (0..args.len()).rev() {
+            self.asm.pop_reg(i as u8);
+        }
+        self.asm.pop_reg(X16);
+        self.asm.ldr(X14, X16, 0);
+        self.asm.add_imm(X17, X16, 16);
+        self.asm.call_reg(X14);
+        Ok(ft.ret.ty())
+    }
 
     fn expr(&mut self, e: &Expr) -> Result<Ty, String> {
         match e {
@@ -938,6 +1093,7 @@ impl Codegen {
                 }
                 if let Some(sig) = self.funcs.get(name).cloned() {
                     if sig.params.is_empty() {
+                        self.asm.movz_reg(X17, 0);
                         self.asm.bl_label(&format!("fn_{name}"));
                         return Ok(sig.ret);
                     }
@@ -953,6 +1109,14 @@ impl Codegen {
             }
             Expr::Call(name, args) => {
                 let Some(sig) = self.funcs.get(name).cloned() else {
+                    // A variable holding a function value can be called the
+                    // ordinary way too.
+                    if let Some(var) = self.vars.get(name).cloned() {
+                        if matches!(var.ty, Ty::Func(_)) {
+                            let func = Expr::Var(name.clone());
+                            return self.dynamic_call(&func, args);
+                        }
+                    }
                     return Err(format!("I don't know a function called '{name}'"));
                 };
                 if args.len() != sig.params.len() {
@@ -973,9 +1137,49 @@ impl Codegen {
                 for i in (0..args.len()).rev() {
                     self.asm.pop_reg(i as u8);
                 }
+                self.asm.movz_reg(X17, 0);
                 self.asm.bl_label(&format!("fn_{name}"));
                 Ok(sig.ret)
             }
+            Expr::CallValue { func, args } => self.dynamic_call(func, args),
+            Expr::FuncRef(name) => {
+                let Some(sig) = self.funcs.get(name).cloned() else {
+                    return Err(format!("I don't know a function called '{name}'"));
+                };
+                let ret = RetTy::from_ty(sig.ret).ok_or_else(|| {
+                    "v1.0 functions can't give back another function — call it instead".to_string()
+                })?;
+                let arity = u8::try_from(sig.params.len())
+                    .map_err(|_| "a function can't take more than 255 things".to_string())?;
+                self.emit_function_record(&format!("fn_{name}"), &[]);
+                Ok(Ty::Func(FuncTy { arity, ret }))
+            }
+            Expr::Lambda { params, body } => {
+                let capture_names: Vec<String> = lambda_free_names(params, body)
+                    .into_iter()
+                    .filter(|name| self.vars.contains_key(name))
+                    .collect();
+                let captures: Vec<(String, Ty)> = capture_names
+                    .iter()
+                    .map(|name| (name.clone(), self.vars[name].ty))
+                    .collect();
+                let Some(Ty::Func(ft)) = self.expr_type(e)? else {
+                    return Err("internal: a function value has no function kind".to_string());
+                };
+                let label = self.new_label("lambda");
+                let ret_label = self.new_label("lambda_ret");
+                self.emit_function_record(&label, &capture_names);
+                self.pending_lambdas.push(PendingLambda {
+                    label,
+                    ret_label,
+                    params: params.clone(),
+                    body: body.clone(),
+                    captures,
+                    ret: ft.ret.ty(),
+                });
+                Ok(Ty::Func(ft))
+            }
+            Expr::View(inner) => self.expr(inner),
             Expr::Length(inner) => {
                 let ty = self.expr(inner)?;
                 if ty != Ty::Str && ty.elem().is_none() {
@@ -1130,6 +1334,7 @@ impl Codegen {
                         Ok(ty)
                     }
                     Ty::Int | Ty::Bool => Ok(ty),
+                    Ty::Func(_) => Ok(ty),
                     Ty::Nothing => {
                         Err("there's nothing to copy — that function gives nothing back"
                             .to_string())
@@ -1347,6 +1552,7 @@ impl Codegen {
                 self.emit_print_text(fd);
             }
             Ty::Array(elem) => self.emit_say_array(elem, fd),
+            Ty::Func(_) => {}
             Ty::Nothing => {}
         }
     }
@@ -2703,5 +2909,57 @@ to wide with a as a number and b as a number and c as a number and d as a number
     give back a
 ";
         assert!(bake(src).is_err());
+    }
+
+    #[test]
+    fn function_values_and_closures_bake() {
+        let src = "\
+to double with n as a number:
+    give back n * 2
+
+let f be the function double
+say call f with 21
+say f with 4
+
+let base be 10
+let add_base be a function with n as a number:
+    give back n + base
+
+say call add_base with 5
+";
+        let baked = bake(src).unwrap();
+        assert!(baked.text.len() > 200);
+    }
+
+    #[test]
+    fn closures_can_capture_lists_and_nest() {
+        let src = "\
+to make with xs as a view of a list of numbers:
+    let outer be a function with a as a number:
+        let inner be a function with b as a number:
+            give back a + b + item 1 of xs
+        give back call inner with 2
+    give back call outer with 1
+
+let xs be [3]
+say make with xs
+";
+        let baked = bake(src).unwrap();
+        assert!(baked.text.len() > 200);
+    }
+
+    #[test]
+    fn closures_capture_the_kind_they_had_in_scope() {
+        let err = bake(
+            "\
+to make with n as a number:
+    let bad be a function with m as a number:
+        give back m + n
+    give back call bad with 1
+say make with \"text\"
+",
+        )
+        .unwrap_err();
+        assert!(err.contains("should be a number"), "{err}");
     }
 }

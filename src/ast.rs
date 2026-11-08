@@ -1,5 +1,6 @@
 //! The shape of a Rusk program, after parsing and before baking.
 
+use std::collections::HashSet;
 use std::fmt;
 
 /// The plain kinds a list can ultimately hold.
@@ -95,7 +96,7 @@ impl Elem {
             Ty::Str => Some(Elem::STR),
             Ty::Bool => Some(Elem::BOOL),
             Ty::Array(elem) => Some(elem.nested()),
-            Ty::Nothing => None,
+            Ty::Func(_) | Ty::Nothing => None,
         }
     }
 
@@ -109,6 +110,66 @@ impl Elem {
     }
 }
 
+/// What a function value gives back. Function values cannot give back other
+/// function values in v1.0, so this stays smaller than [`Ty`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetTy {
+    Int,
+    Str,
+    Bool,
+    Array(Elem),
+    Nothing,
+}
+
+impl RetTy {
+    pub fn from_ty(ty: Ty) -> Option<Self> {
+        match ty {
+            Ty::Int => Some(RetTy::Int),
+            Ty::Str => Some(RetTy::Str),
+            Ty::Bool => Some(RetTy::Bool),
+            Ty::Array(elem) => Some(RetTy::Array(elem)),
+            Ty::Nothing => Some(RetTy::Nothing),
+            Ty::Func(_) => None,
+        }
+    }
+
+    pub fn ty(self) -> Ty {
+        match self {
+            RetTy::Int => Ty::Int,
+            RetTy::Str => Ty::Str,
+            RetTy::Bool => Ty::Bool,
+            RetTy::Array(elem) => Ty::Array(elem),
+            RetTy::Nothing => Ty::Nothing,
+        }
+    }
+}
+
+impl fmt::Display for RetTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.ty())
+    }
+}
+
+/// The compact type of a callable value: how many things it takes and what it
+/// gives back. Parameter kinds are not stored, so dynamic calls only check the
+/// number of arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuncTy {
+    pub arity: u8,
+    pub ret: RetTy,
+}
+
+impl fmt::Display for FuncTy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let things = if self.arity == 1 { "thing" } else { "things" };
+        write!(
+            f,
+            "a function taking {} {} giving back {}",
+            self.arity, things, self.ret
+        )
+    }
+}
+
 /// The kinds of value Rusk understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {
@@ -117,6 +178,8 @@ pub enum Ty {
     Bool,
     /// A homogeneous list: a pointer to `[len][capacity][item...]` at runtime.
     Array(Elem),
+    /// A callable value: a pointer to `[code][capture count][capture...]`.
+    Func(FuncTy),
     /// What a function "gives back" when it uses no `give back` at all.
     Nothing,
 }
@@ -137,6 +200,7 @@ impl fmt::Display for Ty {
             Ty::Str => write!(f, "text"),
             Ty::Bool => write!(f, "a truth value"),
             Ty::Array(elem) => write!(f, "a list of {}", elem.plural()),
+            Ty::Func(ft) => write!(f, "{ft}"),
             Ty::Nothing => write!(f, "nothing"),
         }
     }
@@ -146,6 +210,9 @@ impl fmt::Display for Ty {
 pub struct Param {
     pub name: String,
     pub ty: Ty,
+    /// `as a view of ...` — the function may read the value but not move or
+    /// change it.
+    pub borrowed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -156,6 +223,20 @@ pub enum Expr {
     Var(String),
     /// A call written `name with arg and arg`.
     Call(String, Vec<Expr>),
+    /// `call VALUE with arg and arg` — call something held in a variable.
+    CallValue {
+        func: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// `the function NAME` — a named function as a value.
+    FuncRef(String),
+    /// `a function with ...:` — a closure whose free names are captured.
+    Lambda {
+        params: Vec<Param>,
+        body: Vec<Stmt>,
+    },
+    /// `a view of VALUE` — a shared, read-only alias.
+    View(Box<Expr>),
     /// `length of TEXT` — how many bytes the text holds.
     Length(Box<Expr>),
     /// `letter N of TEXT` — one piece of text, counting from 1.
@@ -318,6 +399,182 @@ pub enum Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
     pub stmts: Vec<Stmt>,
+}
+
+/// The names a closure body reads from the world outside it. Parameters,
+/// locals, and loop variables are not included; neither are names bound by a
+/// nested function definition. The order is first-use order, so codegen can
+/// build a stable capture list.
+pub fn lambda_free_names(params: &[Param], body: &[Stmt]) -> Vec<String> {
+    let mut bound: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+    let mut free = Vec::new();
+    let mut seen = HashSet::new();
+    collect_free_stmts(body, &mut bound, &mut free, &mut seen);
+    free
+}
+
+fn note_free(
+    name: &str,
+    bound: &HashSet<String>,
+    free: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    if bound.contains(name) || !seen.insert(name.to_string()) {
+        return;
+    }
+    free.push(name.to_string());
+}
+
+fn collect_free_expr(
+    expr: &Expr,
+    bound: &mut HashSet<String>,
+    free: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::Int(_) | Expr::Str(_) | Expr::Bool(_) | Expr::FuncRef(_) | Expr::ArgCount => {}
+        Expr::Var(name) => note_free(name, bound, free, seen),
+        Expr::Call(_, args) | Expr::CallValue { args, .. } | Expr::Array(args) => {
+            if let Expr::CallValue { func, .. } = expr {
+                collect_free_expr(func, bound, free, seen);
+            }
+            for arg in args {
+                collect_free_expr(arg, bound, free, seen);
+            }
+        }
+        Expr::Lambda { params, body } => {
+            collect_free_lambda(params, body, bound, free, seen);
+        }
+        Expr::View(inner)
+        | Expr::Length(inner)
+        | Expr::Copy(inner)
+        | Expr::Argument(inner)
+        | Expr::Environment(inner)
+        | Expr::ReadFile(inner)
+        | Expr::Unary(_, inner) => collect_free_expr(inner, bound, free, seen),
+        Expr::Letter(a, b) | Expr::Item(a, b) | Expr::Binary(_, a, b) => {
+            collect_free_expr(a, bound, free, seen);
+            collect_free_expr(b, bound, free, seen);
+        }
+        Expr::Part { text, from, to } => {
+            collect_free_expr(text, bound, free, seen);
+            collect_free_expr(from, bound, free, seen);
+            collect_free_expr(to, bound, free, seen);
+        }
+        Expr::EmptyArray(_) | Expr::ReadLine | Expr::ReadAll => {}
+    }
+}
+
+fn collect_free_lambda(
+    params: &[Param],
+    body: &[Stmt],
+    outer: &HashSet<String>,
+    free: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut inner = outer.clone();
+    for param in params {
+        inner.insert(param.name.clone());
+    }
+    collect_free_stmts(body, &mut inner, free, seen);
+}
+
+fn collect_free_block(
+    body: &[Stmt],
+    bound: &mut HashSet<String>,
+    free: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    let mut inner = bound.clone();
+    collect_free_stmts(body, &mut inner, free, seen);
+}
+
+fn collect_free_stmts(
+    stmts: &[Stmt],
+    bound: &mut HashSet<String>,
+    free: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Say(expr, _)
+            | Stmt::Warn(expr, _)
+            | Stmt::Stop(expr, _)
+            | Stmt::GiveBack(expr, _)
+            | Stmt::Expr(expr, _) => collect_free_expr(expr, bound, free, seen),
+            Stmt::Let { name, value, .. } | Stmt::Const { name, value, .. } => {
+                collect_free_expr(value, bound, free, seen);
+                bound.insert(name.clone());
+            }
+            Stmt::Set { name, value, .. } => {
+                collect_free_expr(value, bound, free, seen);
+                note_free(name, bound, free, seen);
+            }
+            Stmt::SetItem {
+                index,
+                array,
+                value,
+                ..
+            } => {
+                collect_free_expr(index, bound, free, seen);
+                collect_free_expr(array, bound, free, seen);
+                collect_free_expr(value, bound, free, seen);
+            }
+            Stmt::AddTo { value, name, .. } => {
+                collect_free_expr(value, bound, free, seen);
+                note_free(name, bound, free, seen);
+            }
+            Stmt::Remove { index, name, .. } => {
+                if let Some(index) = index {
+                    collect_free_expr(index, bound, free, seen);
+                }
+                note_free(name, bound, free, seen);
+            }
+            Stmt::WriteFile { text, path, .. } => {
+                collect_free_expr(text, bound, free, seen);
+                collect_free_expr(path, bound, free, seen);
+            }
+            Stmt::If {
+                cond, then, other, ..
+            } => {
+                collect_free_expr(cond, bound, free, seen);
+                collect_free_block(then, bound, free, seen);
+                collect_free_block(other, bound, free, seen);
+            }
+            Stmt::Repeat { count, body, .. } => {
+                collect_free_expr(count, bound, free, seen);
+                collect_free_block(body, bound, free, seen);
+            }
+            Stmt::While { cond, body, .. } => {
+                collect_free_expr(cond, bound, free, seen);
+                collect_free_block(body, bound, free, seen);
+            }
+            Stmt::ForEach {
+                name,
+                from,
+                to,
+                body,
+                ..
+            } => {
+                collect_free_expr(from, bound, free, seen);
+                collect_free_expr(to, bound, free, seen);
+                let mut inner = bound.clone();
+                inner.insert(name.clone());
+                collect_free_stmts(body, &mut inner, free, seen);
+            }
+            Stmt::ForEachIn {
+                name, array, body, ..
+            } => {
+                collect_free_expr(array, bound, free, seen);
+                let mut inner = bound.clone();
+                inner.insert(name.clone());
+                collect_free_stmts(body, &mut inner, free, seen);
+            }
+            // A named function is not a closure: it cannot see these locals.
+            Stmt::FuncDef { .. } | Stmt::Import { .. } => {}
+            Stmt::Break(_) | Stmt::Continue(_) => {}
+        }
+    }
 }
 
 impl Stmt {

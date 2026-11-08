@@ -65,6 +65,8 @@ pub const SYS_EXIT: u64 = 93;
 
 enum Target {
     Label(String),
+    /// Absolute address of a code label, spread over four instructions.
+    Addr(String),
     /// Absolute address of an interned string, spread over four instructions.
     Str(usize),
 }
@@ -143,6 +145,20 @@ impl Asm {
         self.fixups.push(Fixup {
             at,
             target: Target::Str(string_id),
+        });
+    }
+
+    /// Load the absolute address of a code label, patched at finish. Used for
+    /// function values: the record keeps a pointer to the body.
+    pub fn mov_label_addr(&mut self, rd: u8, label: &str) {
+        let at = self.at();
+        self.movz(rd, 0, 0);
+        self.movk(rd, 0, 1);
+        self.movk(rd, 0, 2);
+        self.movk(rd, 0, 3);
+        self.fixups.push(Fixup {
+            at,
+            target: Target::Addr(label.to_string()),
         });
     }
 
@@ -271,6 +287,11 @@ impl Asm {
         self.branch(0x9400_0000, label);
     }
 
+    /// `blr reg` — call the address in a register.
+    pub fn call_reg(&mut self, reg: u8) {
+        self.emit(0xD63F_0000 | ((reg as u32) << 5));
+    }
+
     pub fn bcond_label(&mut self, cond: u8, label: &str) {
         self.branch(0x5400_0000 | cond as u32, label);
     }
@@ -323,6 +344,19 @@ impl Asm {
                 }
                 Target::Str(id) => {
                     let addr = string_base + offsets[*id] as u64;
+                    for hw in 0..4u32 {
+                        let word = self.code[f.at / 4 + hw as usize];
+                        let chunk = ((addr >> (16 * hw)) & 0xFFFF) as u32;
+                        self.code[f.at / 4 + hw as usize] = (word & !(0xFFFF << 5)) | (chunk << 5);
+                    }
+                }
+                Target::Addr(name) => {
+                    let at =
+                        *self.labels.get(name).unwrap_or_else(|| {
+                            panic!("internal: address of unknown label '{name}'")
+                        }) as u64
+                            * 4;
+                    let addr = IMAGE_BASE + TEXT_OFFSET + at;
                     for hw in 0..4u32 {
                         let word = self.code[f.at / 4 + hw as usize];
                         let chunk = ((addr >> (16 * hw)) & 0xFFFF) as u32;

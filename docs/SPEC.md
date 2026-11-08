@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v0.9
+# The Rusk Language — Specification v1.0
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v0.9
+emits native machine code directly. This document describes exactly what v1.0
 accepts and what it guarantees.
 
-Status: **v0.9, Linux on AArch64 and x86-64**. Everything here is implemented
+Status: **v1.0, Linux on AArch64 and x86-64**. Everything here is implemented
 and tested; anything not here does not exist yet.
 
 ---
@@ -36,12 +36,18 @@ Blank lines are ignored.
 | Text | `"hello"` | Immutable; escapes `\n`, `\t`, `\r`, `\0`, `\\`, `\"` |
 | Truth | `true`, `false` | The result of comparisons and `not` |
 | List | `[1, 2, 3]`, `["a", "b"]`, `[[1], [2]]` | Growable, one kind of item, positions count from 1; lists may nest |
+| Function | `the function double`, `a function with n as a number: ...` | A named function or closure; called with `call ... with ...` |
 
-Numbers are integers only. There is no floating point in v0.9.
+Numbers are integers only. There is no floating point in v1.0.
 
 Text and lists live on a heap and are **owned**: a name holds one of them at a
 time. Ownership is what makes the language memory-safe without a garbage
-collector; see §4.1.
+collector; see §4.1. A **view** (`a view of VALUE`, or a parameter written
+`as a view of ...`) lends a value read-only without moving ownership.
+
+Function values are shared one at a time. They cannot be stored in a list,
+compared, copied, printed, or given back, and there are no function-typed
+parameters in v1.0.
 
 ## 4. Naming things
 
@@ -71,8 +77,8 @@ Text and lists are the two **owned** kinds. Numbers and truth values are plain
 machine words and are copied freely. For an owned value:
 
 - `let NAME be VALUE`, `constant NAME be VALUE`, `set NAME to VALUE`, passing
-  an argument, writing an item into a list, and `give back` all **move** the
-  value. The old name is empty afterwards.
+  an argument to an ordinary parameter, writing an item into a list, and
+  `give back` all **move** the value. The old name is empty afterwards.
 - Using a name after its value has moved is a **compile error**:
 
   ```console
@@ -100,10 +106,44 @@ say words                     # [rye, wheat]
 say mine                      # [rye, wheat]
 ```
 
-Rusk has no null, no pointers, and no threads. A value cannot be observed
-through two names, so there is no dangling reference, no double free, and no
-shared mutable state to race over. The checker runs before any machine code is
-produced; it is not a runtime cost.
+#### Views
+
+A **view** is a shared, read-only alias. Writing `a view of VALUE` binds or
+passes the same value without moving it:
+
+```rusk
+let loaves be [3, 6, 9]
+let shared be a view of loaves
+say item 2 of shared          # 6
+say length of loaves          # 3; loaves is still the owner
+
+to total with xs as a view of a list of numbers:
+    let sum be 0
+    for each x in xs:
+        set sum to sum + x
+    give back sum
+
+say total with loaves         # 18; the call did not move loaves
+say loaves                    # [3, 6, 9]
+```
+
+A view may be read, indexed, measured, iterated, and passed on to another view
+parameter. It may **not** be moved, changed, grown, shortened, or used to write
+an item, because it does not own its value:
+
+```console
+burnt: line 3: 'shared' is a view — it shares its value read-only and can't be changed
+burnt: line 3: 'shared' is a view — it's shared read-only; use 'copy of shared' to make an owned value
+```
+
+Use `copy of` when a function needs to change or keep the value. A view of a
+number or truth value is just the number or truth value, since those are copied
+freely and cannot be moved.
+
+Rusk has no null, no pointers, and no threads. Apart from read-only views, a
+value cannot be observed through two names, so there is no dangling reference,
+no double free, and no shared mutable state to race over. The checker runs
+before any machine code is produced; it is not a runtime cost.
 
 ## 5. Saying things
 
@@ -488,6 +528,8 @@ to roll:
 - `to NAME:` starts a function with no parameters.
 - `to NAME with P as KIND and P as KIND:` declares parameters; `and` separates
   them. A function may have at most 8 parameters.
+- Writing `P as a view of KIND` makes a **borrowed** parameter: the caller's
+  value is lent read-only instead of being moved. See §4.1.
 - A function body is an indented block, just like an `if`.
 - `give back VALUE` ends the function and hands `VALUE` to the caller.
 
@@ -521,8 +563,69 @@ to factorial with n as a number:
     give back n * factorial with n - 1
 ```
 
-Functions live at the top level; defining one inside a block is an error. They
-may be called before their definition appears in the file.
+Functions live at the top level; defining one with `to` inside a block is an
+error. They may be called before their definition appears in the file.
+
+### Function values
+
+A named function can be used as a value with `the function NAME`:
+
+```rusk
+to double with n as a number:
+    give back n * 2
+
+let twice be the function double
+say call twice with 21        # 42
+say twice with 4              # the ordinary call spelling also works
+```
+
+- `the function NAME` reads a named function as a function value.
+- `call VALUE with ARG and ARG` calls a function value; `call VALUE` calls one
+  that takes no arguments.
+- The ordinary `NAME with ...` spelling also calls a function value held in a
+  variable when there is no named function of that name.
+- A function value may be stored with `let` or `constant`, read, and called.
+  It cannot be put in a list, compared, copied with `copy of`, printed with
+  `say` or `warn`, given back, or passed as an argument. There are no
+  function-typed parameters in v1.0.
+- A dynamic call checks the number of arguments. The kinds of those arguments
+  are not part of a function value's type in v1.0, so they are not checked
+  before the call.
+
+### Closures
+
+A function value written with `a function with ...:` is a **closure**. It
+captures the names its body reads from the surrounding scope:
+
+```rusk
+let base be 10
+let add_base be a function with n as a number:
+    give back n + base
+
+say call add_base with 5      # 15
+```
+
+- A closure is written `a function with ...:` (the article is optional, so
+  `function with ...:` works too) and may take the same parameter list and
+  borrowed views as a named function.
+- A function literal may only be the value of a `let` or `constant` statement,
+  so it always has a name to be called through.
+- Free names are captured when the closure is made. Numbers and truth values
+  are copied into it. Text and lists are captured as shared read-only views:
+  the closure may read them but may not move or change them.
+- A closure may capture another function value and may create another closure
+  inside its body.
+- A function value cannot give back another function value in v1.0. Call the
+  inner function instead, as here:
+
+```rusk
+to make_adder with n as a number:
+    let add be a function with x as a number:
+        give back x + n
+    give back call add with 5
+
+say make_adder with 100       # 105
+```
 
 ## 11. Imports
 
@@ -617,7 +720,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 0.9.0 — an English-like language
+Rusk 1.0.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -647,10 +750,14 @@ finishes it.
 The session is a tree-walking evaluator over the same AST, not a machine-code
 backend. Every submission is still lexed, parsed, type checked, and ownership
 checked against the whole session before any of it runs, so a session accepts
-the same programs the compiler does. Text operations use byte positions here
-too, and a moved name is empty here just as it is in a baked program. `import`
-works at the prompt (relative to the current directory); inside `:load`,
-relative imports resolve from the loaded file's directory.
+the same programs the compiler does. Function values and closures work at the
+prompt too: `the function NAME` produces a value, `call ... with ...` runs it,
+and a closure remembers the session names that were visible when it was made.
+Views evaluate to the value they alias and keep the same read-only rules. Text
+operations use byte positions here too, and a moved name is empty here just as
+it is in a baked program. `import` works at the prompt (relative to the current
+directory); inside `:load`, relative imports resolve from the loaded file's
+directory.
 
 System primaries work at the prompt as well: `argument N` sees the words after
 `rusk repl`, `environment` reads the session's environment, and `read line`,
@@ -771,15 +878,25 @@ program logic and get the same runtime behavior.
 
 A list is a pointer to `[len: u64][capacity: u64][item: i64]...`, allocated
 from the same bump heap as joined text. The ownership pass guarantees that only
-one live name refers to a list, so assigning a list never creates an alias;
-`copy of` makes a new list and copies every item. For nested lists the code
-generator emits one recursive copy routine and one recursive printer per list
-shape the program actually uses. `array_get` and `array_set` check the 1-based
-index against the stored length and report `an item outside the list` on
-failure. `array_add` writes into spare capacity, or allocates a larger block and
-copies the items when the list is full. `array_remove_last` and `array_remove_at`
-reduce the length and shift later items left; removing from an empty list
-reports `there's nothing to remove`.
+one mutable name refers to a list (apart from read-only views), so changing a
+list never surprises another owner; `copy of` makes a new list and copies every
+item. For nested lists the code generator emits one recursive copy routine and
+one recursive printer per list shape the program actually uses. `array_get` and
+`array_set` check the 1-based index against the stored length and report `an
+item outside the list` on failure. `array_add` writes into spare capacity, or
+allocates a larger block and copies the items when the list is full.
+`array_remove_last` and `array_remove_at` reduce the length and shift later
+items left; removing from an empty list reports `there's nothing to remove`.
+
+A function value is a pointer to `[code: u64][capture count: u64][capture:
+i64]...`. A dynamic call reads the first word into the register holding the
+callee address and passes `record + 16` as an environment pointer. Named
+functions and closures share one frame layout: slot 0 is the environment
+pointer, parameters follow, then captured values, then ordinary locals. A
+closure's prologue copies its captures out of the environment into frame slots,
+so the body reads them like any other name. Named functions are called with a
+zero environment pointer and the same layout. A view compiles to the underlying
+value; the ownership pass is what prevents it from being moved or changed.
 
 ### Guarantees
 
@@ -797,12 +914,17 @@ reports `there's nothing to remove`.
 
 - The image is placed at a fixed base address and the data area sits at a fixed
   `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v0.9, worth relocating later.
+  collide. Fine for v1.0, worth relocating later.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
 - Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
   is reclaimed; exhausting it is reported, but memory is not reused.
-- Ownership is single-owner, not borrowing: there is no way to lend a value to
-  two readers at once. `copy of` is the escape hatch.
+- Ownership is single-owner. `a view of VALUE` and `as a view of ...` lend a
+  value read-only, but views cannot be moved, changed, or stored, and they do
+  not outlive the owner's frame. `copy of` is the escape hatch.
+- Function values cannot be put in lists, compared, copied, printed, or given
+  back, and there are no function-typed parameters. Dynamic calls check only
+  the number of arguments. Closures capture numbers and truth values by value,
+  and text and lists as shared read-only views.
 - Lists are homogeneous but may nest to any depth. They can grow with
   `add VALUE to LIST`, which uses spare capacity or copies the whole list to
   fresh heap space, and shrink with `remove last from LIST` or
@@ -817,14 +939,12 @@ reports `there's nothing to remove`.
   macOS, Windows, or 32-bit output. The x86-64 backend is a correctness-first
   translation layer that keeps virtual registers in memory, so its code is
   larger and slower than the AArch64 output.
-- At most 8 parameters per function; no function values, closures, or
-  overloading.
+- At most 8 parameters per function. There is no function overloading.
 
 ## 16. Roadmap (not implemented)
 
-- borrowing and shared read-only views
-- function values and closures
 - a register-allocating x86-64 encoder (the current one keeps virtual
   registers in memory)
 - a real relocation-aware data layout
+- function-typed parameters and function values in lists
 - self-hosting: writing Rusk in Rusk

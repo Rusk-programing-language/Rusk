@@ -13,6 +13,8 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sig {
     pub params: Vec<Ty>,
+    /// One flag per parameter: `true` when it was written `as a view of ...`.
+    pub borrowed: Vec<bool>,
     pub ret: Ty,
 }
 
@@ -125,6 +127,7 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
             (*name).clone(),
             Sig {
                 params: params.iter().map(|p| p.ty).collect(),
+                borrowed: params.iter().map(|p| p.borrowed).collect(),
                 ret,
             },
         );
@@ -166,6 +169,12 @@ fn infer_stmts(
                         *line,
                         "that function doesn't give anything back, so there's nothing to say"
                             .into(),
+                    ));
+                }
+                if matches!(t, Some(Ty::Func(_))) {
+                    return Err(at(
+                        *line,
+                        "that's a function value — call it with 'call ... with ...' first".into(),
                     ));
                 }
             }
@@ -337,6 +346,12 @@ fn infer_stmts(
                             .into(),
                     ));
                 }
+                if matches!(t, Some(Ty::Func(_))) {
+                    return Err(at(
+                        *line,
+                        "that's a function value — call it with 'call ... with ...' first".into(),
+                    ));
+                }
             }
             Stmt::Stop(e, line) => {
                 let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
@@ -487,6 +502,13 @@ fn infer_stmts(
                     ));
                 }
                 let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
+                if matches!(t, Some(Ty::Func(_))) {
+                    return Err(at(
+                        *line,
+                        "v1.0 functions can't give back another function — call it instead"
+                            .to_string(),
+                    ));
+                }
                 if let Some(t) = t {
                     match out {
                         Some(old) if *old != t => {
@@ -553,6 +575,15 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
         }
         Expr::Call(name, args) => {
             let Some(sig) = sigs.get(name) else {
+                // A function value kept in a variable can be called the
+                // ordinary way too: `f with 1` means `call f with 1`.
+                if let Some(Scoped {
+                    ty: Some(Ty::Func(ft)),
+                    ..
+                }) = scope.get(name)
+                {
+                    return type_dynamic_call(name, *ft, args, scope, sigs);
+                }
                 return Err(format!("I don't know a function called '{name}'"));
             };
             if args.len() != sig.params.len() {
@@ -577,6 +608,61 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }
             Ok(sig.ret)
         }
+        Expr::CallValue { func, args } => {
+            let ft = match type_of(func, scope, sigs)? {
+                Some(Ty::Func(ft)) => ft,
+                Some(Ty::Nothing) => {
+                    return Err("there's nothing here to call — that gives nothing back".to_string())
+                }
+                Some(t) => {
+                    return Err(format!("'call' needs a function value, but this is {t}"));
+                }
+                None => return Ok(None),
+            };
+            type_dynamic_call("this function value", ft, args, scope, sigs)
+        }
+        Expr::FuncRef(name) => {
+            let Some(sig) = sigs.get(name) else {
+                return Err(format!("I don't know a function called '{name}'"));
+            };
+            let Some(ret) = sig.ret else {
+                return Ok(None);
+            };
+            let ret = RetTy::from_ty(ret).ok_or_else(|| {
+                "v1.0 functions can't give back another function — call it instead".to_string()
+            })?;
+            let arity = u8::try_from(sig.params.len())
+                .map_err(|_| "a function can't take more than 255 things".to_string())?;
+            Ok(Some(Ty::Func(FuncTy { arity, ret })))
+        }
+        Expr::Lambda { params, body } => {
+            let arity = u8::try_from(params.len())
+                .map_err(|_| "a function value can't take more than 255 things".to_string())?;
+            let mut inner = scope.clone();
+            for param in params {
+                inner.insert(
+                    param.name.clone(),
+                    Scoped {
+                        ty: Some(param.ty),
+                        constant: false,
+                    },
+                );
+            }
+            let mut out = None;
+            infer_stmts(body, &mut inner, sigs, &mut out, true, 0)?;
+            let ret = match out {
+                Some(t) => RetTy::from_ty(t).ok_or_else(|| {
+                    "v1.0 functions can't give back another function — call it instead".to_string()
+                })?,
+                None if has_give_back(body) => return Ok(None),
+                None => RetTy::Nothing,
+            };
+            Ok(Some(Ty::Func(FuncTy { arity, ret })))
+        }
+        Expr::View(inner) => match type_of(inner, scope, sigs)? {
+            Some(Ty::Nothing) => Err("there's nothing to view".to_string()),
+            other => Ok(other),
+        },
         Expr::Length(inner) => {
             let t = type_of(inner, scope, sigs)?;
             match t {
@@ -647,6 +733,10 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                     Some(Ty::Nothing) => {
                         return Err("nothing can go in a list".to_string());
                     }
+                    Some(Ty::Func(_)) => {
+                        return Err("function values can't go in a list — keep it in a variable"
+                            .to_string());
+                    }
                     Some(t) => {
                         let this = Elem::from_ty(t).expect("checked non-nothing value");
                         match elem {
@@ -674,6 +764,9 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                 Some(Ty::Nothing) => {
                     Err("there's nothing to copy — that function gives nothing back".to_string())
                 }
+                Some(Ty::Func(_)) => Err(
+                    "a function value is already shared, so there's nothing to copy".to_string(),
+                ),
                 other => Ok(other),
             }
         }
@@ -747,6 +840,11 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                     "lists don't compare yet — compare their items one at a time".to_string(),
                 );
             }
+            if matches!(lt, Ty::Func(_)) || matches!(rt, Ty::Func(_)) {
+                return Err(
+                    "function values don't compare — call one with 'call ... with ...'".to_string(),
+                );
+            }
             match op {
                 BinOp::Add => {
                     if lt == Ty::Int && rt == Ty::Int {
@@ -786,6 +884,49 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }
         }
     }
+}
+
+/// Type a call through a function value. Parameter kinds are not part of a
+/// function value's type in v1.0, so only the number of arguments is checked.
+fn type_dynamic_call(
+    name: &str,
+    ft: FuncTy,
+    args: &[Expr],
+    scope: &Scope,
+    sigs: &Sigs,
+) -> Result<Option<Ty>, String> {
+    if args.len() != ft.arity as usize {
+        return Err(format!(
+            "{name} takes {} thing{}, but got {}",
+            ft.arity,
+            if ft.arity == 1 { "" } else { "s" },
+            args.len()
+        ));
+    }
+    for arg in args {
+        if let Some(t) = type_of(arg, scope, sigs)? {
+            if t == Ty::Nothing {
+                return Err(
+                    "a function that gives nothing back can't be passed as a thing".to_string(),
+                );
+            }
+        }
+    }
+    Ok(Some(ft.ret.ty()))
+}
+
+/// Does a closure body return from its own level? Nested function definitions
+/// and nested closures return to themselves, not to this body.
+fn has_give_back(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::GiveBack(..) => true,
+        Stmt::If { then, other, .. } => has_give_back(then) || has_give_back(other),
+        Stmt::Repeat { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::ForEachIn { body, .. } => has_give_back(body),
+        _ => false,
+    })
 }
 
 /// Type one expression against already-known variable kinds and signatures.
@@ -1077,5 +1218,81 @@ to first_text with xs as a list of text:
 say first_text with [\"a\", \"b\"]
 ";
         check_src(src).unwrap();
+    }
+
+    #[test]
+    fn borrowed_parameters_are_recorded_in_the_signature() {
+        let sigs = check_src(
+            "to total with xs as a view of a list of numbers:\n    give back item 1 of xs\n",
+        )
+        .unwrap();
+        assert_eq!(sigs["total"].borrowed, vec![true]);
+        assert_eq!(sigs["total"].params, vec![Ty::Array(Elem::INT)]);
+    }
+
+    #[test]
+    fn function_values_and_indirect_calls_type_check() {
+        let src = "\
+to double with n as a number:
+    give back n * 2
+
+let f be the function double
+say call f with 21
+say f with 4
+
+let add_one be a function with n as a number:
+    give back n + 1
+
+say call add_one with 41
+";
+        check_src(src).unwrap();
+    }
+
+    #[test]
+    fn dynamic_calls_check_their_arity() {
+        let src = "\
+to double with n as a number:
+    give back n * 2
+
+let f be the function double
+say call f
+";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("takes 1 thing"), "{err}");
+    }
+
+    #[test]
+    fn function_values_are_rejected_where_they_make_no_sense() {
+        let base = "\
+to double with n as a number:
+    give back n * 2
+let f be the function double
+";
+
+        let err = check_src(&format!("{base}let fs be [f]\n")).unwrap_err();
+        assert!(err.contains("can't go in a list"), "{err}");
+
+        let err = check_src(&format!("{base}say f is f\n")).unwrap_err();
+        assert!(err.contains("don't compare"), "{err}");
+
+        let err = check_src(&format!("{base}say f\n")).unwrap_err();
+        assert!(err.contains("call it with 'call"), "{err}");
+
+        let err = check_src(&format!("{base}let g be copy of f\n")).unwrap_err();
+        assert!(err.contains("already shared"), "{err}");
+    }
+
+    #[test]
+    fn functions_cannot_give_back_functions_in_v1() {
+        let src = "\
+to double with n as a number:
+    give back n * 2
+
+to get:
+    let f be the function double
+    give back f
+";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("can't give back another function"), "{err}");
     }
 }

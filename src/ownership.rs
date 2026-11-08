@@ -41,6 +41,9 @@ struct Slot {
     ty: Ty,
     state: State,
     constant: bool,
+    /// A view (or a closure's captured name): readable and shared, but never
+    /// moved or changed.
+    borrowed: bool,
 }
 
 impl Slot {
@@ -67,6 +70,7 @@ pub fn check(program: &Program, sigs: &HashMap<String, Sig>) -> Result<(), Strin
                         ty: p.ty,
                         state: State::Alive,
                         constant: false,
+                        borrowed: p.borrowed,
                     },
                 );
             }
@@ -114,25 +118,31 @@ impl<'a> Checker<'a> {
             }
             Stmt::Let { name, value, line } => {
                 let ty = self.ty_of(value, scope)?;
-                Self::line_at(*line, self.expr(value, scope, Use::Move))?;
+                let borrowed = matches!(value, Expr::View(_));
+                let use_ = if borrowed { Use::Borrow } else { Use::Move };
+                Self::line_at(*line, self.expr(value, scope, use_))?;
                 scope.insert(
                     name.clone(),
                     Slot {
                         ty: ty.unwrap_or(Ty::Nothing),
                         state: State::Alive,
                         constant: false,
+                        borrowed,
                     },
                 );
             }
             Stmt::Const { name, value, line } => {
                 let ty = self.ty_of(value, scope)?;
-                Self::line_at(*line, self.expr(value, scope, Use::Move))?;
+                let borrowed = matches!(value, Expr::View(_));
+                let use_ = if borrowed { Use::Borrow } else { Use::Move };
+                Self::line_at(*line, self.expr(value, scope, use_))?;
                 scope.insert(
                     name.clone(),
                     Slot {
                         ty: ty.unwrap_or(Ty::Nothing),
                         state: State::Alive,
                         constant: true,
+                        borrowed,
                     },
                 );
             }
@@ -146,6 +156,12 @@ impl<'a> Checker<'a> {
                         format!("'{name}' is a constant — it can't be changed with 'set'"),
                     ));
                 }
+                if old.borrowed {
+                    return Err(at(
+                        *line,
+                        format!("'{name}' is a view — it shares its value read-only and can't be changed"),
+                    ));
+                }
                 Self::line_at(*line, self.expr(value, scope, Use::Move))?;
                 // The old value is released and the name owns the new one.
                 scope.get_mut(name).unwrap().state = State::Alive;
@@ -157,18 +173,24 @@ impl<'a> Checker<'a> {
                 line,
             } => {
                 Self::line_at(*line, self.expr(index, scope, Use::Read))?;
-                Self::line_at(*line, self.expr(array, scope, Use::Read))?;
+                Self::line_at(*line, self.expr(array, scope, Use::Mutate))?;
                 Self::line_at(*line, self.expr(value, scope, Use::Move))?;
             }
             Stmt::AddTo { value, name, line } => {
                 Self::line_at(*line, self.expr(value, scope, Use::Move))?;
-                Self::line_at(*line, self.expr(&Expr::Var(name.clone()), scope, Use::Read))?;
+                Self::line_at(
+                    *line,
+                    self.expr(&Expr::Var(name.clone()), scope, Use::Mutate),
+                )?;
             }
             Stmt::Remove { index, name, line } => {
                 if let Some(index) = index {
                     Self::line_at(*line, self.expr(index, scope, Use::Read))?;
                 }
-                Self::line_at(*line, self.expr(&Expr::Var(name.clone()), scope, Use::Read))?;
+                Self::line_at(
+                    *line,
+                    self.expr(&Expr::Var(name.clone()), scope, Use::Mutate),
+                )?;
             }
             Stmt::Warn(e, line) => {
                 Self::line_at(*line, self.expr(e, scope, Use::Read))?;
@@ -225,6 +247,7 @@ impl<'a> Checker<'a> {
                         ty: Ty::Int,
                         state: State::Alive,
                         constant: false,
+                        borrowed: false,
                     },
                 );
                 let result = self.loop_body(body, scope);
@@ -249,6 +272,7 @@ impl<'a> Checker<'a> {
                         ty: item_ty,
                         state: State::Alive,
                         constant: false,
+                        borrowed: false,
                     },
                 );
                 let result = self.loop_body(body, scope);
@@ -318,6 +342,21 @@ impl<'a> Checker<'a> {
                         "I don't know a thing called '{name}' — declare it with 'let {name} be ...' first"
                     ));
                 };
+                if slot.borrowed {
+                    match use_ {
+                        Use::Move => {
+                            return Err(format!(
+                                "'{name}' is a view — it's shared read-only; use 'copy of {name}' to make an owned value"
+                            ))
+                        }
+                        Use::Mutate => {
+                            return Err(format!(
+                                "'{name}' is a view — it shares its value read-only and can't be changed"
+                            ))
+                        }
+                        Use::Read | Use::Borrow => {}
+                    }
+                }
                 if !Slot::owned(slot.ty) {
                     return Ok(());
                 }
@@ -341,17 +380,85 @@ impl<'a> Checker<'a> {
             Expr::Environment(name) => self.expr(name, scope, Use::Read)?,
             Expr::ReadLine | Expr::ReadAll => {}
             Expr::ReadFile(path) => self.expr(path, scope, Use::Read)?,
-            Expr::Call(_name, args) => {
-                for arg in args {
-                    self.expr(arg, scope, Use::Move)?;
+            Expr::Call(name, args) => {
+                // A borrowed parameter is a read-only view of its argument, so
+                // passing an owned value to it does not move the value.
+                let param_borrowed = self.sigs.get(name).map(|sig| &sig.borrowed);
+                for (i, arg) in args.iter().enumerate() {
+                    let arg_use = match param_borrowed {
+                        Some(borrowed) if borrowed.get(i).copied().unwrap_or(false) => Use::Read,
+                        Some(_) => Use::Move,
+                        // A dynamic call has no parameter metadata; its
+                        // arguments are read rather than moved.
+                        None => Use::Read,
+                    };
+                    self.expr(arg, scope, arg_use)?;
                 }
+            }
+            Expr::CallValue { func, args } => {
+                self.expr(func, scope, Use::Read)?;
+                for arg in args {
+                    self.expr(arg, scope, Use::Read)?;
+                }
+            }
+            Expr::FuncRef(_) => {}
+            Expr::Lambda { params, body } => {
+                // Captures are shared read-only values, so the body can read
+                // them but cannot move or change them.
+                let free = lambda_free_names(params, body);
+                let mut inner = Scope::new();
+                for param in params {
+                    inner.insert(
+                        param.name.clone(),
+                        Slot {
+                            ty: param.ty,
+                            state: State::Alive,
+                            constant: false,
+                            borrowed: param.borrowed,
+                        },
+                    );
+                }
+                for name in free {
+                    if let Some(slot) = scope.get(&name) {
+                        inner.insert(
+                            name,
+                            Slot {
+                                ty: slot.ty,
+                                state: State::Alive,
+                                constant: true,
+                                borrowed: true,
+                            },
+                        );
+                    }
+                }
+                let _ = self.block(body, &mut inner)?;
+            }
+            Expr::View(inner) => {
+                if matches!(use_, Use::Move | Use::Mutate) {
+                    return Err(
+                        "a view is shared read-only and can't be moved — use 'copy of' to make an owned value"
+                            .to_string(),
+                    );
+                }
+                self.expr(inner, scope, Use::Read)?;
             }
             Expr::Length(inner) | Expr::Unary(_, inner) => {
                 self.expr(inner, scope, Use::Read)?;
             }
-            Expr::Letter(a, b) | Expr::Item(a, b) => {
+            Expr::Letter(a, b) => {
                 self.expr(a, scope, Use::Read)?;
                 self.expr(b, scope, Use::Read)?;
+            }
+            Expr::Item(a, b) => {
+                self.expr(a, scope, Use::Read)?;
+                // `set item ... of a view` must report the view, so mutation
+                // flows into the list expression; every other read does not.
+                let array_use = if use_ == Use::Mutate {
+                    Use::Mutate
+                } else {
+                    Use::Read
+                };
+                self.expr(b, scope, array_use)?;
             }
             Expr::Part { text, from, to } => {
                 self.expr(text, scope, Use::Read)?;
@@ -389,6 +496,10 @@ impl<'a> Checker<'a> {
 enum Use {
     Read,
     Move,
+    /// Bind a shared view: read the value, but do not move it.
+    Borrow,
+    /// Change the value in place; a view may not be changed.
+    Mutate,
 }
 
 /// How a statement or block can leave. `breaks` and `continues` hold the state
@@ -768,5 +879,68 @@ repeat 2 times:
 say a
 ");
         assert!(message.contains("moved already"), "{message}");
+    }
+
+    #[test]
+    fn passing_a_list_to_a_view_parameter_keeps_the_owner_alive() {
+        check_src(
+            "\
+to total with xs as a view of a list of numbers:
+    let sum be 0
+    for each x in xs:
+        set sum to sum + x
+    give back sum
+
+let xs be [1, 2, 3]
+say total with xs
+say xs
+",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn views_cannot_be_changed_or_moved() {
+        let message = err("\
+let xs be [1, 2]
+let shared be a view of xs
+add 3 to shared
+");
+        assert!(message.contains("view"), "{message}");
+
+        let message = err("\
+let text be \"hi\"
+let shared be a view of text
+let owned be shared
+");
+        assert!(message.contains("view"), "{message}");
+    }
+
+    #[test]
+    fn closures_may_read_their_captures() {
+        check_src(
+            "\
+let base be 10
+let add_base be a function with n as a number:
+    give back n + base
+
+say call add_base with 1
+say base
+",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn closures_cannot_change_their_captures() {
+        let message = err("\
+let xs be [1]
+let add_one be a function with n as a number:
+    add 2 to xs
+    give back n
+
+say call add_one with 1
+");
+        assert!(message.contains("view"), "{message}");
     }
 }

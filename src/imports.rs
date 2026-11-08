@@ -410,6 +410,22 @@ impl Rewriter<'_> {
                 self.reference(&name, locals),
                 args.into_iter().map(|e| self.expr(e, locals)).collect(),
             ),
+            Expr::CallValue { func, args } => Expr::CallValue {
+                func: Box::new(self.expr(*func, locals)),
+                args: args.into_iter().map(|e| self.expr(e, locals)).collect(),
+            },
+            Expr::FuncRef(name) => Expr::FuncRef(self.reference(&name, locals)),
+            Expr::Lambda { params, body } => {
+                let mut inner = locals.clone();
+                for param in &params {
+                    inner.insert(param.name.clone());
+                }
+                Expr::Lambda {
+                    params,
+                    body: self.block(body, &inner),
+                }
+            }
+            Expr::View(inner) => Expr::View(Box::new(self.expr(*inner, locals))),
             Expr::Length(inner) => Expr::Length(Box::new(self.expr(*inner, locals))),
             Expr::Letter(index, text) => Expr::Letter(
                 Box::new(self.expr(*index, locals)),
