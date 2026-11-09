@@ -11,9 +11,12 @@
 #
 # Pick a version, target, or installation directory:
 #
-#   sh toastset --version 1.1.0
-#   sh toastset --target aarch64-unknown-linux-gnu
+#   sh toastset --version 1.1.1
+#   sh toastset --target aarch64-unknown-linux-musl
 #   sh toastset --bin-dir "$HOME/.local/bin"
+#
+# Termux and other musl-based systems get a statically linked build, so the
+# installed binary does not depend on the system's C library.
 #
 # Environment:
 #   TOASTSET_VERSION   release to install (default: latest)
@@ -57,9 +60,10 @@ USAGE:
   toastset [OPTIONS]
 
 OPTIONS:
-  --version VERSION   install a specific release (for example 1.1.0)
-  --target TARGET     install a specific target (x86_64-unknown-linux-gnu or
-                      aarch64-unknown-linux-gnu)
+  --version VERSION   install a specific release (for example 1.1.1)
+  --target TARGET     install a specific target:
+                        x86_64-unknown-linux-gnu   aarch64-unknown-linux-gnu
+                        x86_64-unknown-linux-musl  aarch64-unknown-linux-musl
   --home DIR          toolchain home (default: $HOME/.toastset)
   --bin-dir DIR       install the `rusk` binary into DIR
   --no-verify         skip SHA-256 verification
@@ -67,12 +71,15 @@ OPTIONS:
   --uninstall         remove a previous toastset installation
   -h, --help          show this help
 
+Termux, Alpine, and other musl-based systems automatically get the static
+musl build, which runs without the glibc loader.
+
 If Rusk is already installed, toastset replaces it with the requested or
 latest version (an in-place upgrade).
 
 EXAMPLES:
   sh toastset
-  sh toastset --version 1.1.0 --bin-dir "$HOME/.local/bin"
+  sh toastset --version 1.1.1 --bin-dir "$HOME/.local/bin"
 
 The script works when piped from curl:
   curl --proto '=https' --tlsv1.2 -sSf \
@@ -84,16 +91,35 @@ need() {
     command -v "$1" >/dev/null 2>&1 || die "I need '$1' but it isn't installed"
 }
 
-download() {
+fetch() {
     url="$1"
     out="$2"
+    progress="${3:-quiet}"
     if command -v curl >/dev/null 2>&1; then
-        curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$out"
+        if [ "$progress" = "bar" ] && [ -t 2 ]; then
+            # curl draws its progress bar on stderr, so it stays out of piped
+            # output while still being visible in a terminal.
+            curl --proto '=https' --tlsv1.2 -fL --progress-bar "$url" -o "$out"
+        else
+            curl --proto '=https' --tlsv1.2 -fsSL "$url" -o "$out"
+        fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -q "$url" -O "$out"
+        if [ "$progress" = "bar" ] && [ -t 2 ]; then
+            wget -q --show-progress "$url" -O "$out"
+        else
+            wget -q "$url" -O "$out"
+        fi
     else
         die "I need curl or wget to download Rusk"
     fi
+}
+
+download() {
+    fetch "$1" "$2" quiet
+}
+
+download_with_progress() {
+    fetch "$1" "$2" bar
 }
 
 latest_version() {
@@ -108,13 +134,35 @@ latest_version() {
     printf '%s\n' "$version"
 }
 
+is_termux() {
+    [ -n "${TERMUX_VERSION:-}" ] && return 0
+    case "${PREFIX:-}" in *com.termux*) return 0 ;; esac
+    case "${HOME:-}" in *com.termux*) return 0 ;; esac
+    [ -d /data/data/com.termux/files/usr ] && return 0
+    return 1
+}
+
+is_musl_system() {
+    is_termux && return 0
+    [ -f /etc/alpine-release ] && return 0
+    if command -v ldd >/dev/null 2>&1; then
+        ldd --version 2>&1 | grep -qi musl && return 0
+    fi
+    return 1
+}
+
 detect_target() {
     os="$(uname -s 2>/dev/null || echo unknown)"
     [ "$os" = "Linux" ] || die "Rusk currently ships only for Linux (found $os)"
     arch="$(uname -m 2>/dev/null || echo unknown)"
+    if is_musl_system; then
+        libc="musl"
+    else
+        libc="gnu"
+    fi
     case "$arch" in
-        x86_64 | amd64) printf '%s\n' "x86_64-unknown-linux-gnu" ;;
-        aarch64 | arm64) printf '%s\n' "aarch64-unknown-linux-gnu" ;;
+        x86_64 | amd64) printf '%s\n' "x86_64-unknown-linux-${libc}" ;;
+        aarch64 | arm64) printf '%s\n' "aarch64-unknown-linux-${libc}" ;;
         *) die "Rusk doesn't have a build for this machine ($arch)" ;;
     esac
 }
@@ -207,7 +255,8 @@ if [ -z "$VERSION" ]; then
 fi
 
 case "$TARGET" in
-    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu) ;;
+    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | \
+        x86_64-unknown-linux-musl | aarch64-unknown-linux-musl) ;;
     *) die "unknown target '$TARGET'" ;;
 esac
 
@@ -220,7 +269,16 @@ cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT INT TERM
 
 info "downloading Rusk ${VERSION} for ${TARGET}"
-download "$url" "$tmpdir/$archive" || die "I couldn't download $url"
+if ! download_with_progress "$url" "$tmpdir/$archive"; then
+    case "$TARGET" in
+        *-musl)
+            die "I couldn't download $url — release ${VERSION} may not have a static musl build yet; try a newer --version or leave --version off"
+            ;;
+        *)
+            die "I couldn't download $url"
+            ;;
+    esac
+fi
 
 if [ "$VERIFY" = "1" ]; then
     if download "${BASE_URL}/v${VERSION}/SHA256SUMS" "$tmpdir/SHA256SUMS" 2>/dev/null; then

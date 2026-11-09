@@ -80,11 +80,22 @@ cargo run -- run examples/hello.rk
 cargo run -- build examples/hello.rk --target x86_64
 ```
 
+To skip the build, install a prebuilt release with `toastset`:
+
+```console
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset | sh
+```
+
+It picks a static musl build on Termux, Alpine, and other musl systems, and a
+glibc build on ordinary Linux. Running it again upgrades in place. A progress
+bar appears while the archive downloads.
+
 Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.0 — code, baked ahead of time
+rusk 1.1.1 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -780,7 +791,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.0 — an English-like language
+Rusk 1.1.1 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"

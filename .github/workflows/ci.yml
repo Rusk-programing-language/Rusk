@@ -82,6 +82,7 @@ jobs:
       - name: Check example programs and the self-hosted interpreter
         if: matrix.name == 'native'
         run: |
+          sh -n toastset
           cargo run --quiet -- check examples/hello.rk
           cargo run --quiet -- check examples/lists.rk
           cargo run --quiet -- check examples/closures.rk

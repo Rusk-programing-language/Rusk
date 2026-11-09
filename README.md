@@ -1,6 +1,10 @@
-# Rusk
+<p align="center">
+  <img src="assets/rusk-logo.svg" alt="Rusk logo" width="160" height="160">
+</p>
 
-**An English-like language that bakes ahead of time.**
+<h1 align="center">Rusk</h1>
+
+<p align="center"><strong>An English-like language that bakes ahead of time.</strong></p>
 
 A rusk is bread baked twice so it keeps for months. Rusk the language works the
 same way: the compiler does the hard work up front, and what ships is a
@@ -75,10 +79,15 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.1.0
-sh toastset --target aarch64-unknown-linux-gnu
+sh toastset --version 1.1.1
+sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
+
+On Termux and other musl-based systems (including Alpine), `toastset` picks the
+statically linked musl build automatically; the same static build also runs on
+ordinary glibc Linux. Downloads show a progress bar in a terminal, and running
+the script again upgrades the installed copy in place.
 
 ## A taste of the language
 
@@ -352,7 +361,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.0 — an English-like language
+Rusk 1.1.1 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -555,6 +564,42 @@ open.
 
 > Rusk is not Rust. It's an English-like AOT language that happens to be one
 > letter away.
+
+## Logo
+
+The official Rusk mark lives in
+[`assets/rusk-logo.svg`](assets/rusk-logo.svg). Its full source:
+
+```svg
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="512" height="512" rx="64" fill="#000000"/>
+
+  <!-- Rusk Monogram -->
+  <path
+    fill="#FFFFFF"
+    d="
+      M144 96
+      H272
+      C352 96 400 144 400 212
+      C400 263 370 301 316 316
+      L400 416
+      H326
+      L252 326
+      H208
+      V416
+      H144
+      Z
+
+      M208 152
+      V272
+      H266
+      C308 272 336 248 336 212
+      C336 176 308 152 266 152
+      Z"
+  />
+</svg>
+```
 
 ## License
 

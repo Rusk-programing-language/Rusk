@@ -920,6 +920,10 @@ the architecture running the compiler, so `rusk run` can execute the result.
 `rusk run` also accepts `--target`, but then the host must be able to execute
 that architecture, for example through `binfmt_misc` or QEMU.
 
+Release builds are published both as glibc-linked and statically linked musl
+binaries for AArch64 and x86-64, so the compiler also runs on Termux, Alpine,
+and other systems without a glibc loader.
+
 The output is a static ELF64 executable for the selected target:
 
 - machine: `EM_AARCH64` (183) or `EM_X86_64` (62), Linux syscall ABI;
