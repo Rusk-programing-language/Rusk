@@ -64,7 +64,10 @@ jobs:
       - name: Report test failures
         if: failure()
         run: |
-          grep -E "^(---- |thread |assertion|  left:|  right:|test result: FAILED|failures:)" test.log | tail -80 | while IFS= read -r line; do
+          awk '/panicked at/{show=10} show>0{print; show--}' test.log | tail -120 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          grep -E "^(---- |assertion|  left:|  right:|test result: FAILED|failures:)" test.log | tail -40 | while IFS= read -r line; do
             echo "::error::$line"
           done
 
