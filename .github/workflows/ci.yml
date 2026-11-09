@@ -57,7 +57,17 @@ jobs:
         env:
           RUSK_E2E_TARGET: ${{ matrix.name == 'native' && 'x86_64' || 'aarch64' }}
           RUSK_E2E_RUNNER: ${{ matrix.runner }}
-        run: cargo test --all-targets --verbose
+        run: |
+          set -o pipefail
+          cargo test --all-targets --verbose 2>&1 | tee test.log
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log-${{ matrix.name }}
+          path: test.log
+          if-no-files-found: ignore
 
       - name: Check example programs and the self-hosted interpreter
         if: matrix.name == 'native'
