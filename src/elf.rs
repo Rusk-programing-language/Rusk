@@ -12,8 +12,18 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-/// Fixed address of the zeroed data area, above any plausible text size.
-pub const DATA_BASE: u64 = 0x41_0000;
+/// Alignment of the writable data area. The base is chosen after the text and
+/// read-only sections are laid out, so the image can grow without the data
+/// colliding with code.
+pub const DATA_ALIGN: u64 = 0x1000;
+
+/// Where the writable data area begins for a finished image. Code that embeds
+/// data addresses uses the same calculation, so text and data stay apart at
+/// any program size.
+pub fn data_base_for(text_len: usize, rodata_len: usize) -> u64 {
+    let end = IMAGE_BASE + TEXT_OFFSET + text_len as u64 + rodata_len as u64;
+    end.div_ceil(DATA_ALIGN) * DATA_ALIGN
+}
 
 fn put_u16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_le_bytes());
@@ -33,19 +43,17 @@ pub fn build(text: &[u8], rodata: &[u8], bss: u64) -> Vec<u8> {
 }
 
 /// Build the executable bytes for a chosen target. `bss` is how many zeroed
-/// bytes the program needs above `DATA_BASE`.
+/// bytes the program needs above the data base.
 pub fn build_for(target: Target, text: &[u8], rodata: &[u8], bss: u64) -> Vec<u8> {
     let filesz = TEXT_OFFSET + text.len() as u64 + rodata.len() as u64;
-    let file_end = IMAGE_BASE + filesz;
+    let data_base = data_base_for(text.len(), rodata.len());
     // Lay the writable data out above the file so the kernel zero-fills it.
-    let data_start = if bss > 0 { DATA_BASE } else { file_end };
     let memsz = if bss > 0 {
-        DATA_BASE + bss - IMAGE_BASE
+        data_base + bss - IMAGE_BASE
     } else {
         filesz
     };
     let entry = IMAGE_BASE + TEXT_OFFSET;
-    let _ = data_start;
 
     let mut out = Vec::with_capacity(filesz as usize);
 
@@ -118,7 +126,15 @@ mod tests {
     fn bss_extends_the_mapping() {
         let elf = build(&[0xC3], b"", 16);
         let memsz = u64::from_le_bytes(elf[64 + 40..64 + 48].try_into().unwrap());
-        assert_eq!(memsz, DATA_BASE + 16 - IMAGE_BASE);
+        assert_eq!(memsz, data_base_for(1, 0) + 16 - IMAGE_BASE);
+    }
+
+    #[test]
+    fn the_data_base_follows_the_text() {
+        let small = data_base_for(1, 0);
+        let large = data_base_for(0x10_0000, 0);
+        assert_eq!(small % DATA_ALIGN, 0);
+        assert!(large >= small + 0x10_0000);
     }
 
     #[test]

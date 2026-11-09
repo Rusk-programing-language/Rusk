@@ -6,6 +6,9 @@
 #   curl --proto '=https' --tlsv1.2 -sSf \
 #     https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset | sh
 #
+# Running it again replaces an existing installation with the requested or
+# latest version, in place.
+#
 # Pick a version, target, or installation directory:
 #
 #   sh toastset --version 1.1.0
@@ -63,6 +66,9 @@ OPTIONS:
   --no-modify-path    do not edit a shell profile
   --uninstall         remove a previous toastset installation
   -h, --help          show this help
+
+If Rusk is already installed, toastset replaces it with the requested or
+latest version (an in-place upgrade).
 
 EXAMPLES:
   sh toastset
@@ -173,6 +179,27 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ -z "$BIN_DIR" ]; then
+    BIN_DIR="$TOASTSET_HOME/bin"
+fi
+
+# A previous install can be replaced in place. Remember what it was so the
+# upgrade is visible in the output.
+PREVIOUS_VERSION=""
+if [ -f "$TOASTSET_HOME/version" ]; then
+    PREVIOUS_VERSION="$(cat "$TOASTSET_HOME/version" 2>/dev/null || true)"
+elif [ -x "$BIN_DIR/rusk" ]; then
+    PREVIOUS_VERSION="$("$BIN_DIR/rusk" version 2>/dev/null | head -n 1 || true)"
+fi
+if [ -x "$BIN_DIR/rusk" ]; then
+    EXISTING=1
+else
+    EXISTING=0
+    if [ -n "$PREVIOUS_VERSION" ]; then
+        EXISTING=1
+    fi
+fi
+
 [ -n "$TARGET" ] || TARGET="$(detect_target)"
 if [ -z "$VERSION" ]; then
     info "looking up the latest Rusk release"
@@ -220,11 +247,13 @@ fi
 tar -xzf "$tmpdir/$archive" -C "$tmpdir"
 [ -f "$tmpdir/$name/rusk" ] || die "the archive didn't contain the rusk binary"
 
-if [ -z "$BIN_DIR" ]; then
-    BIN_DIR="$TOASTSET_HOME/bin"
-fi
 mkdir -p "$BIN_DIR"
-install -m 755 "$tmpdir/$name/rusk" "$BIN_DIR/rusk"
+
+# Install beside the destination and rename into place. Renaming replaces a
+# binary that is still running, where writing through it would fail.
+staged="$BIN_DIR/.rusk.toastset.$$"
+install -m 755 "$tmpdir/$name/rusk" "$staged"
+mv -f "$staged" "$BIN_DIR/rusk"
 
 # Keep a copy of the installer for `toastset --uninstall` and upgrades.
 mkdir -p "$TOASTSET_HOME/bin"
@@ -233,7 +262,15 @@ printf '%s\n' "$VERSION" >"$TOASTSET_HOME/version"
 
 add_to_profile
 
-info "installed rusk $VERSION to $BIN_DIR/rusk"
+if [ "$EXISTING" = "1" ]; then
+    if [ -n "$PREVIOUS_VERSION" ] && [ "$PREVIOUS_VERSION" != "$VERSION" ]; then
+        info "reinstalled rusk $VERSION to $BIN_DIR/rusk (was $PREVIOUS_VERSION)"
+    else
+        info "reinstalled rusk $VERSION to $BIN_DIR/rusk"
+    fi
+else
+    info "installed rusk $VERSION to $BIN_DIR/rusk"
+fi
 case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)

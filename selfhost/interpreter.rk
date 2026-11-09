@@ -1,0 +1,263 @@
+# A Rusk interpreter written in Rusk — the first self-hosting stage.
+#
+# Run it with the bootstrap compiler:
+#
+#     rusk run selfhost/interpreter.rk selfhost/demo.rk
+#
+# The subset is intentionally small but real: integer arithmetic with
+# variables, parentheses, unary minus, `let`, `set`, and `say`. Every part of
+# the interpreter — tokenising, parsing, precedence, and evaluation — is
+# written in Rusk and compiled by Rusk itself.
+
+let names be an empty list of text
+let values be an empty list of numbers
+
+let expr_text be ""
+let expr_pos be 1
+
+to fail with message as a view of text:
+    warn message
+    stop with 1
+    give back 0
+
+to is_digit with c as a view of text:
+    give back c is "0" or c is "1" or c is "2" or c is "3" or c is "4" or c is "5" or c is "6" or c is "7" or c is "8" or c is "9"
+
+to digit_value with c as a view of text:
+    if c is "0":
+        give back 0
+    if c is "1":
+        give back 1
+    if c is "2":
+        give back 2
+    if c is "3":
+        give back 3
+    if c is "4":
+        give back 4
+    if c is "5":
+        give back 5
+    if c is "6":
+        give back 6
+    if c is "7":
+        give back 7
+    if c is "8":
+        give back 8
+    give back 9
+
+to is_space with c as a view of text:
+    give back c is " " or c is "\t"
+
+to is_name_char with c as a view of text:
+    give back not (c is " " or c is "\t" or c is "+" or c is "-" or c is "*" or c is "/" or c is "(" or c is ")")
+
+to trim with s as a view of text:
+    let first be 1
+    while first <= length of s:
+        if not is_space with letter first of s:
+            break
+        set first to first + 1
+    let last be length of s
+    while last >= first:
+        if not is_space with letter last of s:
+            break
+        set last to last - 1
+    if last < first:
+        give back ""
+    give back part first to last of s
+
+to starts_with with s as a view of text and prefix as a view of text:
+    if length of prefix > length of s:
+        give back false
+    let i be 1
+    while i <= length of prefix:
+        if letter i of s is not letter i of prefix:
+            give back false
+        set i to i + 1
+    give back true
+
+to after_prefix with s as a view of text and prefix as a view of text:
+    if length of s <= length of prefix:
+        give back ""
+    give back part (length of prefix + 1) to (length of s) of s
+
+to find_text with s as a view of text and needle as a view of text:
+    if length of needle is 0:
+        give back 0
+    let i be 1
+    while i + length of needle - 1 <= length of s:
+        if part i to (i + length of needle - 1) of s is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+to split_lines with s as a view of text:
+    let out be an empty list of text
+    let start be 1
+    let i be 1
+    while i <= length of s:
+        if letter i of s is "\n":
+            if i > start:
+                add part start to (i - 1) of s to out
+            otherwise:
+                add "" to out
+            set start to i + 1
+        set i to i + 1
+    if start <= length of s:
+        add part start to (length of s) of s to out
+    otherwise:
+        add "" to out
+    give back out
+
+to remember with name as a view of text and value as a number:
+    let i be 1
+    let found be false
+    while i <= length of names:
+        if item i of names is name:
+            set item i of values to value
+            set found to true
+            break
+        set i to i + 1
+    if not found:
+        add copy of name to names
+        add value to values
+
+to value_of with name as a view of text:
+    let i be 1
+    while i <= length of names:
+        if item i of names is name:
+            give back item i of values
+        set i to i + 1
+    fail with "unknown name: " + name
+    give back 0
+
+to skip_spaces:
+    while expr_pos <= length of expr_text:
+        if not is_space with letter expr_pos of expr_text:
+            break
+        set expr_pos to expr_pos + 1
+
+to peek_char:
+    if expr_pos > length of expr_text:
+        give back ""
+    give back letter expr_pos of expr_text
+
+to eval_expr:
+    give back eval_sum
+
+to eval_sum:
+    let left be eval_product
+    while true:
+        skip_spaces
+        let c be peek_char
+        if c is "+":
+            set expr_pos to expr_pos + 1
+            set left to left + eval_product
+        otherwise if c is "-":
+            set expr_pos to expr_pos + 1
+            set left to left - eval_product
+        otherwise:
+            break
+    give back left
+
+to eval_product:
+    let left be eval_atom
+    while true:
+        skip_spaces
+        let c be peek_char
+        if c is "*":
+            set expr_pos to expr_pos + 1
+            set left to left * eval_atom
+        otherwise if c is "/":
+            set expr_pos to expr_pos + 1
+            let right be eval_atom
+            if right is 0:
+                fail with "division by zero"
+            set left to left / right
+        otherwise:
+            break
+    give back left
+
+to eval_atom:
+    skip_spaces
+    let c be peek_char
+    if c is "":
+        fail with "expected a number"
+    if c is "(":
+        set expr_pos to expr_pos + 1
+        let inner be eval_expr
+        skip_spaces
+        if peek_char is not ")":
+            fail with "expected ')'"
+        set expr_pos to expr_pos + 1
+        give back inner
+    if c is "-":
+        set expr_pos to expr_pos + 1
+        give back 0 - eval_atom
+    if not is_digit with c:
+        let start be expr_pos
+        while expr_pos <= length of expr_text:
+            let ch be letter expr_pos of expr_text
+            if not is_name_char with ch:
+                break
+            set expr_pos to expr_pos + 1
+        if expr_pos is start:
+            fail with "expected a number, but found '" + c + "'"
+        let name be part start to (expr_pos - 1) of expr_text
+        give back value_of with name
+    let n be 0
+    while expr_pos <= length of expr_text:
+        let d be letter expr_pos of expr_text
+        if not is_digit with d:
+            break
+        set n to n * 10 + digit_value with d
+        set expr_pos to expr_pos + 1
+    give back n
+
+to eval with text as a view of text:
+    set expr_text to copy of text
+    set expr_pos to 1
+    let value be eval_expr
+    skip_spaces
+    if expr_pos <= length of expr_text:
+        fail with "unexpected '" + peek_char + "'"
+    give back value
+
+to run_line with line as a view of text:
+    if starts_with with line and "let ":
+        let rest be after_prefix with line and "let "
+        let at be find_text with rest and " be "
+        if at is 0:
+            fail with "a 'let' needs 'be'"
+        let name be trim with part 1 to (at - 1) of rest
+        let source be part (at + 4) to (length of rest) of rest
+        remember with name and eval with source
+    otherwise if starts_with with line and "set ":
+        let set_rest be after_prefix with line and "set "
+        let set_at be find_text with set_rest and " to "
+        if set_at is 0:
+            fail with "a 'set' needs 'to'"
+        let set_name be trim with part 1 to (set_at - 1) of set_rest
+        let set_source be part (set_at + 4) to (length of set_rest) of set_rest
+        remember with set_name and eval with set_source
+    otherwise if starts_with with line and "say ":
+        let say_source be after_prefix with line and "say "
+        say eval with say_source
+    otherwise if line is "stop":
+        stop with 0
+    otherwise:
+        fail with "I don't understand: " + line
+
+let path be argument 1
+if length of path is 0:
+    warn "usage: rusk run selfhost/interpreter.rk FILE"
+    stop with 1
+
+let source be read file path
+let lines be split_lines with source
+let i be 1
+while i <= length of lines:
+    let line be trim with item i of lines
+    if length of line > 0:
+        if not starts_with with line and "#":
+            run_line with line
+    set i to i + 1

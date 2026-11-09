@@ -172,6 +172,47 @@ impl Session {
         }
     }
 
+    /// Read a name from the local environment, then from the globals.
+    fn lookup(&self, env: &HashMap<String, Value>, name: &str) -> Option<Value> {
+        env.get(name)
+            .cloned()
+            .or_else(|| self.globals.get(name).cloned())
+    }
+
+    /// Change the name where it lives: a local shadows a global.
+    fn assign(&mut self, env: &mut HashMap<String, Value>, name: &str, value: Value) -> bool {
+        if let Some(slot) = env.get_mut(name) {
+            *slot = value;
+            true
+        } else if let Some(slot) = self.globals.get_mut(name) {
+            *slot = value;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A top-level `let` or `constant` lives in the globals; one inside a
+    /// function lives in that call's environment.
+    fn declare(
+        &mut self,
+        env: &mut HashMap<String, Value>,
+        name: &str,
+        value: Value,
+        constant: bool,
+    ) {
+        if self.depth == 0 {
+            self.globals.insert(name.to_string(), value);
+            if constant {
+                self.constants.insert(name.to_string());
+            } else {
+                self.constants.remove(name);
+            }
+        } else {
+            env.insert(name.to_string(), value);
+        }
+    }
+
     /// Type check a submission against the session, then run it statement by
     /// statement. Statements that run are remembered; a failing statement and
     /// everything after it are dropped.
@@ -192,7 +233,7 @@ impl Session {
         self.sigs = types::check(&whole)?;
         crate::ownership::check(&whole, &self.sigs)?;
 
-        let mut env = std::mem::take(&mut self.globals);
+        let mut env = HashMap::new();
         let mut result = Ok(());
         for stmt in &program.stmts {
             match self.exec_stmt(stmt, &mut env) {
@@ -228,7 +269,6 @@ impl Session {
                 }
             }
         }
-        self.globals = env;
         result
     }
 
@@ -251,14 +291,12 @@ impl Session {
             }
             Stmt::Let { name, value, .. } => {
                 let v = self.eval(value, env)?;
-                env.insert(name.clone(), v);
-                self.constants.remove(name);
+                self.declare(env, name, v, false);
                 Ok(Flow::Normal)
             }
             Stmt::Const { name, value, .. } => {
                 let v = self.eval(value, env)?;
-                env.insert(name.clone(), v);
-                self.constants.insert(name.clone());
+                self.declare(env, name, v, true);
                 Ok(Flow::Normal)
             }
             Stmt::Set { name, value, .. } => {
@@ -269,15 +307,13 @@ impl Session {
                     ));
                 }
                 let v = self.eval(value, env)?;
-                match env.get_mut(name) {
-                    Some(slot) => {
-                        *slot = v;
-                        Ok(Flow::Normal)
-                    }
-                    None => Err(format!(
+                if self.assign(env, name, v) {
+                    Ok(Flow::Normal)
+                } else {
+                    Err(format!(
                         "line {}: I don't know a thing called '{name}' — declare it with 'let {name} be ...' first",
                         self.line
-                    )),
+                    ))
                 }
             }
             Stmt::SetItem {
@@ -313,7 +349,11 @@ impl Session {
                     ));
                 }
                 let v = self.eval(value, env)?;
-                match env.get(name) {
+                let found = env
+                    .get(name)
+                    .cloned()
+                    .or_else(|| self.globals.get(name).cloned());
+                match found {
                     Some(Value::Array(items)) => {
                         items.borrow_mut().push(v);
                         Ok(Flow::Normal)
@@ -321,7 +361,7 @@ impl Session {
                     Some(other) => Err(format!(
                         "line {}: 'add' needs a list, but '{name}' holds {}",
                         self.line,
-                        kind_name(other)
+                        kind_name(&other)
                     )),
                     None => Err(format!(
                         "line {}: I don't know a thing called '{name}'",
@@ -340,7 +380,11 @@ impl Session {
                     Some(index) => Some(self.eval_int(index, env)?),
                     None => None,
                 };
-                match env.get_mut(name) {
+                let found = env
+                    .get(name)
+                    .cloned()
+                    .or_else(|| self.globals.get(name).cloned());
+                match found {
                     Some(Value::Array(items)) => {
                         let mut items = items.borrow_mut();
                         match index {
@@ -367,7 +411,7 @@ impl Session {
                     Some(other) => Err(format!(
                         "line {}: 'remove' needs a list, but '{name}' holds {}",
                         self.line,
-                        kind_name(other)
+                        kind_name(&other)
                     )),
                     None => Err(format!(
                         "line {}: I don't know a thing called '{name}'",
@@ -489,6 +533,10 @@ impl Session {
             }
             Stmt::Import { .. } => Err(format!(
                 "line {}: this import wasn't resolved — imports only work at the top level",
+                self.line
+            )),
+            Stmt::Export { .. } => Err(format!(
+                "line {}: this export wasn't resolved — exports only work at the top level",
                 self.line
             )),
             Stmt::GiveBack(e, _) => Ok(Flow::Return(self.eval(e, env)?)),
@@ -614,8 +662,8 @@ impl Session {
             Expr::Str(s) => Ok(Value::Str(s.as_bytes().to_vec())),
             Expr::Bool(b) => Ok(Value::Bool(*b)),
             Expr::Var(name) => {
-                if let Some(value) = env.get(name) {
-                    return Ok(value.clone());
+                if let Some(value) = self.lookup(env, name) {
+                    return Ok(value);
                 }
                 if let Some(func) = self.funcs.get(name).cloned() {
                     if func.params.is_empty() {
@@ -637,7 +685,7 @@ impl Session {
                 // `f with 1` reads like a named call, but `f` may hold a
                 // function value. Prefer the named function when there is one.
                 if !self.funcs.contains_key(name) {
-                    if let Some(Value::Func(func)) = env.get(name).cloned() {
+                    if let Some(Value::Func(func)) = self.lookup(env, name) {
                         let mut values = Vec::with_capacity(args.len());
                         for arg in args {
                             values.push(self.eval(arg, env)?);
@@ -683,8 +731,8 @@ impl Session {
             Expr::Lambda { params, body } => {
                 let mut captures = HashMap::new();
                 for name in lambda_free_names(params, body) {
-                    if let Some(value) = env.get(&name) {
-                        captures.insert(name, value.clone());
+                    if let Some(value) = self.lookup(env, &name) {
+                        captures.insert(name, value);
                     }
                 }
                 Ok(Value::Func(Rc::new(FuncValue {
@@ -1145,7 +1193,7 @@ impl Session {
                 let gives = self
                     .sigs
                     .get(name)
-                    .map(|sig| sig.ret)
+                    .map(|sig| sig.ret.clone())
                     .unwrap_or(Ty::Nothing);
                 if params.is_empty() {
                     lines.push(format!("to {name}: gives back {gives}"));
@@ -1784,6 +1832,18 @@ blank line. An expression on its own line shows its value, as in Python."
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn functions_read_and_change_globals() {
+        let mut session = Session::new();
+        session.submit("let total be 0\n").unwrap();
+        session
+            .submit("to bump with n as a number:\n    set total to total + n\n\n")
+            .unwrap();
+        session.submit("bump with 2\n").unwrap();
+        session.submit("bump with 3\n").unwrap();
+        assert_eq!(session.globals["total"], Value::Int(5));
+    }
 
     #[test]
     fn values_and_functions_persist_between_submissions() {

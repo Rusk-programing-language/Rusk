@@ -24,17 +24,31 @@ syscalls.
 
 ## Status
 
-v1.0 completes the everyday language: **shared read-only views**, **function
-values**, and **closures**. A `view` lends text or a list to a function without
-moving it, so the caller keeps using it afterwards. `the function double` makes
-a named function into a value, `call f with ...` calls one, and
-`let f be a function with ...:` captures the values around it. v0.9's nested
-lists and module namespaces are unchanged.
+v1.1 makes functions first-class: **function-typed parameters**, **function
+values in lists**, **functions that give back functions**, and closures that
+can do all three. A kind such as
+`a function taking a number giving back a number` can now name a parameter or
+a list item, and `a function with ...:` is an ordinary expression. Functions
+can also read and change the top-level names around them.
+
+The backends grew up too. The x86-64 encoder now keeps values in real registers
+inside each straight-line block instead of round-tripping every virtual
+register through memory, and the writable data area is placed after the final
+text size rather than at a fixed address, so big programs no longer collide
+with their own data.
+
+Files can also be joined directly: `export "other.rk"` includes another
+file's content or chosen functions, and a line containing only `end` or `<e>`
+closes a file so chained sources do not run into each other.
 
 The compiler is a lexer, parser, import expander, type checker, ownership
 checker, target-selecting code generator, two machine-code backends, and an ELF
-writer, with **226 tests**. The end-to-end suite also runs against x86-64 under
+writer, with **245 tests**. The end-to-end suite also runs against x86-64 under
 QEMU. It targets **Linux on AArch64 and x86-64**.
+
+The first self-hosting step also lives in the tree: `selfhost/interpreter.rk`
+is an integer-expression interpreter written in Rusk and compiled by Rusk. See
+[Self-hosting](#self-hosting).
 
 ## Quick start
 
@@ -51,6 +65,20 @@ cargo run -- check examples/numbers.rk   # bake without writing anything
 ```
 
 Or install the `rusk` binary from `target/release/` somewhere on your `PATH`.
+
+The curl-friendly installer, `toastset`, fetches a prebuilt release. Running it
+again upgrades an existing installation in place:
+
+```console
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset | sh
+```
+
+```console
+sh toastset --version 1.1.0
+sh toastset --target aarch64-unknown-linux-gnu
+sh toastset --bin-dir "$HOME/.local/bin"
+```
 
 ## A taste of the language
 
@@ -171,6 +199,21 @@ say sign
 Numbers and truth values are plain machine words, so they are copied freely
 and never move. The rule is checked before code generation, not at runtime.
 
+Top-level names are visible inside functions. A function may read a global and
+change it with `set` or `add`; it cannot move it, because the top level keeps
+owning it. A local name can shadow a global:
+
+```rusk
+let total be 0
+
+to bump with n as a number:
+    set total to total + n
+
+bump with 2
+bump with 3
+say total                     # 5
+```
+
 Programs can talk to the system without a library:
 
 ```rusk
@@ -202,11 +245,19 @@ import "lib/units" as units     # units.convert, units.ratio, ...
 from "lib/text" import trim     # trim, without a prefix
 from "lib/text" import pad as pad_left
 
+export "lib/greetings"          # include all of it as this file's content
+export double from "lib/math"   # include just one function
+export double, trim             # declare exported names
+
 say greeting with "world"
 say math_square with 12
 say units.convert with 3
 say pad_left with "x"
 ```
+
+A line containing only `end`, `end.`, `<e>`, `</e>`, or `end of file` stops the
+file there, so chained or concatenated files do not run into each other. That
+also lets `export` stop at the other file's own boundary.
 
 Functions name a piece of work and can hand a value back:
 
@@ -256,10 +307,36 @@ say call add_base with 5      # 15
 A function written with `a function with ...:` is a **closure**: it captures
 the names around it. Numbers and truth values are copied into the closure; text
 and lists are captured as shared read-only views, so the closure can read them
-but not move or change them. Function values can be called, stored in a
-variable, and captured by another closure. They cannot be put in a list,
-compared, copied, printed, or given back; a function value also cannot be
-passed as an argument, because parameter kinds have no function form yet.
+but not move or change them.
+
+Kinds can describe functions, so functions can be passed, listed, and given
+back:
+
+```rusk
+to apply with f as a function taking a number giving back a number and n as a number:
+    give back call f with n
+
+to twice with n as a number:
+    give back n * 2
+
+say apply with the function twice and 21      # 42
+
+let steps be [the function twice]
+add a function with n as a number:
+    give back n + 1
+to steps
+say call (item 2 of steps) with 41            # 42
+```
+
+Two function parameters are separated by a comma:
+`a function taking a number, text giving back a truth value`. A function with
+no parameters is `a function giving back a number`. A list of functions is
+`a list of functions taking ... giving back ...`, which also works with
+`an empty list of functions ...`.
+
+Function values may be stored, copied with `copy of`, put in lists, printed
+(`<function>`), and given back. They still cannot be compared. A dynamic call
+checks both the number of arguments and their kinds.
 
 Everything is line-based, blocks are colon-plus-indentation, and `#` starts a
 comment. Full reference: [docs/SPEC.md](docs/SPEC.md). A hands-on tour lives in
@@ -275,7 +352,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.0.0 — an English-like language
+Rusk 1.1.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -357,7 +434,7 @@ ownership   one owner per text value and list
 | `src/codegen.rs` | AST to machine code; stack-machine expression evaluation, stack frames |
 | `src/backend.rs` | Target selection and the common assembly interface |
 | `src/aarch64.rs` | Hand-written AArch64 encoder and branch/address fixups |
-| `src/x86_64.rs` | Hand-written x86-64 encoder with memory-backed virtual registers |
+| `src/x86_64.rs` | Hand-written x86-64 encoder with a register allocator for virtual registers |
 | `src/elf.rs` | Static ELF64 executable writer for either target |
 | `src/repl.rs` | Interactive session: tree-walking evaluator, line prompt, and full-screen loop |
 | `src/tui.rs` | Native terminal UI: raw mode, ANSI frames, key decoding, resize fallback |
@@ -365,14 +442,19 @@ ownership   one owner per text value and list
 
 Runtime facts worth knowing:
 
-- Code starts at `0x400000 + 0x78`; top-level variables and the number buffer
-  live at `0x410000` in the zero-filled part of the same segment.
+- Code starts at `0x400000 + 0x78`. The writable data area is placed on the
+  next 4 KiB boundary after the text and read-only sections, so its address is
+  computed at the end of code generation instead of being fixed. Top-level
+  variables, the number buffer, file-path scratch space, the heap, and the
+  x86-64 register homes all live in that data area.
 - The code generator speaks one small virtual-register language: arguments go
   in `X0..X7`, results come back in `X0`, and the frame pointer is `X29`.
-  AArch64 uses those registers directly. x86-64 keeps the virtual registers in
-  a zeroed block at `0x418000`, uses the real `rsp` for `SP`, and lowers every
-  instruction to one or more x86-64 operations. The return address lives on the
-  process stack rather than in `X30`.
+  AArch64 uses those registers directly. x86-64 maps virtual registers onto a
+  pool of six caller-saved physical registers inside each straight-line block,
+  writes them back at labels, branches, calls, returns, and syscalls, and uses
+  the real `rsp` for `SP`. Its home slots and every data address are patched
+  once the text size is known. The return address lives on the process stack
+  rather than in `X30`.
 - Strings are stored as `[len: u64][bytes...]`, so a string value is just a
   pointer to its length. Joining two strings bumps a 1 MiB heap in the data
   area and copies both byte blobs into it.
@@ -405,23 +487,22 @@ Runtime facts worth knowing:
 - Runtime guards turn three machine-level failures into Rusk sentences on
   standard error with exit status 1: division by zero, heap exhaustion, and
   recursion deeper than 1000 calls.
-- Everything is position-independent-free and fixed-address; there is no
-  relocation pass at runtime.
+- Everything is fixed-address and loaded by the kernel; there is no runtime
+  relocation pass. Data addresses are patched into the finished machine code,
+  so growing the text section moves the data instead of colliding with it.
 
-## What v1.0 doesn't do yet
+## What v1.1 doesn't do yet
 
 Honest list, so the docs don't lie:
 
 - Text is immutable. Joining allocates from a fixed 1 MiB heap, and nothing is
-  reclaimed. Running past the end is now a Rusk error rather than a crash.
+  reclaimed. Running past the end is a Rusk error rather than a crash.
 - Ownership is single-owner. A `view` lends a value read-only, but a view
   cannot be changed, moved, stored, or used where an owner is needed; `copy of`
   is still the escape hatch. Views do not extend a value's lifetime beyond the
   frame that owns it.
-- Function values are one value at a time: they cannot be stored in lists,
-  compared, copied, printed, or given back. A function value cannot be passed
-  to a function, because parameter kinds have no function form yet. Calls
-  through a function value check the number of arguments, not their kinds.
+- Function values cannot be compared. Everything else about them is ordinary:
+  they can be stored, copied, printed, listed, passed, and given back.
 - Lists are homogeneous and may nest, but they cannot be compared. Their
   contents can be replaced with `set item`, `add VALUE to LIST` appends with
   spare capacity, and `remove last from LIST` / `remove item N from LIST`
@@ -430,17 +511,40 @@ Honest list, so the docs don't lie:
 - System I/O is intentionally small: text files and standard streams only, no
   directories, sockets, processes, or random access. A path is limited by the
   4 KiB scratch area, and reading stops when the 1 MiB heap is full.
-- Imports have two styles: plain textual inclusion in one global namespace, or
-  named/selective modules. There are no re-exports, package manifests, or a
-  standard module registry.
+- Imports and exports have plain, named, and selective forms. There are no
+  package manifests or a standard module registry.
 - Text positions count bytes, not Unicode characters.
-- At most 8 parameters per function. There are no function-typed parameters and
-  no overloading.
+- At most 8 parameters per function. There is no overloading.
 - Linux only, on AArch64 or x86-64. There is no macOS, Windows, or 32-bit
   backend.
-- The x86-64 backend keeps virtual registers in memory, so it is slower and
-  larger than the AArch64 output. It is correct first, fast later.
+- The x86-64 register allocator works within straight-line blocks and spills at
+  every branch and call. It is much closer to AArch64 than the old
+  memory-backed encoder, but it is not a global allocator yet.
 - The single load segment is RWX, which is convenient but not hardened.
+- Self-hosting is an interpreter stage. The Rusk compiler itself is still
+  written in Rust; `selfhost/interpreter.rk` runs a small integer-expression
+  language, not all of Rusk.
+
+## Self-hosting
+
+`selfhost/interpreter.rk` is a Rusk program that interprets a small Rusk-like
+language. It handles `let`, `set`, `say`, integer arithmetic, parentheses,
+unary minus, and variables, and it is itself compiled by Rusk:
+
+```console
+cargo run -- run selfhost/interpreter.rk selfhost/demo.rk
+```
+
+```text
+42
+15
+51
+```
+
+The interpreter is a real bootstrap step: every part of it — tokenising,
+parsing, precedence, and evaluation — is written in Rusk and baked to a static
+ELF with the same compiler that runs it. Full compiler self-hosting is the next
+stage, not a claim of this release.
 
 ## Why the name
 

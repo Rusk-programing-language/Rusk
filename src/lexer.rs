@@ -78,7 +78,24 @@ pub struct Token {
     pub line: usize,
 }
 
+/// A line that is just `end`, `end.`, `<e>`, `</e>`, or `end of file` closes
+/// the file. Everything after it is ignored, so two files can be joined into
+/// one stream without the first file swallowing the second.
+fn cut_at_end_marker(src: &str) -> &str {
+    let mut offset = 0;
+    for line in src.split_inclusive('\n') {
+        let text = line.trim_end_matches(['\n', '\r']);
+        let code = text.split('#').next().unwrap_or("").trim();
+        if matches!(code, "end" | "end." | "<e>" | "</e>" | "end of file") {
+            return &src[..offset];
+        }
+        offset += line.len();
+    }
+    src
+}
+
 pub fn lex(src: &str) -> Result<Vec<Token>, String> {
+    let src = cut_at_end_marker(src);
     let chars: Vec<char> = src.chars().collect();
     let n = chars.len();
     let mut toks: Vec<Token> = Vec::new();
@@ -418,5 +435,40 @@ mod tests {
     fn bad_indent_is_an_error() {
         let src = "if x:\n    say \"a\"\n  say \"b\"\n";
         assert!(lex(src).is_err());
+    }
+
+    fn words(src: &str) -> Vec<String> {
+        lex(src)
+            .unwrap()
+            .into_iter()
+            .filter_map(|t| match t.tok {
+                Tok::Ident(w) => Some(w),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn end_marker_stops_the_file() {
+        assert_eq!(words("say \"before\"\nend\nsay \"after\"\n"), vec!["say"]);
+        assert_eq!(words("say \"before\"\nend.\nsay \"after\"\n"), vec!["say"]);
+        assert_eq!(words("say \"before\"\n<e>\nsay \"after\"\n"), vec!["say"]);
+        assert_eq!(words("say \"before\"\n</e>\nsay \"after\"\n"), vec!["say"]);
+        assert_eq!(
+            words("say \"before\"\nend of file\nsay \"after\"\n"),
+            vec!["say"]
+        );
+        assert_eq!(
+            words("say \"before\"\nend # stop\nsay \"after\"\n"),
+            vec!["say"]
+        );
+    }
+
+    #[test]
+    fn end_marker_needs_its_own_line() {
+        assert_eq!(
+            words("let end be 1\nsay end\n"),
+            vec!["let", "end", "be", "say", "end"]
+        );
     }
 }

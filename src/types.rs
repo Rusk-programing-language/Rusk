@@ -9,6 +9,7 @@
 
 use crate::ast::*;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sig {
@@ -26,10 +27,13 @@ struct SigInfer {
 
 type Sigs = HashMap<String, SigInfer>;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Scoped {
     ty: Option<Ty>,
     constant: bool,
+    /// A top-level name. A function body may declare a local with the same
+    /// name; the local shadows the global from there on.
+    global: bool,
 }
 
 type Scope = HashMap<String, Scoped>;
@@ -64,18 +68,22 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
         .collect();
 
     // Fixed-point iteration: each pass may learn a return kind from a function
-    // we could not type before.
+    // we could not type before. Globals are re-derived every pass with the
+    // current signatures, because a top-level `let` can call a function.
     let mut sigs: Sigs = build_sigs(&defs, &rets);
-    for _ in 0..defs.len() + 2 {
+    let passes = defs.len() + program.stmts.len() + 4;
+    for _ in 0..passes {
         let mut changed = false;
+        let global_scope = global_scope(&program.stmts, &sigs)?;
         for (name, params, body, _line) in &defs {
-            let mut scope: Scope = HashMap::new();
+            let mut scope = global_scope.clone();
             for p in params.iter() {
                 scope.insert(
                     p.name.clone(),
                     Scoped {
-                        ty: Some(p.ty),
+                        ty: Some(p.ty.clone()),
                         constant: false,
+                        global: false,
                     },
                 );
             }
@@ -95,7 +103,8 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
         sigs = build_sigs(&defs, &rets);
     }
 
-    // Top-level statements, with no functions' returns in play.
+    // Top-level statements, with their own scope; functions were checked above
+    // with every global in view.
     let mut scope: Scope = HashMap::new();
     let mut stray: Option<Ty> = None;
     for stmt in &program.stmts {
@@ -114,7 +123,7 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
 
     let mut out = HashMap::new();
     for (name, params, _body, line) in &defs {
-        let ret = match rets[*name] {
+        let ret = match rets[*name].clone() {
             Some(t) => t,
             None if saw_return[*name] => {
                 return Err(format!(
@@ -126,13 +135,61 @@ pub fn check(program: &Program) -> Result<HashMap<String, Sig>, String> {
         out.insert(
             (*name).clone(),
             Sig {
-                params: params.iter().map(|p| p.ty).collect(),
+                params: params.iter().map(|p| p.ty.clone()).collect(),
                 borrowed: params.iter().map(|p| p.borrowed).collect(),
                 ret,
             },
         );
     }
     Ok(out)
+}
+
+/// The names a function body can see from the top level: every `let` and
+/// `constant` declared there. Their kinds are inferred in source order with
+/// the signatures known so far, so a global that calls a function resolves on
+/// a later pass.
+fn global_scope(stmts: &[Stmt], sigs: &Sigs) -> Result<Scope, String> {
+    let mut scope = Scope::new();
+    for stmt in stmts {
+        if matches!(stmt, Stmt::FuncDef { .. }) {
+            continue;
+        }
+        match stmt {
+            Stmt::Let { name, value, line } => {
+                if scope.contains_key(name) {
+                    return Err(at(
+                        *line,
+                        format!("'{name}' already exists — use 'set {name} to ...' to change it"),
+                    ));
+                }
+                let ty = type_of(value, &scope, sigs).map_err(|m| at(*line, m))?;
+                scope.insert(
+                    name.clone(),
+                    Scoped {
+                        ty,
+                        constant: false,
+                        global: true,
+                    },
+                );
+            }
+            Stmt::Const { name, value, line } => {
+                if scope.contains_key(name) {
+                    return Err(at(*line, format!("'{name}' already exists")));
+                }
+                let ty = type_of(value, &scope, sigs).map_err(|m| at(*line, m))?;
+                scope.insert(
+                    name.clone(),
+                    Scoped {
+                        ty,
+                        constant: true,
+                        global: true,
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    Ok(scope)
 }
 
 fn build_sigs(
@@ -144,8 +201,8 @@ fn build_sigs(
             (
                 (*name).clone(),
                 SigInfer {
-                    params: params.iter().map(|p| p.ty).collect(),
-                    ret: rets[*name],
+                    params: params.iter().map(|p| p.ty.clone()).collect(),
+                    ret: rets[*name].clone(),
                 },
             )
         })
@@ -171,15 +228,9 @@ fn infer_stmts(
                             .into(),
                     ));
                 }
-                if matches!(t, Some(Ty::Func(_))) {
-                    return Err(at(
-                        *line,
-                        "that's a function value — call it with 'call ... with ...' first".into(),
-                    ));
-                }
             }
             Stmt::Let { name, value, line } => {
-                if scope.contains_key(name) {
+                if scope.get(name).is_some_and(|old| !old.global) {
                     return Err(at(
                         *line,
                         format!("'{name}' already exists — use 'set {name} to ...' to change it"),
@@ -191,11 +242,12 @@ fn infer_stmts(
                     Scoped {
                         ty: t,
                         constant: false,
+                        global: false,
                     },
                 );
             }
             Stmt::Const { name, value, line } => {
-                if scope.contains_key(name) {
+                if scope.get(name).is_some_and(|old| !old.global) {
                     return Err(at(*line, format!("'{name}' already exists")));
                 }
                 let t = type_of(value, scope, sigs).map_err(|m| at(*line, m))?;
@@ -204,13 +256,14 @@ fn infer_stmts(
                     Scoped {
                         ty: t,
                         constant: true,
+                        global: false,
                     },
                 );
             }
             Stmt::Set { name, value, line } => {
                 let old = scope
                     .get(name)
-                    .copied()
+                    .cloned()
                     .ok_or_else(|| at(*line, format!("I don't know a thing called '{name}'")))?;
                 if old.constant {
                     return Err(at(
@@ -219,7 +272,7 @@ fn infer_stmts(
                     ));
                 }
                 let t = type_of(value, scope, sigs).map_err(|m| at(*line, m))?;
-                if let (Some(a), Some(b)) = (old.ty, t) {
+                if let (Some(a), Some(b)) = (&old.ty, &t) {
                     if a != b {
                         return Err(at(
                             *line,
@@ -232,6 +285,7 @@ fn infer_stmts(
                     Scoped {
                         ty: t.or(old.ty),
                         constant: false,
+                        global: old.global,
                     },
                 );
             }
@@ -274,7 +328,7 @@ fn infer_stmts(
             Stmt::AddTo { value, name, line } => {
                 let old = scope
                     .get(name)
-                    .copied()
+                    .cloned()
                     .ok_or_else(|| at(*line, format!("I don't know a thing called '{name}'")))?;
                 if old.constant {
                     return Err(at(
@@ -316,7 +370,7 @@ fn infer_stmts(
                 }
                 let old = scope
                     .get(name)
-                    .copied()
+                    .cloned()
                     .ok_or_else(|| at(*line, format!("I don't know a thing called '{name}'")))?;
                 if old.constant {
                     return Err(at(
@@ -344,12 +398,6 @@ fn infer_stmts(
                         *line,
                         "that function doesn't give anything back, so there's nothing to warn about"
                             .into(),
-                    ));
-                }
-                if matches!(t, Some(Ty::Func(_))) {
-                    return Err(at(
-                        *line,
-                        "that's a function value — call it with 'call ... with ...' first".into(),
                     ));
                 }
             }
@@ -448,6 +496,7 @@ fn infer_stmts(
                     Scoped {
                         ty: Some(Ty::Int),
                         constant: false,
+                        global: false,
                     },
                 );
                 infer_stmts(body, scope, sigs, out, allow_return, loops + 1)?;
@@ -482,6 +531,7 @@ fn infer_stmts(
                     Scoped {
                         ty: elem.map(|e| e.ty()),
                         constant: false,
+                        global: false,
                     },
                 );
                 infer_stmts(body, scope, sigs, out, allow_return, loops + 1)?;
@@ -502,13 +552,6 @@ fn infer_stmts(
                     ));
                 }
                 let t = type_of(e, scope, sigs).map_err(|m| at(*line, m))?;
-                if matches!(t, Some(Ty::Func(_))) {
-                    return Err(at(
-                        *line,
-                        "v1.0 functions can't give back another function — call it instead"
-                            .to_string(),
-                    ));
-                }
                 if let Some(t) = t {
                     match out {
                         Some(old) if *old != t => {
@@ -545,6 +588,12 @@ fn infer_stmts(
                     "this import wasn't resolved — imports only work at the top level".to_string(),
                 ))
             }
+            Stmt::Export { line, .. } => {
+                return Err(at(
+                    *line,
+                    "this export wasn't resolved — exports only work at the top level".to_string(),
+                ))
+            }
         }
     }
     Ok(())
@@ -557,7 +606,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
         Expr::Bool(_) => Ok(Some(Ty::Bool)),
         Expr::Var(name) => {
             if let Some(t) = scope.get(name) {
-                return Ok(t.ty);
+                return Ok(t.ty.clone());
             }
             if let Some(sig) = sigs.get(name) {
                 if !sig.params.is_empty() {
@@ -567,7 +616,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                         if sig.params.len() == 1 { "" } else { "s" }
                     ));
                 }
-                return Ok(sig.ret);
+                return Ok(sig.ret.clone());
             }
             Err(format!(
                 "I don't know a thing called '{name}' — declare it with 'let {name} be ...' first"
@@ -582,7 +631,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                     ..
                 }) = scope.get(name)
                 {
-                    return type_dynamic_call(name, *ft, args, scope, sigs);
+                    return type_dynamic_call(name, ft.as_ref(), args, scope, sigs);
                 }
                 return Err(format!("I don't know a function called '{name}'"));
             };
@@ -606,7 +655,7 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                     }
                 }
             }
-            Ok(sig.ret)
+            Ok(sig.ret.clone())
         }
         Expr::CallValue { func, args } => {
             let ft = match type_of(func, scope, sigs)? {
@@ -619,45 +668,52 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                 }
                 None => return Ok(None),
             };
-            type_dynamic_call("this function value", ft, args, scope, sigs)
+            type_dynamic_call("this function value", &ft, args, scope, sigs)
         }
         Expr::FuncRef(name) => {
             let Some(sig) = sigs.get(name) else {
                 return Err(format!("I don't know a function called '{name}'"));
             };
-            let Some(ret) = sig.ret else {
+            if sig.params.len() > 8 {
+                return Err("a function can't take more than 8 things".to_string());
+            }
+            let Some(ret) = sig.ret.clone() else {
                 return Ok(None);
             };
-            let ret = RetTy::from_ty(ret).ok_or_else(|| {
-                "v1.0 functions can't give back another function — call it instead".to_string()
-            })?;
-            let arity = u8::try_from(sig.params.len())
-                .map_err(|_| "a function can't take more than 255 things".to_string())?;
-            Ok(Some(Ty::Func(FuncTy { arity, ret })))
+            if ret == Ty::Nothing {
+                return Err(format!(
+                    "'{name}' gives nothing back, so it can't be used as a function value"
+                ));
+            }
+            Ok(Some(Ty::Func(Rc::new(FuncTy {
+                params: sig.params.clone(),
+                ret,
+            }))))
         }
         Expr::Lambda { params, body } => {
-            let arity = u8::try_from(params.len())
-                .map_err(|_| "a function value can't take more than 255 things".to_string())?;
+            if params.len() > 8 {
+                return Err("a function value can't take more than 8 things".to_string());
+            }
             let mut inner = scope.clone();
             for param in params {
                 inner.insert(
                     param.name.clone(),
                     Scoped {
-                        ty: Some(param.ty),
+                        ty: Some(param.ty.clone()),
                         constant: false,
+                        global: false,
                     },
                 );
             }
             let mut out = None;
             infer_stmts(body, &mut inner, sigs, &mut out, true, 0)?;
             let ret = match out {
-                Some(t) => RetTy::from_ty(t).ok_or_else(|| {
-                    "v1.0 functions can't give back another function — call it instead".to_string()
-                })?,
+                Some(t) => t,
                 None if has_give_back(body) => return Ok(None),
-                None => RetTy::Nothing,
+                None => Ty::Nothing,
             };
-            Ok(Some(Ty::Func(FuncTy { arity, ret })))
+            let params = params.iter().map(|p| p.ty.clone()).collect();
+            Ok(Some(Ty::Func(Rc::new(FuncTy { params, ret }))))
         }
         Expr::View(inner) => match type_of(inner, scope, sigs)? {
             Some(Ty::Nothing) => Err("there's nothing to view".to_string()),
@@ -676,15 +732,15 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
         Expr::Letter(index, text) => {
             let it = type_of(index, scope, sigs)?;
             let tt = type_of(text, scope, sigs)?;
-            if let Some(t) = it {
-                if t != Ty::Int {
+            if let Some(t) = &it {
+                if *t != Ty::Int {
                     return Err(format!(
                         "the letter number must be a number, but this is {t}"
                     ));
                 }
             }
-            if let Some(t) = tt {
-                if t != Ty::Str {
+            if let Some(t) = &tt {
+                if *t != Ty::Str {
                     return Err(format!("'letter ... of' needs text, but this is {t}"));
                 }
             }
@@ -695,8 +751,8 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
         }
         Expr::Part { text, from, to } => {
             let tt = type_of(text, scope, sigs)?;
-            if let Some(t) = tt {
-                if t != Ty::Str {
+            if let Some(t) = &tt {
+                if *t != Ty::Str {
                     return Err(format!("'part ... of' needs text, but this is {t}"));
                 }
             }
@@ -733,22 +789,18 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                     Some(Ty::Nothing) => {
                         return Err("nothing can go in a list".to_string());
                     }
-                    Some(Ty::Func(_)) => {
-                        return Err("function values can't go in a list — keep it in a variable"
-                            .to_string());
-                    }
                     Some(t) => {
-                        let this = Elem::from_ty(t).expect("checked non-nothing value");
-                        match elem {
-                            Some(old) if old != this => {
+                        let this = Elem::from_ty(&t).expect("checked non-nothing value");
+                        if let Some(old) = &elem {
+                            if *old != this {
                                 return Err(format!(
                                     "this list mixes {} and {} — a list holds one kind of thing",
                                     old.ty(),
                                     this.ty()
-                                ))
+                                ));
                             }
-                            _ => elem = Some(this),
                         }
+                        elem = Some(this);
                     }
                 }
             }
@@ -757,16 +809,13 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }
             Ok(elem.map(Ty::Array))
         }
-        Expr::EmptyArray(elem) => Ok(Some(Ty::Array(*elem))),
+        Expr::EmptyArray(elem) => Ok(Some(Ty::Array(elem.clone()))),
         Expr::Copy(inner) => {
             let t = type_of(inner, scope, sigs)?;
             match t {
                 Some(Ty::Nothing) => {
                     Err("there's nothing to copy — that function gives nothing back".to_string())
                 }
-                Some(Ty::Func(_)) => Err(
-                    "a function value is already shared, so there's nothing to copy".to_string(),
-                ),
                 other => Ok(other),
             }
         }
@@ -886,33 +935,40 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
     }
 }
 
-/// Type a call through a function value. Parameter kinds are not part of a
-/// function value's type in v1.0, so only the number of arguments is checked.
+/// Type a call through a function value. The full signature is known, so both
+/// the number of arguments and their kinds are checked.
 fn type_dynamic_call(
     name: &str,
-    ft: FuncTy,
+    ft: &FuncTy,
     args: &[Expr],
     scope: &Scope,
     sigs: &Sigs,
 ) -> Result<Option<Ty>, String> {
-    if args.len() != ft.arity as usize {
+    if args.len() != ft.arity() {
         return Err(format!(
             "{name} takes {} thing{}, but got {}",
-            ft.arity,
-            if ft.arity == 1 { "" } else { "s" },
+            ft.arity(),
+            if ft.arity() == 1 { "" } else { "s" },
             args.len()
         ));
     }
-    for arg in args {
+    for (i, arg) in args.iter().enumerate() {
         if let Some(t) = type_of(arg, scope, sigs)? {
             if t == Ty::Nothing {
                 return Err(
                     "a function that gives nothing back can't be passed as a thing".to_string(),
                 );
             }
+            if t != ft.params[i] {
+                return Err(format!(
+                    "argument {} of {name} should be {}, but this is {t}",
+                    i + 1,
+                    ft.params[i]
+                ));
+            }
         }
     }
-    Ok(Some(ft.ret.ty()))
+    Ok(Some(ft.ret.clone()))
 }
 
 /// Does a closure body return from its own level? Nested function definitions
@@ -945,8 +1001,9 @@ pub fn type_of_with(
             (
                 name.clone(),
                 Scoped {
-                    ty: Some(*ty),
+                    ty: Some(ty.clone()),
                     constant: false,
+                    global: false,
                 },
             )
         })
@@ -958,7 +1015,7 @@ pub fn type_of_with(
                 name.clone(),
                 SigInfer {
                     params: sig.params.clone(),
-                    ret: Some(sig.ret),
+                    ret: Some(sig.ret.clone()),
                 },
             )
         })
@@ -1262,28 +1319,23 @@ say call f
     }
 
     #[test]
-    fn function_values_are_rejected_where_they_make_no_sense() {
+    fn function_values_can_be_listed_printed_and_copied() {
         let base = "\
 to double with n as a number:
     give back n * 2
 let f be the function double
 ";
 
-        let err = check_src(&format!("{base}let fs be [f]\n")).unwrap_err();
-        assert!(err.contains("can't go in a list"), "{err}");
+        check_src(&format!("{base}let fs be [f]\n")).unwrap();
+        check_src(&format!("{base}say f\n")).unwrap();
+        check_src(&format!("{base}let g be copy of f\n")).unwrap();
 
         let err = check_src(&format!("{base}say f is f\n")).unwrap_err();
         assert!(err.contains("don't compare"), "{err}");
-
-        let err = check_src(&format!("{base}say f\n")).unwrap_err();
-        assert!(err.contains("call it with 'call"), "{err}");
-
-        let err = check_src(&format!("{base}let g be copy of f\n")).unwrap_err();
-        assert!(err.contains("already shared"), "{err}");
     }
 
     #[test]
-    fn functions_cannot_give_back_functions_in_v1() {
+    fn functions_can_give_back_functions() {
         let src = "\
 to double with n as a number:
     give back n * 2
@@ -1292,7 +1344,46 @@ to get:
     let f be the function double
     give back f
 ";
+        let sigs = check_src(src).unwrap();
+        assert_eq!(
+            sigs["get"].ret.to_string(),
+            "a function taking a number giving back a number"
+        );
+    }
+
+    #[test]
+    fn function_parameters_are_checked() {
+        let src = "\
+to double with n as a number:
+    give back n * 2
+
+to apply with f as a function taking a number giving back a number and n as a number:
+    give back call f with n
+
+say apply with the function double and 2
+";
+        check_src(src).unwrap();
+
+        let bad = "\
+to double with n as a number:
+    give back n * 2
+
+to apply with f as a function taking text giving back a number and n as a number:
+    give back call f with n
+";
+        let err = check_src(bad).unwrap_err();
+        assert!(err.contains("should be text"), "{err}");
+    }
+
+    #[test]
+    fn dynamic_calls_check_argument_kinds() {
+        let src = "\
+to double with n as a number:
+    give back n * 2
+let f be the function double
+say call f with \"x\"
+";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("can't give back another function"), "{err}");
+        assert!(err.contains("should be a number"), "{err}");
     }
 }

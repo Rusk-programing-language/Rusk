@@ -1,10 +1,13 @@
 //! A tiny x86-64 machine-code emitter — the second Rusk backend.
 //!
 //! The Rusk code generator is written against a small virtual register machine
-//! with `X0..X30`, `SP`, and `XZR`. This module keeps those virtual registers
-//! in a fixed block of zeroed memory and translates each operation into real
-//! x86-64 instructions. `SP` is the real process stack pointer, so frames,
-//! pushes, calls, and returns behave the way the AArch64 emitter expects.
+//! with `X0..X30`, `SP`, and `XZR`. Each virtual register has a home slot in a
+//! fixed block of zeroed memory, and this module *allocates* those virtual
+//! registers to real x86-64 registers inside each straight-line block. Values
+//! are written back when a block ends, when control leaves the block, or when
+//! the small physical register pool needs a slot for something else. `SP` is
+//! the real process stack pointer, so frames, pushes, calls, and returns
+//! behave the way the AArch64 emitter expects.
 //!
 //! Target: x86-64 Linux, little endian, `syscall`.
 
@@ -23,10 +26,23 @@ const RDI: u8 = 7;
 const R8: u8 = 8;
 const R9: u8 = 9;
 const R10: u8 = 10;
+const R11: u8 = 11;
 
-/// Where the virtual registers live. This is inside the zero-filled data area
-/// reserved by the code generator (well below the text heap at +0x10000).
-const VREG_BASE: u64 = 0x41_8000;
+/// Physical registers the allocator may hand to virtual registers. These are
+/// caller-saved and not used as scratch by the instruction encoders, so a
+/// cached value survives until the next branch, call, or syscall.
+const POOL: [u8; 6] = [RSI, RDI, R8, R9, R10, R11];
+
+fn in_pool(phys: u8) -> bool {
+    POOL.contains(&phys)
+}
+
+/// Offset of the virtual-register home slots inside the writable data area.
+/// It sits just past the text heap, so globals and heap growth can never
+/// overwrite the register file.
+pub const VREG_OFFSET: u64 = 0x11_0000;
+/// Bytes reserved after `VREG_OFFSET` for the home slots.
+pub const VREG_OFFSET_SLACK: u64 = 256;
 
 // AArch64 syscall numbers are what the code generator emits. x86-64 uses its
 // own numbers, so `mov_imm64(X8, ...)` translates them for us.
@@ -56,6 +72,19 @@ enum Fixup {
         at: usize,
         label: String,
     },
+    /// Absolute address of an offset into the writable data area. The base is
+    /// chosen once the text and read-only sections are final.
+    Data {
+        at: usize,
+        offset: u64,
+    },
+    /// Absolute address of a virtual register's home slot. Patching these
+    /// keeps the register file next to the rest of the data even as the text
+    /// section grows.
+    Vreg {
+        at: usize,
+        reg: u8,
+    },
 }
 
 pub struct Asm {
@@ -63,6 +92,14 @@ pub struct Asm {
     labels: HashMap<String, usize>,
     fixups: Vec<Fixup>,
     strings: Vec<Vec<u8>>,
+    /// Which physical register currently holds each virtual register, or -1.
+    owner: [i8; 32],
+    /// Which virtual register currently owns each physical register, or -1.
+    holder: [i8; 16],
+    /// Whether a cached physical register holds a value newer than its home.
+    dirty: [bool; 16],
+    /// Round-robin victim selection when every pool register is busy.
+    next_victim: usize,
 }
 
 impl Default for Asm {
@@ -78,10 +115,17 @@ impl Asm {
             labels: HashMap::new(),
             fixups: Vec::new(),
             strings: Vec::new(),
+            owner: [-1; 32],
+            holder: [-1; 16],
+            dirty: [false; 16],
+            next_victim: 0,
         }
     }
 
     pub fn label(&mut self, name: &str) {
+        // Another path can arrive here, so cached registers may not describe
+        // the values this path knows about.
+        self.flush_all();
         self.labels.insert(name.to_string(), self.code.len());
     }
 
@@ -114,39 +158,135 @@ impl Asm {
 
     // ---- virtual register storage ---------------------------------------
 
-    fn load_abs(&mut self, phys: u8, addr: u64) {
+    fn vreg_disp(&mut self, reg: u8) {
+        let at = self.code.len();
+        self.u32(0);
+        self.fixups.push(Fixup::Vreg { at, reg });
+    }
+
+    fn load_abs(&mut self, phys: u8, reg: u8) {
         let rex = 0x48 | (((phys >> 3) & 1) << 2);
         self.u8(rex);
         self.u8(0x8B);
         self.u8(0x04 | ((phys & 7) << 3));
         self.u8(0x25);
-        self.u32(addr as u32);
+        self.vreg_disp(reg);
     }
 
-    fn store_abs(&mut self, phys: u8, addr: u64) {
+    fn store_abs(&mut self, phys: u8, reg: u8) {
         let rex = 0x48 | (((phys >> 3) & 1) << 2);
         self.u8(rex);
         self.u8(0x89);
         self.u8(0x04 | ((phys & 7) << 3));
         self.u8(0x25);
-        self.u32(addr as u32);
+        self.vreg_disp(reg);
     }
 
-    fn vreg_addr(reg: u8) -> u64 {
-        VREG_BASE + (reg as u64) * 8
+    /// Write a cached value back to its home slot if it is dirty.
+    fn flush_phys(&mut self, phys: u8) {
+        let holder = self.holder[phys as usize];
+        if holder >= 0 && self.dirty[phys as usize] {
+            self.store_abs(phys, holder as u8);
+        }
+        self.dirty[phys as usize] = false;
+    }
+
+    /// Drop a physical register without writing it back. Used when the value
+    /// it holds is about to be replaced.
+    fn discard_phys(&mut self, phys: u8) {
+        if !in_pool(phys) {
+            return;
+        }
+        let holder = self.holder[phys as usize];
+        if holder >= 0 {
+            self.owner[holder as usize] = -1;
+            self.holder[phys as usize] = -1;
+        }
+        self.dirty[phys as usize] = false;
+    }
+
+    /// Drop a physical register from the allocation, writing it back first.
+    fn evict_phys(&mut self, phys: u8) {
+        if !in_pool(phys) {
+            return;
+        }
+        let holder = self.holder[phys as usize];
+        self.flush_phys(phys);
+        if holder >= 0 {
+            self.owner[holder as usize] = -1;
+            self.holder[phys as usize] = -1;
+        }
+    }
+
+    /// Write every dirty virtual register back and empty the allocation.
+    /// Called at block boundaries, calls, returns, and syscalls, where another
+    /// path or routine may replace a home slot.
+    fn flush_all(&mut self) {
+        for &phys in &POOL {
+            self.evict_phys(phys);
+        }
+        self.next_victim = 0;
+    }
+
+    /// Find a pool register, spilling the least recently chosen one if needed.
+    fn spare_pool_reg(&mut self) -> u8 {
+        for i in 0..POOL.len() {
+            let phys = POOL[(self.next_victim + i) % POOL.len()];
+            if self.holder[phys as usize] < 0 {
+                self.next_victim = (self.next_victim + i + 1) % POOL.len();
+                return phys;
+            }
+        }
+        let phys = POOL[self.next_victim];
+        self.next_victim = (self.next_victim + 1) % POOL.len();
+        self.evict_phys(phys);
+        phys
     }
 
     fn load_vreg(&mut self, phys: u8, reg: u8) {
         if reg == XZR {
+            if in_pool(phys) {
+                self.evict_phys(phys);
+            }
             self.mov_phys_imm64(phys, 0);
-        } else {
-            self.load_abs(phys, Self::vreg_addr(reg));
+            return;
+        }
+        let owner = self.owner[reg as usize];
+        if owner == phys as i8 {
+            return;
+        }
+        if in_pool(phys) {
+            self.evict_phys(phys);
+        }
+        match owner {
+            -1 => self.load_abs(phys, reg),
+            p => self.mov_phys_reg(phys, p as u8),
         }
     }
 
     fn store_vreg(&mut self, reg: u8, phys: u8) {
-        if reg != XZR {
-            self.store_abs(phys, Self::vreg_addr(reg));
+        if reg == XZR {
+            return;
+        }
+        // This virtual register is being replaced, so any older cached copy is
+        // stale and must not linger.
+        let old = self.owner[reg as usize];
+        if old >= 0 && old as u8 != phys {
+            self.discard_phys(old as u8);
+        }
+        if in_pool(phys) {
+            if self.holder[phys as usize] != reg as i8 {
+                self.evict_phys(phys);
+            }
+            self.holder[phys as usize] = reg as i8;
+            self.owner[reg as usize] = phys as i8;
+            self.dirty[phys as usize] = true;
+        } else {
+            let slot = self.spare_pool_reg();
+            self.mov_phys_reg(slot, phys);
+            self.holder[slot as usize] = reg as i8;
+            self.owner[reg as usize] = slot as i8;
+            self.dirty[slot as usize] = true;
         }
     }
 
@@ -303,6 +443,19 @@ impl Asm {
         let at = self.code.len();
         self.u64(0);
         self.fixups.push(Fixup::Str { at, id: string_id });
+        self.store_vreg(rd, RAX);
+    }
+
+    /// Load the absolute address of a slot in the writable data area.
+    pub fn mov_data_addr(&mut self, rd: u8, offset: u64) {
+        if rd == XZR {
+            return;
+        }
+        self.u8(0x48);
+        self.u8(0xB8);
+        let at = self.code.len();
+        self.u64(0);
+        self.fixups.push(Fixup::Data { at, offset });
         self.store_vreg(rd, RAX);
     }
 
@@ -553,6 +706,7 @@ impl Asm {
     // ---- control flow ----------------------------------------------------
 
     pub fn b_label(&mut self, label: &str) {
+        self.flush_all();
         let at = self.code.len();
         self.u8(0xE9);
         self.u32(0);
@@ -563,6 +717,7 @@ impl Asm {
     }
 
     pub fn bl_label(&mut self, label: &str) {
+        self.flush_all();
         let at = self.code.len();
         self.u8(0xE8);
         self.u32(0);
@@ -574,12 +729,14 @@ impl Asm {
 
     /// `call reg` — call the address held in a virtual register.
     pub fn call_reg(&mut self, reg: u8) {
+        self.flush_all();
         self.load_vreg(RAX, reg);
         self.u8(0xFF);
         self.u8(0xD0);
     }
 
     pub fn bcond_label(&mut self, cond: u8, label: &str) {
+        self.flush_all();
         let at = self.code.len();
         let op = match cond {
             CC_EQ => 0x84,
@@ -600,6 +757,7 @@ impl Asm {
     }
 
     pub fn svc(&mut self) {
+        self.flush_all();
         self.load_vreg(RDI, X0);
         self.load_vreg(RSI, X1);
         self.load_vreg(RDX, X2);
@@ -613,6 +771,7 @@ impl Asm {
     }
 
     pub fn ret(&mut self) {
+        self.flush_all();
         self.u8(0xC3);
     }
 
@@ -629,6 +788,7 @@ impl Asm {
         }
 
         let string_base = IMAGE_BASE + TEXT_OFFSET + self.code.len() as u64;
+        let data_base = crate::elf::data_base_for(self.code.len(), rodata.len());
         let labels = self.labels.clone();
         let fixups = std::mem::take(&mut self.fixups);
         for f in &fixups {
@@ -651,6 +811,13 @@ impl Asm {
                         as u64;
                     let addr = IMAGE_BASE + TEXT_OFFSET + target;
                     self.patch_u64(*at, addr);
+                }
+                Fixup::Data { at, offset } => {
+                    self.patch_u64(*at, data_base + offset);
+                }
+                Fixup::Vreg { at, reg } => {
+                    let addr = data_base + VREG_OFFSET + (*reg as u64) * 8;
+                    self.patch_u32(*at, addr as u32);
                 }
             }
         }
@@ -769,6 +936,33 @@ mod tests {
         assert!(text
             .windows(6)
             .any(|w| w == [0x0F, 0x9C, 0xC0, 0x0F, 0xB6, 0xC0]));
+    }
+
+    #[test]
+    fn straight_line_code_keeps_a_value_in_a_register() {
+        let mut a = Asm::new();
+        a.mov_imm64(X0, 5);
+        a.add_imm(X0, X0, 1);
+        let text = bytes(a);
+        // No absolute-memory store between the two operations: the allocator
+        // kept the value in a physical register.
+        assert!(!text
+            .windows(8)
+            .any(|w| w[0] == 0x48 && w[1] == 0x89 && w[3] == 0x25));
+    }
+
+    #[test]
+    fn a_branch_writes_cached_values_back() {
+        let mut a = Asm::new();
+        a.mov_imm64(X0, 5);
+        a.b_label("end");
+        a.label("end");
+        a.ret();
+        let text = bytes(a);
+        // Any absolute store of a 64-bit register: REX.W, MOV, modrm SIB 25.
+        assert!(text
+            .windows(8)
+            .any(|w| w[0] == 0x48 && w[1] == 0x89 && w[3] == 0x25));
     }
 
     #[test]

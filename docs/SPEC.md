@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.0
+# The Rusk Language — Specification v1.1
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v1.0
+emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.0, Linux on AArch64 and x86-64**. Everything here is implemented
+Status: **v1.1, Linux on AArch64 and x86-64**. Everything here is implemented
 and tested; anything not here does not exist yet.
 
 ---
@@ -38,16 +38,17 @@ Blank lines are ignored.
 | List | `[1, 2, 3]`, `["a", "b"]`, `[[1], [2]]` | Growable, one kind of item, positions count from 1; lists may nest |
 | Function | `the function double`, `a function with n as a number: ...` | A named function or closure; called with `call ... with ...` |
 
-Numbers are integers only. There is no floating point in v1.0.
+Numbers are integers only. There is no floating point in v1.1.
 
 Text and lists live on a heap and are **owned**: a name holds one of them at a
 time. Ownership is what makes the language memory-safe without a garbage
 collector; see §4.1. A **view** (`a view of VALUE`, or a parameter written
 `as a view of ...`) lends a value read-only without moving ownership.
 
-Function values are shared one at a time. They cannot be stored in a list,
-compared, copied, printed, or given back, and there are no function-typed
-parameters in v1.0.
+Functions are ordinary values. A function value can be stored, copied with
+`copy of`, printed (`<function>`), put in a list, passed as an argument, and
+given back. Functions cannot be compared. Kinds can describe function
+signatures, so parameters and list items can have function kinds; see §10.
 
 ## 4. Naming things
 
@@ -538,6 +539,11 @@ and list kinds such as `a list of numbers`, `a list of text`,
 `a list of truth values`, or `a list of lists of numbers`. The `a`/`an` is
 optional: `n as number` reads the same.
 
+Function kinds are written `a function taking KIND, KIND giving back KIND`.
+A function with no parameters is `a function giving back KIND`. Use the plural
+`functions` for a list kind: `a list of functions taking a number giving back a
+number`, and `an empty list of functions ...` for an empty one.
+
 Calling uses the same `with ... and ...` shape:
 
 ```rusk
@@ -566,6 +572,21 @@ to factorial with n as a number:
 Functions live at the top level; defining one with `to` inside a block is an
 error. They may be called before their definition appears in the file.
 
+Top-level names are visible inside functions. A function may read a global and
+change it with `set` or `add`, but it may not move it, because the top level
+still owns it. A parameter or local may shadow a global:
+
+```rusk
+let total be 0
+
+to bump with n as a number:
+    set total to total + n
+
+bump with 2
+bump with 3
+say total                     # 5
+```
+
 ### Function values
 
 A named function can be used as a value with `the function NAME`:
@@ -584,13 +605,30 @@ say twice with 4              # the ordinary call spelling also works
   that takes no arguments.
 - The ordinary `NAME with ...` spelling also calls a function value held in a
   variable when there is no named function of that name.
-- A function value may be stored with `let` or `constant`, read, and called.
-  It cannot be put in a list, compared, copied with `copy of`, printed with
-  `say` or `warn`, given back, or passed as an argument. There are no
-  function-typed parameters in v1.0.
-- A dynamic call checks the number of arguments. The kinds of those arguments
-  are not part of a function value's type in v1.0, so they are not checked
-  before the call.
+- A function value may be stored with `let` or `constant`, read, copied with
+  `copy of`, printed with `say` or `warn` (it prints as `<function>`), put in a
+  list, passed as an argument, and given back. It cannot be compared.
+- A dynamic call checks both the number of arguments and their kinds.
+
+A function kind names a function value in a parameter or a list item:
+
+```rusk
+to double with n as a number:
+    give back n * 2
+
+to apply with f as a function taking a number giving back a number and n as a number:
+    give back call f with n
+
+say apply with the function double and 21     # 42
+
+let steps be [the function double, the function double]
+say call (item 2 of steps) with 3             # 6
+```
+
+Because a list item is an expression, parenthesize a call on it:
+`call (item 1 of fs) with 3`. A function with no parameters is written
+`a function giving back a number`; two parameters are separated by a comma:
+`a function taking a number, text giving back a truth value`.
 
 ### Closures
 
@@ -608,23 +646,21 @@ say call add_base with 5      # 15
 - A closure is written `a function with ...:` (the article is optional, so
   `function with ...:` works too) and may take the same parameter list and
   borrowed views as a named function.
-- A function literal may only be the value of a `let` or `constant` statement,
-  so it always has a name to be called through.
+- A function literal is a value expression. It can be stored, added to a list,
+  passed, given back, and called like any other function value.
 - Free names are captured when the closure is made. Numbers and truth values
   are copied into it. Text and lists are captured as shared read-only views:
   the closure may read them but may not move or change them.
 - A closure may capture another function value and may create another closure
-  inside its body.
-- A function value cannot give back another function value in v1.0. Call the
-  inner function instead, as here:
+  inside its body. A function may give back a function:
 
 ```rusk
 to make_adder with n as a number:
-    let add be a function with x as a number:
+    give back a function with x as a number:
         give back x + n
-    give back call add with 5
 
-say make_adder with 100       # 105
+let add5 be make_adder with 5
+say call add5 with 10         # 15
 ```
 
 ## 11. Imports
@@ -659,6 +695,42 @@ burnt: in lib/b.rk: line 1: this import makes a cycle: main.rk -> lib/a.rk -> li
 `import` and `from` only work at the top level, not inside a block. A missing
 file, an unreadable file, or a syntax error inside an imported file names the
 file it came from.
+
+### Exports and file boundaries
+
+`export` includes another file's content or marks names as part of this file's
+public surface:
+
+```rusk
+export "lib/greetings"                     # include everything, globally
+export "lib/greetings" as greet            # include it under a namespace
+export double, greet from "lib/greetings"  # include only those names
+export double, greet                       # declare exported names
+```
+
+`export "file"` behaves like a plain `import "file"`: the file's statements are
+copied in at that point and share the one global namespace. `export "file" as
+NAME` and `export NAME from "file"` match the named and selective import forms.
+The no-file form checks that every name is defined at the top level (including
+by an import); it documents which names the file offers to the files that
+export it.
+
+A line containing only `end`, `end.`, `<e>`, `</e>`, or `end of file` (with an
+optional `#` comment) ends the file. Everything after that line is ignored.
+Because `export` reads the other file through the same lexer, the boundary also
+stops an exported file, so files can be concatenated or chained without one
+swallowing the other:
+
+```rusk
+# math.rk
+to double with n as a number:
+    give back n * 2
+end
+
+# main.rk
+export "math.rk"
+say double with 21        # 42
+```
 
 ### Module namespaces
 
@@ -853,9 +925,11 @@ The output is a static ELF64 executable for the selected target:
 - machine: `EM_AARCH64` (183) or `EM_X86_64` (62), Linux syscall ABI;
 - one `PT_LOAD` segment mapping the whole image read/write/execute;
 - code at virtual address `0x400000 + 0x78`;
-- writable data (variables, number buffer, text and list heap) at `0x410000`,
-  zero-filled by the kernel;
-- no interpreter, no dynamic section, no relocations, no libc.
+- writable data (top-level variables, the number buffer, file-path scratch
+  space, the text and list heap, and the x86-64 virtual-register homes) placed
+  on the next 4 KiB boundary after the text and read-only data, zero-filled by
+  the kernel, with its address patched into the code after layout;
+- no interpreter, no dynamic section, no load-time relocations, no libc.
 
 Because there is no libc, output and file I/O are direct Linux syscalls.
 AArch64 uses `x8` for the number: `write` is `64`, `exit` is `93`, `read` is
@@ -869,12 +943,14 @@ arguments in `X0..X7`, the result in `X0`, the frame pointer in `X29`, and a
 zero register `XZR`. On AArch64 those are the real registers, the return
 address rides in `X30`, and each frame stores the caller's `X29`/`X30` at
 `sp+0`/`sp+8`, then its parameters and locals above that. On x86-64 the encoder
-keeps the virtual registers in a zeroed 256-byte block at `0x418000`, uses the
-real `rsp` for `SP`, and uses the processor's `call`/`ret` stack for return
-addresses. Syscall arguments are loaded into `rdi`, `rsi`, `rdx`, `r10`, `r8`,
-and `r9`; AArch64 syscall numbers written by the code generator are translated
-to their x86-64 equivalents. Both backends therefore run the same generated
-program logic and get the same runtime behavior.
+maps virtual registers onto a pool of six caller-saved physical registers
+inside each straight-line block, writes them back to home slots in the data
+area at labels, branches, calls, returns, and syscalls, and reloads them where
+needed. It uses the real `rsp` for `SP` and the processor's `call`/`ret` stack
+for return addresses. Syscall arguments are loaded into `rdi`, `rsi`, `rdx`,
+`r10`, `r8`, and `r9`; AArch64 syscall numbers written by the code generator
+are translated to their x86-64 equivalents. Both backends therefore run the
+same generated program logic and get the same runtime behavior.
 
 A list is a pointer to `[len: u64][capacity: u64][item: i64]...`, allocated
 from the same bump heap as joined text. The ownership pass guarantees that only
@@ -889,8 +965,9 @@ allocates a larger block and copies the items when the list is full.
 items left; removing from an empty list reports `there's nothing to remove`.
 
 A function value is a pointer to `[code: u64][capture count: u64][capture:
-i64]...`. A dynamic call reads the first word into the register holding the
-callee address and passes `record + 16` as an environment pointer. Named
+i64]...`. A dynamic call checks the argument count and kinds, reads the first
+word into the register holding the callee address, and passes `record + 16` as
+an environment pointer. Named
 functions and closures share one frame layout: slot 0 is the environment
 pointer, parameters follow, then captured values, then ordinary locals. A
 closure's prologue copies its captures out of the environment into frame slots,
@@ -912,19 +989,18 @@ value; the ownership pass is what prevents it from being moved or changed.
 
 ### Known limits of the backend
 
-- The image is placed at a fixed base address and the data area sits at a fixed
-  `0x410000`; a program with more than roughly 60 KB of code or data would
-  collide. Fine for v1.0, worth relocating later.
+- The image is still placed at a fixed base address and is not
+  position-independent, but the data area follows the final text and read-only
+  size, so growing a program moves its data instead of colliding with it.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
 - Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
   is reclaimed; exhausting it is reported, but memory is not reused.
 - Ownership is single-owner. `a view of VALUE` and `as a view of ...` lend a
   value read-only, but views cannot be moved, changed, or stored, and they do
   not outlive the owner's frame. `copy of` is the escape hatch.
-- Function values cannot be put in lists, compared, copied, printed, or given
-  back, and there are no function-typed parameters. Dynamic calls check only
-  the number of arguments. Closures capture numbers and truth values by value,
-  and text and lists as shared read-only views.
+- Function values cannot be compared. Dynamic calls check both the number of
+  arguments and their kinds. Closures capture numbers and truth values by
+  value, and text and lists as shared read-only views.
 - Lists are homogeneous but may nest to any depth. They can grow with
   `add VALUE to LIST`, which uses spare capacity or copies the whole list to
   fresh heap space, and shrink with `remove last from LIST` or
@@ -936,15 +1012,21 @@ value; the ownership pass is what prevents it from being moved or changed.
 - The native TUI uses Linux `termios` and ANSI escapes. It is for the `rusk`
   tool only; baked programs have no terminal primitives yet.
 - Only Linux is supported. The two backends are AArch64 and x86-64; there is no
-  macOS, Windows, or 32-bit output. The x86-64 backend is a correctness-first
-  translation layer that keeps virtual registers in memory, so its code is
-  larger and slower than the AArch64 output.
+  macOS, Windows, or 32-bit output. The x86-64 backend allocates registers
+  within straight-line blocks and spills at branches and calls, so it is close
+  to the AArch64 output but is not a global register allocator yet.
 - At most 8 parameters per function. There is no function overloading.
 
-## 16. Roadmap (not implemented)
+## 16. Roadmap
 
-- a register-allocating x86-64 encoder (the current one keeps virtual
-  registers in memory)
-- a real relocation-aware data layout
-- function-typed parameters and function values in lists
-- self-hosting: writing Rusk in Rusk
+v1.1 implements everything the v1.0 roadmap listed: function-typed parameters,
+function values in lists, functions that give back functions, a
+register-allocating x86-64 encoder, a relocation-aware data layout, and a
+self-hosting interpreter. What remains:
+
+- full self-hosting: writing the Rusk compiler itself in Rusk. The current
+  bootstrap stage is `selfhost/interpreter.rk`, an integer-expression
+  interpreter written in Rusk and compiled by Rusk.
+- a global x86-64 register allocator that keeps values in registers across
+  branches and calls.
+- reclaiming heap memory instead of the current 1 MiB bump allocator.

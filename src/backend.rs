@@ -117,6 +117,13 @@ impl Asm {
         }
     }
 
+    pub fn mov_data_addr(&mut self, rd: u8, offset: u64) {
+        match &mut self.inner {
+            Inner::AArch64(a) => a.mov_data_addr(rd, offset),
+            Inner::X86_64(a) => a.mov_data_addr(rd, offset),
+        }
+    }
+
     pub fn mov_reg_reg(&mut self, rd: u8, rm: u8) {
         match &mut self.inner {
             Inner::AArch64(a) => a.mov_reg_reg(rd, rm),

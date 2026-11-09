@@ -5,7 +5,7 @@ time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies.
 
-This guide is for v1.0. For the exact language rules, see
+This guide is for v1.1. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -84,7 +84,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.0.0 — code, baked ahead of time
+rusk 1.1.0 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -335,7 +335,25 @@ value. At most 8 parameters are allowed.
 
 Declared kinds are `a number`, `text`, `a truth value`, and list kinds such as
 `a list of numbers`, `a list of text`, `a list of truth values`, or
-`a list of lists of numbers`.
+`a list of lists of numbers`. Function kinds are written
+`a function taking a number giving back a number`; a function with no
+parameters is `a function giving back a number`, and a list of functions is
+`a list of functions taking ... giving back ...`.
+
+Top-level `let` names are visible inside functions. A function can read a
+global and change it with `set` or `add`, but cannot move it. A parameter or
+local may shadow a global:
+
+```rusk
+let total be 0
+
+to bump with n as a number:
+    set total to total + n
+
+bump with 2
+bump with 3
+say total                   # 5
+```
 
 #### Function values
 
@@ -350,9 +368,22 @@ say call twice with 21      # 42
 say twice with 4            # the ordinary spelling works too
 ```
 
-`call VALUE with ...` calls any function value. A function value may be stored
-with `let` or `constant`, but not put in a list, compared, copied, printed, or
-given back, and there are no function-typed parameters yet.
+`call VALUE with ...` calls any function value. Function values are ordinary:
+they can be stored, copied, printed (`<function>`), put in a list, passed as an
+argument, and given back. They cannot be compared. A dynamic call checks both
+the number of arguments and their kinds.
+
+```rusk
+to apply with f as a function taking a number giving back a number and n as a number:
+    give back call f with n
+
+say apply with the function double and 21    # 42
+
+let fs be [the function double, the function double]
+say call (item 2 of fs) with 3               # 6
+```
+
+Parenthesize a call on a list item: `call (item 1 of fs) with 3`.
 
 #### Closures
 
@@ -380,8 +411,19 @@ to make_adder with n as a number:
 say make_adder with 100     # 105
 ```
 
-A function value cannot give back another function value in v1.0. A dynamic
-call checks how many arguments it gets, but not their kinds.
+A function can give back a function, and the result can be captured or called
+straight away:
+
+```rusk
+to make_adder with n as a number:
+    give back a function with x as a number:
+        give back x + n
+
+let add5 be make_adder with 5
+say call add5 with 10       # 15
+```
+
+A dynamic call checks both how many arguments it gets and their kinds.
 
 #### Borrowed views
 
@@ -475,7 +517,7 @@ items over. Old blocks are not reclaimed.
 
 ### Removing
 
-v0.7 added two removal forms, unchanged in v1.0:
+v0.7 added two removal forms, unchanged in v1.1:
 
 ```rusk
 let xs be [10, 20, 30]
@@ -698,6 +740,36 @@ import "lib/thing" as thing
 say thing.use_hidden with 4   # hidden belongs to thing
 ```
 
+`export` is the include form that also marks a file's public names:
+
+```rusk
+export "lib/greetings"                     # include everything, globally
+export "lib/greetings" as greet            # include it under a namespace
+export double, greet from "lib/greetings"  # include only those names
+export double, greet                       # declare exported names
+```
+
+`export "file"` copies the whole file in, just like a plain `import`;
+`export ... as` and `export NAME from ...` match the named and selective
+import forms. The form without a file checks that each name exists at the top
+level.
+
+A file can stop early with a boundary line. A line containing only `end`,
+`end.`, `<e>`, `</e>`, or `end of file` ends the file; anything after it is
+ignored. This makes it safe to join two files, and it stops an exported file at
+its own boundary:
+
+```rusk
+# math.rk
+to double with n as a number:
+    give back n * 2
+end
+
+# main.rk
+export "math.rk"
+say double with 21        # 42
+```
+
 ## 10. The interactive session
 
 Run `rusk` with no arguments (or `rusk repl`) to start a line-oriented session:
@@ -708,7 +780,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.0.0 — an English-like language
+Rusk 1.1.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -827,13 +899,14 @@ src/ownership.rs      single-owner checking
 src/codegen.rs        AST to target-independent machine operations
 src/backend.rs        target selection and the common assembly interface
 src/aarch64.rs        hand-written AArch64 instruction encoder and fixups
-src/x86_64.rs         hand-written x86-64 encoder with virtual registers
+src/x86_64.rs         hand-written x86-64 encoder with a register allocator
 src/elf.rs            static ELF64 writer for either target
 src/repl.rs           tree-walking evaluator and line session
 src/tui.rs            native full-screen terminal UI
 src/main.rs           command-line interface
 tests/e2e.rs          bake and run compiled programs
 tests/cli.rs          CLI and piped-session tests
+selfhost/             a Rusk interpreter written in Rusk
 ```
 
 Run the test suite:
@@ -850,6 +923,15 @@ host, set `RUSK_E2E_TARGET` and `RUSK_E2E_RUNNER`:
 ```console
 RUSK_E2E_TARGET=x86_64 RUSK_E2E_RUNNER=qemu-x86_64 cargo test --test e2e
 ```
+
+The bootstrap interpreter is a Rusk program too, so it runs through the same
+pipeline:
+
+```console
+cargo run -- run selfhost/interpreter.rk selfhost/demo.rk
+```
+
+It prints `42`, `15`, and `51`.
 
 For a quick smoke test:
 
@@ -868,29 +950,36 @@ Implemented and checked:
 - Constants, text operations, and imports
 - Homogeneous lists, including nested lists, with `item`, `set item`, `add`,
   `remove last`, and `remove item N`
-- Module namespaces (`import ... as`) and selective imports (`from ... import`)
+- Module namespaces (`import ... as`), selective imports (`from ... import`),
+  and `export` content/name selection with `end` / `<e>` file boundaries
 - Single-owner checking with `copy of`
 - Shared read-only views (`a view of ..., as a view of ...`)
 - Function values (`the function NAME`, `call ... with ...`) and closures
+- Function-typed parameters, lists of functions, and functions that give back
+  functions
+- Top-level names visible inside functions, with local shadowing
+- A register-allocating x86-64 backend and a relocation-aware data layout
 - Arguments, environment, standard input, files, `warn`, and `stop with`
 - Line REPL and native full-screen TUI
+- A Rusk-in-Rusk interpreter (`selfhost/interpreter.rk`)
 
 Not implemented yet:
 
-- Function-typed parameters and function values inside lists
-- A register-allocating x86-64 backend (the current one is memory-backed)
-- Relocation-aware data layout
-- Self-hosting Rusk in Rusk
+- Full compiler self-hosting; the interpreter is the bootstrap stage
+- A global x86-64 register allocator that keeps values across branches and
+  calls
+- Reclaiming heap memory
 
 Backend limits worth knowing:
 
-- The image is placed at a fixed base and data sits at `0x410000`; very large
-  programs can collide.
+- The image is placed at a fixed base and is not position-independent, but the
+  data area follows the final text size, so large programs grow instead of
+  colliding.
 - Lists and joined text share a 1 MiB bump heap. Nothing is reclaimed.
 - List capacity never shrinks.
 - A list can hold at most one kind, and lists cannot be compared.
-- Function values cannot be returned, compared, copied, printed, or passed as
-  arguments. Dynamic calls check arity, not argument kinds.
+- Function values cannot be compared. Dynamic calls check arity and argument
+  kinds.
 - At most 8 parameters per function.
 - The single load segment is RWX.
 

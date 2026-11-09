@@ -69,6 +69,9 @@ enum Target {
     Addr(String),
     /// Absolute address of an interned string, spread over four instructions.
     Str(usize),
+    /// Absolute address of an offset into the writable data area. The base is
+    /// only known once the text section's size is final.
+    Data(u64),
 }
 
 struct Fixup {
@@ -151,6 +154,21 @@ impl Asm {
         self.fixups.push(Fixup {
             at,
             target: Target::Str(string_id),
+        });
+    }
+
+    /// Load the absolute address of a slot in the writable data area. The
+    /// final base is filled in by `finish`, so growing the text section moves
+    /// the data instead of colliding with it.
+    pub fn mov_data_addr(&mut self, rd: u8, offset: u64) {
+        let at = self.at();
+        self.movz(rd, 0, 0);
+        self.movk(rd, 0, 1);
+        self.movk(rd, 0, 2);
+        self.movk(rd, 0, 3);
+        self.fixups.push(Fixup {
+            at,
+            target: Target::Data(offset),
         });
     }
 
@@ -323,6 +341,7 @@ impl Asm {
         }
 
         let string_base = IMAGE_BASE + TEXT_OFFSET + self.code.len() as u64 * 4;
+        let data_base = crate::elf::data_base_for(self.code.len() * 4, rodata.len());
 
         for f in &self.fixups {
             match &f.target {
@@ -363,6 +382,14 @@ impl Asm {
                         }) as u64
                             * 4;
                     let addr = IMAGE_BASE + TEXT_OFFSET + at;
+                    for hw in 0..4u32 {
+                        let word = self.code[f.at / 4 + hw as usize];
+                        let chunk = ((addr >> (16 * hw)) & 0xFFFF) as u32;
+                        self.code[f.at / 4 + hw as usize] = (word & !(0xFFFF << 5)) | (chunk << 5);
+                    }
+                }
+                Target::Data(offset) => {
+                    let addr = data_base + offset;
                     for hw in 0..4u32 {
                         let word = self.code[f.at / 4 + hw as usize];
                         let chunk = ((addr >> (16 * hw)) & 0xFFFF) as u32;

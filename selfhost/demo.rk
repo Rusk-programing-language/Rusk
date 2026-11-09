@@ -1,0 +1,13 @@
+# A small program interpreted by selfhost/interpreter.rk.
+#
+#     rusk run selfhost/interpreter.rk selfhost/demo.rk
+
+let width be 6
+let height be 7
+let area be width * height
+say area
+
+let total be (2 + 3) * 4 - 10 / 2
+say total
+set total to total + width * (height - 1)
+say total

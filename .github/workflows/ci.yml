@@ -59,9 +59,12 @@ jobs:
           RUSK_E2E_RUNNER: ${{ matrix.runner }}
         run: cargo test --all-targets --verbose
 
-      - name: Check example programs
+      - name: Check example programs and the self-hosted interpreter
         if: matrix.name == 'native'
         run: |
           cargo run --quiet -- check examples/hello.rk
           cargo run --quiet -- check examples/lists.rk
           cargo run --quiet -- check examples/closures.rk
+          cargo run --quiet -- check selfhost/interpreter.rk
+          output="$(cargo run --quiet -- run selfhost/interpreter.rk selfhost/demo.rk)"
+          test "$output" = "$(printf '42\n15\n51')"

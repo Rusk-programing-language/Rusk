@@ -21,10 +21,9 @@
 //! with `exit(2)`.
 
 use crate::ast::{
-    lambda_free_names, Base, BinOp, Elem, Expr, FuncTy, Param, Program, RetTy, Stmt, Ty, UnOp,
+    lambda_free_names, Base, BinOp, Elem, Expr, FuncTy, Param, Program, Stmt, Ty, UnOp,
 };
 use crate::backend::*;
-use crate::elf::DATA_BASE;
 use crate::types::Sig;
 use std::collections::HashMap;
 
@@ -35,7 +34,7 @@ const ITOA_CAPACITY: u64 = 32;
 const HEAP_PTR_OFFSET: u64 = 0x1000;
 const HEAP_START_OFFSET: u64 = 0x1_0000;
 const HEAP_SIZE: u64 = 0x10_0000;
-const HEAP_END: u64 = DATA_BASE + HEAP_START_OFFSET + HEAP_SIZE;
+const HEAP_END_OFFSET: u64 = HEAP_START_OFFSET + HEAP_SIZE;
 /// Where the runtime keeps the current call depth.
 const DEPTH_OFFSET: u64 = 0x1800;
 /// Where the initial stack pointer (argc/argv/envp) is remembered.
@@ -62,6 +61,8 @@ struct Var {
     ty: Ty,
     local: bool,
     constant: bool,
+    /// Declared at the top level rather than inside a function.
+    global: bool,
 }
 
 struct Frame {
@@ -91,13 +92,13 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     cg.asm.label("_start");
     // Remember where the kernel put argc, argv, and envp before using the stack.
     // `str` cannot name SP, so copy it through a scratch register first.
-    cg.asm.mov_imm64(X1, DATA_BASE + ARGS_SP_OFFSET);
+    cg.asm.mov_data_addr(X1, ARGS_SP_OFFSET);
     cg.asm.add_imm(X2, SP, 0);
     cg.asm.str(X2, X1, 0);
     // The text heap starts at a fixed spot; a bump pointer in the data area
     // remembers where the next joined string goes.
-    cg.asm.mov_imm64(X1, DATA_BASE + HEAP_PTR_OFFSET);
-    cg.asm.mov_imm64(X0, DATA_BASE + HEAP_START_OFFSET);
+    cg.asm.mov_data_addr(X1, HEAP_PTR_OFFSET);
+    cg.asm.mov_data_addr(X0, HEAP_START_OFFSET);
     cg.asm.str(X0, X1, 0);
 
     for stmt in &program.stmts {
@@ -235,12 +236,12 @@ impl Codegen {
         format!("{hint}_{}", self.label_counter)
     }
 
-    fn shape_tag(elem: Elem) -> String {
-        format!("{}_{}", elem.base().word(), elem.depth())
+    fn shape_tag(elem: &Elem) -> String {
+        elem.tag()
     }
 
-    fn show_array_label(&mut self, elem: Elem) -> String {
-        self.ensure_show_shape(elem);
+    fn show_array_label(&mut self, elem: &Elem) -> String {
+        self.ensure_show_shape(elem.clone());
         format!("show_array_{}", Self::shape_tag(elem))
     }
 
@@ -248,38 +249,42 @@ impl Codegen {
         if self.show_shapes.contains(&elem) {
             return;
         }
+        let inner = elem.inner();
         self.show_shapes.push(elem);
-        if elem.depth() > 0 {
-            self.ensure_show_shape(Elem::new(elem.base(), elem.depth() - 1));
+        if let Some(inner) = inner {
+            self.ensure_show_shape(inner);
         }
     }
 
     /// The routine that deep-copies a list whose items have this shape.
     /// A depth of 0 means the items are plain values.
-    fn list_copy_label(&mut self, elem: Elem) -> String {
-        match (elem.base(), elem.depth()) {
-            (Base::Int | Base::Bool, 0) => "array_copy_scalar".to_string(),
-            (Base::Str, 0) => "array_copy_text".to_string(),
+    fn list_copy_label(&mut self, elem: &Elem) -> String {
+        match (&elem.func(), elem.depth()) {
+            (None, 0) => match elem.base() {
+                Base::Int | Base::Bool => "array_copy_scalar".to_string(),
+                Base::Str => "array_copy_text".to_string(),
+            },
             _ => {
-                self.ensure_copy_shape(elem);
+                self.ensure_copy_shape(elem.clone());
                 format!("array_copy_{}", Self::shape_tag(elem))
             }
         }
     }
 
     fn ensure_copy_shape(&mut self, elem: Elem) {
-        if elem.depth() == 0 || self.copy_shapes.contains(&elem) {
+        let inner = elem.inner();
+        if inner.is_none() || self.copy_shapes.contains(&elem) {
             return;
         }
         self.copy_shapes.push(elem);
-        self.ensure_copy_shape(Elem::new(elem.base(), elem.depth() - 1));
+        self.ensure_copy_shape(inner.unwrap());
     }
 
     fn bss_size(&self) -> u64 {
         (self.next_global * 8)
             .max(ITOA_OFFSET + ITOA_CAPACITY)
             .max(PATH_OFFSET + PATH_CAPACITY)
-            .max(HEAP_START_OFFSET + HEAP_SIZE)
+            .max(crate::x86_64::VREG_OFFSET + crate::x86_64::VREG_OFFSET_SLACK)
     }
 
     /// Reserve an 8-byte slot, in the current frame or at top level.
@@ -292,6 +297,7 @@ impl Codegen {
                 ty,
                 local: true,
                 constant,
+                global: false,
             }
         } else {
             let slot = self.next_global;
@@ -301,6 +307,7 @@ impl Codegen {
                 ty,
                 local: false,
                 constant,
+                global: true,
             }
         }
     }
@@ -325,7 +332,7 @@ impl Codegen {
 
     /// Fail with the heap message if `reg` has grown past the end of the heap.
     fn emit_heap_check(&mut self, reg: u8) {
-        self.asm.mov_imm64(X8, HEAP_END);
+        self.asm.mov_data_addr(X8, HEAP_END_OFFSET);
         self.asm.cmp_reg_reg(reg, X8);
         self.asm.bcond_label(CC_GT, "heap_fail");
     }
@@ -334,7 +341,7 @@ impl Codegen {
         if var.local {
             self.asm.str(X0, X29, frame_offset(var.slot));
         } else {
-            self.asm.mov_imm64(X1, DATA_BASE + var.slot * 8);
+            self.asm.mov_data_addr(X1, var.slot * 8);
             self.asm.str(X0, X1, 0);
         }
     }
@@ -343,7 +350,7 @@ impl Codegen {
         if var.local {
             self.asm.ldr(X0, X29, frame_offset(var.slot));
         } else {
-            self.asm.mov_imm64(X1, DATA_BASE + var.slot * 8);
+            self.asm.mov_data_addr(X1, var.slot * 8);
             self.asm.ldr(X0, X1, 0);
         }
     }
@@ -462,11 +469,21 @@ impl Codegen {
                 *line,
                 "this import wasn't resolved — imports only work at the top level".to_string(),
             )),
+            Stmt::Export { line, .. } => Err(at(
+                *line,
+                "this export wasn't resolved — exports only work at the top level".to_string(),
+            )),
         }
     }
 
     fn declare(&mut self, name: &str, value: &Expr, constant: bool) -> Result<(), String> {
-        if self.vars.contains_key(name) {
+        // Inside a function, a local may shadow a global. Two locals with the
+        // same name are still an error.
+        if self
+            .vars
+            .get(name)
+            .is_some_and(|old| !(old.global && self.frame.is_some()))
+        {
             return Err(format!(
                 "'{name}' already exists — use 'set {name} to ...' to change it"
             ));
@@ -839,7 +856,7 @@ impl Codegen {
         let Some(frame) = &self.frame else {
             return Err("'give back' only works inside a function".to_string());
         };
-        let ret_ty = frame.ret_ty;
+        let ret_ty = frame.ret_ty.clone();
         let ret_label = frame.ret_label.clone();
         let ty = self.expr(e)?;
         if ty != ret_ty {
@@ -900,7 +917,11 @@ impl Codegen {
             return Err(format!("'{what}' has too many things to keep track of"));
         }
 
+        // The function body starts with the top-level names in view, so it can
+        // read and change globals. Parameters and locals are inserted on top
+        // and shadow any global with the same name.
         let saved_vars = std::mem::take(&mut self.vars);
+        self.vars = saved_vars.clone();
         let saved_frame = self.frame.take();
         self.frame = Some(Frame {
             ret_label: ret_label.to_string(),
@@ -918,7 +939,7 @@ impl Codegen {
         // global, so a deeply nested call reports a Rusk error instead of a
         // segmentation fault.
         let depth_ok = self.new_label("depth_ok");
-        self.asm.mov_imm64(X9, DATA_BASE + DEPTH_OFFSET);
+        self.asm.mov_data_addr(X9, DEPTH_OFFSET);
         self.asm.ldr(X10, X9, 0);
         self.asm.mov_imm64(X11, MAX_DEPTH);
         self.asm.cmp_reg_reg(X10, X11);
@@ -939,9 +960,10 @@ impl Codegen {
                 p.name.clone(),
                 Var {
                     slot: i as u64 + 1,
-                    ty: p.ty,
+                    ty: p.ty.clone(),
                     local: true,
                     constant: false,
+                    global: false,
                 },
             );
             self.asm.str(i as u8, X29, frame_offset(i as u64 + 1));
@@ -958,9 +980,10 @@ impl Codegen {
                 capture.clone(),
                 Var {
                     slot,
-                    ty: *ty,
+                    ty: ty.clone(),
                     local: true,
                     constant: false,
+                    global: false,
                 },
             );
         }
@@ -977,7 +1000,7 @@ impl Codegen {
         self.asm.mov_imm64(X0, 0);
         self.asm.label(ret_label);
         // Give the depth counter back before tearing down the frame.
-        self.asm.mov_imm64(X1, DATA_BASE + DEPTH_OFFSET);
+        self.asm.mov_data_addr(X1, DEPTH_OFFSET);
         self.asm.ldr(X2, X1, 0);
         self.asm.sub_imm(X2, X2, 1);
         self.asm.str(X2, X1, 0);
@@ -1001,7 +1024,7 @@ impl Codegen {
         let vars: HashMap<String, Ty> = self
             .vars
             .iter()
-            .map(|(name, var)| (name.clone(), var.ty))
+            .map(|(name, var)| (name.clone(), var.ty.clone()))
             .collect();
         crate::types::type_of_with(e, &vars, &self.funcs)
     }
@@ -1011,8 +1034,8 @@ impl Codegen {
     fn emit_function_record(&mut self, code_label: &str, captures: &[String]) {
         let count = captures.len() as u64;
         let size = 16 + count * 8;
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
-        self.asm.mov_imm64(X5, heap_ptr);
+        let heap_ptr = HEAP_PTR_OFFSET;
+        self.asm.mov_data_addr(X5, heap_ptr);
         self.asm.ldr(X6, X5, 0);
         self.asm.mov_imm64(X7, size);
         self.asm.add_reg_reg(X7, X6, X7);
@@ -1044,11 +1067,11 @@ impl Codegen {
                 ));
             }
         };
-        if args.len() != ft.arity as usize {
+        if args.len() != ft.arity() {
             return Err(format!(
                 "this function value takes {} thing{}, but got {}",
-                ft.arity,
-                if ft.arity == 1 { "" } else { "s" },
+                ft.arity(),
+                if ft.arity() == 1 { "" } else { "s" },
                 args.len()
             ));
         }
@@ -1067,7 +1090,7 @@ impl Codegen {
         self.asm.ldr(X14, X16, 0);
         self.asm.add_imm(X17, X16, 16);
         self.asm.call_reg(X14);
-        Ok(ft.ret.ty())
+        Ok(ft.ret.clone())
     }
 
     fn expr(&mut self, e: &Expr) -> Result<Ty, String> {
@@ -1145,13 +1168,16 @@ impl Codegen {
                 let Some(sig) = self.funcs.get(name).cloned() else {
                     return Err(format!("I don't know a function called '{name}'"));
                 };
-                let ret = RetTy::from_ty(sig.ret).ok_or_else(|| {
-                    "v1.0 functions can't give back another function — call it instead".to_string()
-                })?;
-                let arity = u8::try_from(sig.params.len())
-                    .map_err(|_| "a function can't take more than 255 things".to_string())?;
+                if sig.ret == Ty::Nothing {
+                    return Err(format!(
+                        "'{name}' gives nothing back, so it can't be used as a function value"
+                    ));
+                }
                 self.emit_function_record(&format!("fn_{name}"), &[]);
-                Ok(Ty::Func(FuncTy { arity, ret }))
+                Ok(Ty::Func(std::rc::Rc::new(FuncTy {
+                    params: sig.params.clone(),
+                    ret: sig.ret.clone(),
+                })))
             }
             Expr::Lambda { params, body } => {
                 let capture_names: Vec<String> = lambda_free_names(params, body)
@@ -1160,7 +1186,7 @@ impl Codegen {
                     .collect();
                 let captures: Vec<(String, Ty)> = capture_names
                     .iter()
-                    .map(|name| (name.clone(), self.vars[name].ty))
+                    .map(|name| (name.clone(), self.vars[name].ty.clone()))
                     .collect();
                 let Some(Ty::Func(ft)) = self.expr_type(e)? else {
                     return Err("internal: a function value has no function kind".to_string());
@@ -1174,7 +1200,7 @@ impl Codegen {
                     params: params.clone(),
                     body: body.clone(),
                     captures,
-                    ret: ft.ret.ty(),
+                    ret: ft.ret.clone(),
                 });
                 Ok(Ty::Func(ft))
             }
@@ -1249,7 +1275,7 @@ impl Codegen {
                 let mut elem: Option<Elem> = None;
                 for item in items {
                     let t = self.expr(item)?;
-                    let this = match Elem::from_ty(t) {
+                    let this = match Elem::from_ty(&t) {
                         Some(e) => e,
                         None => return Err("nothing can go in a list".to_string()),
                     };
@@ -1270,8 +1296,8 @@ impl Codegen {
                 if n * 8 + 16 >= 4096 * 8 {
                     return Err("this list literal is too long".to_string());
                 }
-                let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
-                self.asm.mov_imm64(X5, heap_ptr);
+                let heap_ptr = HEAP_PTR_OFFSET;
+                self.asm.mov_data_addr(X5, heap_ptr);
                 self.asm.ldr(X6, X5, 0);
                 self.asm.mov_imm64(X7, n * 8 + 16);
                 self.asm.add_reg_reg(X7, X6, X7);
@@ -1288,8 +1314,8 @@ impl Codegen {
                 Ok(Ty::Array(elem.unwrap()))
             }
             Expr::EmptyArray(elem) => {
-                let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
-                self.asm.mov_imm64(X5, heap_ptr);
+                let heap_ptr = HEAP_PTR_OFFSET;
+                self.asm.mov_data_addr(X5, heap_ptr);
                 self.asm.ldr(X6, X5, 0);
                 self.asm.add_imm(X7, X6, 16);
                 self.emit_heap_check(X7);
@@ -1298,7 +1324,7 @@ impl Codegen {
                 self.asm.str(X7, X6, 0); // length
                 self.asm.str(X7, X6, 8); // capacity
                 self.asm.mov_reg_reg(X0, X6);
-                Ok(Ty::Array(*elem))
+                Ok(Ty::Array(elem.clone()))
             }
             Expr::Item(index, array) => {
                 let it = self.expr(index)?;
@@ -1328,9 +1354,9 @@ impl Codegen {
                         Ok(Ty::Str)
                     }
                     Ty::Array(elem) => {
-                        let label = self.list_copy_label(elem);
+                        let label = self.list_copy_label(&elem);
                         self.asm.bl_label(&label);
-                        Ok(ty)
+                        Ok(Ty::Array(elem))
                     }
                     Ty::Int | Ty::Bool => Ok(ty),
                     Ty::Func(_) => Ok(ty),
@@ -1351,7 +1377,7 @@ impl Codegen {
                 Ok(Ty::Str)
             }
             Expr::ArgCount => {
-                self.asm.mov_imm64(X1, DATA_BASE + ARGS_SP_OFFSET);
+                self.asm.mov_data_addr(X1, ARGS_SP_OFFSET);
                 self.asm.ldr(X0, X1, 0);
                 self.asm.ldr(X0, X0, 0); // argc
                 self.asm.sub_imm(X0, X0, 1); // skip the program's own name
@@ -1551,7 +1577,11 @@ impl Codegen {
                 self.emit_print_text(fd);
             }
             Ty::Array(elem) => self.emit_say_array(elem, fd),
-            Ty::Func(_) => {}
+            Ty::Func(_) => {
+                let id = self.intern("<function>");
+                self.asm.mov_abs(X0, id);
+                self.emit_print_text(fd);
+            }
             Ty::Nothing => {}
         }
     }
@@ -1585,7 +1615,7 @@ impl Codegen {
     /// Print `[a, b, c]`.
     fn emit_say_array(&mut self, elem: Elem, fd: u64) {
         if elem.depth() > 0 {
-            let label = self.show_array_label(elem);
+            let label = self.show_array_label(&elem);
             self.asm.mov_imm64(X9, fd);
             self.asm.bl_label(&label);
             self.emit_newline(fd);
@@ -1616,7 +1646,7 @@ impl Codegen {
         self.asm.label(&l_first);
 
         self.asm.ldr(X0, X19, 0);
-        self.emit_scalar_item(elem.base(), fd);
+        self.emit_scalar_item(&elem, fd);
 
         self.asm.add_imm(X19, X19, 8);
         self.asm.add_imm(X21, X21, 1);
@@ -1632,8 +1662,14 @@ impl Codegen {
     }
 
     /// Print one scalar list item that is already in X0.
-    fn emit_scalar_item(&mut self, base: Base, fd: u64) {
-        match base {
+    fn emit_scalar_item(&mut self, elem: &Elem, fd: u64) {
+        if elem.func().is_some() {
+            let id = self.intern("<function>");
+            self.asm.mov_abs(X0, id);
+            self.emit_write_text_value(fd);
+            return;
+        }
+        match elem.base() {
             Base::Int => {
                 self.asm.mov_imm64(X9, fd);
                 self.asm.bl_label("print_int");
@@ -1677,8 +1713,14 @@ impl Codegen {
     }
 
     /// Print one scalar item in X0 when the file descriptor is already in X9.
-    fn emit_scalar_item_x9(&mut self, base: Base) {
-        match base {
+    fn emit_scalar_item_x9(&mut self, elem: &Elem) {
+        if elem.func().is_some() {
+            let id = self.intern("<function>");
+            self.asm.mov_abs(X0, id);
+            self.emit_write_text_value_x9();
+            return;
+        }
+        match elem.base() {
             Base::Int => self.asm.bl_label("print_int"),
             Base::Str => self.emit_write_text_value_x9(),
             Base::Bool => {
@@ -1715,12 +1757,12 @@ impl Codegen {
 
     /// A list of lists (or deeper) is copied item by item, recursively.
     fn emit_array_copy_nested(&mut self, elem: Elem) {
-        let label = format!("array_copy_{}", Self::shape_tag(elem));
+        let label = format!("array_copy_{}", Self::shape_tag(&elem));
         let l_loop = self.new_label("acopy_nested_loop");
         let l_done = self.new_label("acopy_nested_done");
-        let child = Elem::new(elem.base(), elem.depth() - 1);
-        let child_label = self.list_copy_label(child);
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let child = elem.inner().expect("a nested list shape");
+        let child_label = self.list_copy_label(&child);
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label(&label);
@@ -1734,7 +1776,7 @@ impl Codegen {
 
         a.mov_reg_reg(X19, X0); // source list
         a.ldr(X21, X19, 0); // length
-        a.mov_imm64(X5, heap_ptr);
+        a.mov_data_addr(X5, heap_ptr);
         a.ldr(X6, X5, 0); // destination start
         a.mov_reg_reg(X7, X21);
         a.add_reg_reg(X7, X7, X7);
@@ -1743,7 +1785,7 @@ impl Codegen {
         a.add_imm(X7, X7, 16);
         a.mov_reg_reg(X9, X6);
         a.add_reg_reg(X9, X9, X7);
-        a.mov_imm64(X8, HEAP_END);
+        a.mov_data_addr(X8, HEAP_END_OFFSET);
         a.cmp_reg_reg(X9, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X5, 0);
@@ -1780,13 +1822,13 @@ impl Codegen {
     /// Print a list whose items have shape `elem` without a newline, using
     /// the descriptor in X9.
     fn emit_show_array_helper(&mut self, elem: Elem) {
-        let label = format!("show_array_{}", Self::shape_tag(elem));
+        let label = format!("show_array_{}", Self::shape_tag(&elem));
         let l_loop = self.new_label("show_list");
         let l_first = self.new_label("show_first");
         let l_done = self.new_label("show_done");
-        let child_label = if elem.depth() > 0 {
-            let child = Elem::new(elem.base(), elem.depth() - 1);
-            Some((child, self.show_array_label(child)))
+        let child_label = if let Some(child) = elem.inner() {
+            let child_label = self.show_array_label(&child);
+            Some((child, child_label))
         } else {
             None
         };
@@ -1818,7 +1860,7 @@ impl Codegen {
         if let Some((_, label)) = &child_label {
             self.asm.bl_label(label);
         } else {
-            self.emit_scalar_item_x9(elem.base());
+            self.emit_scalar_item_x9(&elem);
         }
 
         self.asm.add_imm(X19, X19, 8);
@@ -1852,14 +1894,14 @@ impl Codegen {
     /// Writes backwards from the end of a 32-byte buffer, so the digits come out
     /// in the right order without a second pass.
     fn emit_print_int(&mut self) {
-        let buf_end = DATA_BASE + ITOA_OFFSET + ITOA_CAPACITY;
+        let buf_end = ITOA_OFFSET + ITOA_CAPACITY;
         let a = &mut self.asm;
 
         a.label("print_int");
         a.sub_imm(SP, SP, 32);
         a.str(X19, SP, 0);
 
-        a.mov_imm64(X19, buf_end);
+        a.mov_data_addr(X19, buf_end);
         a.mov_reg_reg(X1, X19); // ptr = end
         a.mov_reg_reg(X3, X0); // value
         a.movz_reg(X4, 0); // no sign yet
@@ -1905,7 +1947,7 @@ impl Codegen {
     /// length-prefixed string. There is no bound check yet; the heap is
     /// 1 MiB, which is generous for a language this size.
     fn emit_text_concat(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_concat");
@@ -1913,11 +1955,11 @@ impl Codegen {
         a.ldr(X3, X1, 0); // right length
         a.add_reg_reg(X4, X2, X3); // total length
 
-        a.mov_imm64(X5, heap_ptr);
+        a.mov_data_addr(X5, heap_ptr);
         a.ldr(X6, X5, 0); // new string starts here
         a.add_reg_reg(X7, X6, X4);
         a.add_imm(X7, X7, 8);
-        a.mov_imm64(X8, HEAP_END);
+        a.mov_data_addr(X8, HEAP_END_OFFSET);
         a.cmp_reg_reg(X7, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X7, X5, 0); // bump the heap pointer
@@ -2007,7 +2049,7 @@ impl Codegen {
     /// Allocates a fresh one-byte string on the heap. X4 holds the
     /// length-prefixed runtime error to print if the index falls outside.
     fn emit_text_letter(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_letter");
@@ -2019,10 +2061,10 @@ impl Codegen {
         a.bcond_label(CC_GT, "letter_fail");
 
         // A one-byte string is [len = 1][byte], nine bytes in all.
-        a.mov_imm64(X5, heap_ptr);
+        a.mov_data_addr(X5, heap_ptr);
         a.ldr(X6, X5, 0);
         a.add_imm(X7, X6, 9);
-        a.mov_imm64(X8, HEAP_END);
+        a.mov_data_addr(X8, HEAP_END_OFFSET);
         a.cmp_reg_reg(X7, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X7, X5, 0);
@@ -2045,7 +2087,7 @@ impl Codegen {
     /// `text_part`: X0 = start, X1 = end (both 1-based and inclusive),
     /// X2 = text, result in X0. X4 holds the runtime error.
     fn emit_text_part(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_part");
@@ -2065,11 +2107,11 @@ impl Codegen {
         a.sub_reg_reg(X6, X1, X0);
         a.add_imm(X6, X6, 1);
 
-        a.mov_imm64(X7, heap_ptr);
+        a.mov_data_addr(X7, heap_ptr);
         a.ldr(X8, X7, 0);
         a.add_reg_reg(X9, X8, X6);
         a.add_imm(X9, X9, 8);
-        a.mov_imm64(X10, HEAP_END);
+        a.mov_data_addr(X10, HEAP_END_OFFSET);
         a.cmp_reg_reg(X9, X10);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X7, 0);
@@ -2095,10 +2137,10 @@ impl Codegen {
         a.ret();
 
         a.label("part_empty");
-        a.mov_imm64(X7, heap_ptr);
+        a.mov_data_addr(X7, heap_ptr);
         a.ldr(X8, X7, 0);
         a.add_imm(X9, X8, 8);
-        a.mov_imm64(X10, HEAP_END);
+        a.mov_data_addr(X10, HEAP_END_OFFSET);
         a.cmp_reg_reg(X9, X10);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X7, 0);
@@ -2170,7 +2212,7 @@ impl Codegen {
     /// has spare capacity; otherwise it copies the items to a fresh block with
     /// twice the capacity and gives back the new list in X0.
     fn emit_array_add(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("array_add");
@@ -2189,7 +2231,7 @@ impl Codegen {
         a.label("array_add_capacity_ready");
 
         // Allocate [length][capacity][items...].
-        a.mov_imm64(X3, heap_ptr);
+        a.mov_data_addr(X3, heap_ptr);
         a.ldr(X4, X3, 0); // destination
         a.mov_reg_reg(X6, X5);
         a.add_reg_reg(X6, X6, X6); // *2
@@ -2197,7 +2239,7 @@ impl Codegen {
         a.add_reg_reg(X6, X6, X6); // *8
         a.add_imm(X6, X6, 16);
         a.add_reg_reg(X7, X4, X6);
-        a.mov_imm64(X10, HEAP_END);
+        a.mov_data_addr(X10, HEAP_END_OFFSET);
         a.cmp_reg_reg(X7, X10);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X7, X3, 0);
@@ -2305,14 +2347,14 @@ impl Codegen {
 
     /// `empty_text`: a fresh text value with length zero, in X0.
     fn emit_empty_text(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("empty_text");
-        a.mov_imm64(X1, heap_ptr);
+        a.mov_data_addr(X1, heap_ptr);
         a.ldr(X2, X1, 0);
         a.add_imm(X3, X2, 8);
-        a.mov_imm64(X4, HEAP_END);
+        a.mov_data_addr(X4, HEAP_END_OFFSET);
         a.cmp_reg_reg(X3, X4);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X3, X1, 0);
@@ -2324,7 +2366,7 @@ impl Codegen {
     /// `cstr_copy`: X0 = a NUL-terminated C string. Copies it into a fresh Rusk
     /// text value and gives that back in X0.
     fn emit_cstr_copy(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("cstr_copy");
@@ -2338,11 +2380,11 @@ impl Codegen {
 
         a.label("cstr_len_done");
         a.sub_reg_reg(X2, X1, X0); // length
-        a.mov_imm64(X3, heap_ptr);
+        a.mov_data_addr(X3, heap_ptr);
         a.ldr(X4, X3, 0); // destination
         a.add_reg_reg(X5, X4, X2);
         a.add_imm(X5, X5, 8);
-        a.mov_imm64(X6, HEAP_END);
+        a.mov_data_addr(X6, HEAP_END_OFFSET);
         a.cmp_reg_reg(X5, X6);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X5, X3, 0);
@@ -2371,7 +2413,7 @@ impl Codegen {
         let a = &mut self.asm;
 
         a.label("arg_text");
-        a.mov_imm64(X1, DATA_BASE + ARGS_SP_OFFSET);
+        a.mov_data_addr(X1, ARGS_SP_OFFSET);
         a.ldr(X1, X1, 0); // initial stack pointer
         a.ldr(X2, X1, 0); // argc
         a.movz_reg(X3, 1);
@@ -2408,7 +2450,7 @@ impl Codegen {
 
         a.ldr(X20, X0, 0); // name length
         a.add_imm(X19, X0, 8); // name bytes
-        a.mov_imm64(X21, DATA_BASE + ARGS_SP_OFFSET);
+        a.mov_data_addr(X21, ARGS_SP_OFFSET);
         a.ldr(X21, X21, 0); // initial stack pointer
         a.ldr(X22, X21, 0); // argc
         a.add_imm(X21, X21, 8); // argv
@@ -2471,7 +2513,7 @@ impl Codegen {
     /// `read_stream`: X0 = file descriptor, X1 = 1 to stop at a newline or 0 to
     /// read to end of file. Gives back text in X0.
     fn emit_read_stream(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("read_stream");
@@ -2483,12 +2525,12 @@ impl Codegen {
 
         a.mov_reg_reg(X19, X0); // fd
         a.mov_reg_reg(X20, X1); // mode
-        a.mov_imm64(X21, heap_ptr);
+        a.mov_data_addr(X21, heap_ptr);
         a.ldr(X22, X21, 0); // text value starts here
         a.add_imm(X10, X22, 8); // write pointer
 
         a.label("read_stream_loop");
-        a.mov_imm64(X12, HEAP_END);
+        a.mov_data_addr(X12, HEAP_END_OFFSET);
         a.cmp_reg_reg(X10, X12);
         a.bcond_label(CC_GE, "heap_fail");
         a.mov_reg_reg(X0, X19);
@@ -2534,7 +2576,7 @@ impl Codegen {
         a.cmp_reg_reg(X1, X2);
         a.bcond_label(CC_GT, "path_copy_fail");
         a.add_imm(X3, X0, 8);
-        a.mov_imm64(X4, DATA_BASE + PATH_OFFSET);
+        a.mov_data_addr(X4, PATH_OFFSET);
         a.mov_reg_reg(X5, X4);
         a.mov_reg_reg(X6, X1);
         a.label("path_copy_loop");
@@ -2570,7 +2612,7 @@ impl Codegen {
 
         a.bl_label("path_copy");
         a.mov_imm64(X0, (-100i64) as u64); // AT_FDCWD
-        a.mov_imm64(X1, DATA_BASE + PATH_OFFSET);
+        a.mov_data_addr(X1, PATH_OFFSET);
         a.movz_reg(X2, 0); // O_RDONLY
         a.movz_reg(X3, 0);
         a.mov_imm64(X8, SYS_OPENAT);
@@ -2614,7 +2656,7 @@ impl Codegen {
         a.mov_reg_reg(X0, X20);
         a.bl_label("path_copy");
         a.mov_imm64(X0, (-100i64) as u64); // AT_FDCWD
-        a.mov_imm64(X1, DATA_BASE + PATH_OFFSET);
+        a.mov_data_addr(X1, PATH_OFFSET);
         a.mov_imm64(X2, 577); // O_WRONLY | O_CREAT | O_TRUNC
         a.mov_imm64(X3, 420); // 0o644
         a.mov_imm64(X8, SYS_OPENAT);
@@ -2644,17 +2686,17 @@ impl Codegen {
 
     /// `text_copy`: X0 = text, result is a fresh copy of it in X0.
     fn emit_text_copy(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_copy");
         a.ldr(X2, X0, 0); // length
         a.mov_reg_reg(X3, X0); // source text
-        a.mov_imm64(X5, heap_ptr);
+        a.mov_data_addr(X5, heap_ptr);
         a.ldr(X6, X5, 0); // destination
         a.add_reg_reg(X7, X6, X2);
         a.add_imm(X7, X7, 8);
-        a.mov_imm64(X8, HEAP_END);
+        a.mov_data_addr(X8, HEAP_END_OFFSET);
         a.cmp_reg_reg(X7, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X7, X5, 0);
@@ -2681,13 +2723,13 @@ impl Codegen {
     /// `array_copy_scalar`: X0 = list of numbers or truth values. A fresh list
     /// is allocated and the words are copied into it.
     fn emit_array_copy_scalar(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("array_copy_scalar");
         a.mov_reg_reg(X1, X0); // source list
         a.ldr(X2, X1, 0); // length
-        a.mov_imm64(X5, heap_ptr);
+        a.mov_data_addr(X5, heap_ptr);
         a.ldr(X6, X5, 0); // destination
 
         a.mov_reg_reg(X7, X2);
@@ -2697,7 +2739,7 @@ impl Codegen {
         a.add_imm(X7, X7, 16);
         a.mov_reg_reg(X9, X6);
         a.add_reg_reg(X9, X9, X7);
-        a.mov_imm64(X8, HEAP_END);
+        a.mov_data_addr(X8, HEAP_END_OFFSET);
         a.cmp_reg_reg(X9, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X5, 0);
@@ -2725,7 +2767,7 @@ impl Codegen {
     /// `array_copy_text`: X0 = list of text. Each text item is copied too, so
     /// the new list and the old list do not share any heap value.
     fn emit_array_copy_text(&mut self) {
-        let heap_ptr = DATA_BASE + HEAP_PTR_OFFSET;
+        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("array_copy_text");
@@ -2741,7 +2783,7 @@ impl Codegen {
 
         a.mov_reg_reg(X19, X0); // source items cursor
         a.ldr(X21, X19, 0); // length
-        a.mov_imm64(X5, heap_ptr);
+        a.mov_data_addr(X5, heap_ptr);
         a.ldr(X6, X5, 0); // destination start
         a.mov_reg_reg(X7, X21);
         a.add_reg_reg(X7, X7, X7);
@@ -2750,7 +2792,7 @@ impl Codegen {
         a.add_imm(X7, X7, 16);
         a.mov_reg_reg(X9, X6);
         a.add_reg_reg(X9, X9, X7);
-        a.mov_imm64(X8, HEAP_END);
+        a.mov_data_addr(X8, HEAP_END_OFFSET);
         a.cmp_reg_reg(X9, X8);
         a.bcond_label(CC_GT, "heap_fail");
         a.str(X9, X5, 0);

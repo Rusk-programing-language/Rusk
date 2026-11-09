@@ -36,7 +36,7 @@ enum State {
     Moved,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Slot {
     ty: Ty,
     state: State,
@@ -44,10 +44,13 @@ struct Slot {
     /// A view (or a closure's captured name): readable and shared, but never
     /// moved or changed.
     borrowed: bool,
+    /// A top-level name seen from inside a function. A function may read and
+    /// change one, but never move it: the top level keeps owning it.
+    global: bool,
 }
 
 impl Slot {
-    fn owned(ty: Ty) -> bool {
+    fn owned(ty: &Ty) -> bool {
         matches!(ty, Ty::Str | Ty::Array(_))
     }
 }
@@ -58,28 +61,43 @@ type Scope = HashMap<String, Slot>;
 pub fn check(program: &Program, sigs: &HashMap<String, Sig>) -> Result<(), String> {
     let mut checker = Checker { sigs };
 
-    // Function bodies have their own names; a move inside one never touches a
-    // top-level owner.
+    // Walk the top level first: it declares the globals that function bodies
+    // may read and change.
+    let mut top = Scope::new();
+    checker.block(&program.stmts, &mut top)?;
+
+    // Function bodies have their own names. Globals stay owned by the top
+    // level, so a function can read or change one but never move it.
     for stmt in &program.stmts {
         if let Stmt::FuncDef { params, body, .. } = stmt {
             let mut scope = Scope::new();
+            for (name, slot) in &top {
+                scope.insert(
+                    name.clone(),
+                    Slot {
+                        ty: slot.ty.clone(),
+                        state: State::Alive,
+                        constant: slot.constant,
+                        borrowed: false,
+                        global: true,
+                    },
+                );
+            }
             for p in params {
                 scope.insert(
                     p.name.clone(),
                     Slot {
-                        ty: p.ty,
+                        ty: p.ty.clone(),
                         state: State::Alive,
                         constant: false,
                         borrowed: p.borrowed,
+                        global: false,
                     },
                 );
             }
             checker.block(body, &mut scope)?;
         }
     }
-
-    let mut scope = Scope::new();
-    checker.block(&program.stmts, &mut scope)?;
     Ok(())
 }
 
@@ -128,6 +146,7 @@ impl<'a> Checker<'a> {
                         state: State::Alive,
                         constant: false,
                         borrowed,
+                        global: false,
                     },
                 );
             }
@@ -143,11 +162,12 @@ impl<'a> Checker<'a> {
                         state: State::Alive,
                         constant: true,
                         borrowed,
+                        global: false,
                     },
                 );
             }
             Stmt::Set { name, value, line } => {
-                let Some(old) = scope.get(name).copied() else {
+                let Some(old) = scope.get(name).cloned() else {
                     return Err(at(*line, format!("I don't know a thing called '{name}'")));
                 };
                 if old.constant {
@@ -248,6 +268,7 @@ impl<'a> Checker<'a> {
                         state: State::Alive,
                         constant: false,
                         borrowed: false,
+                        global: false,
                     },
                 );
                 let result = self.loop_body(body, scope);
@@ -273,6 +294,7 @@ impl<'a> Checker<'a> {
                         state: State::Alive,
                         constant: false,
                         borrowed: false,
+                        global: false,
                     },
                 );
                 let result = self.loop_body(body, scope);
@@ -284,6 +306,12 @@ impl<'a> Checker<'a> {
                 return Err(at(
                     *line,
                     "this import wasn't resolved — imports only work at the top level".to_string(),
+                ));
+            }
+            Stmt::Export { line, .. } => {
+                return Err(at(
+                    *line,
+                    "this export wasn't resolved — exports only work at the top level".to_string(),
                 ));
             }
             Stmt::GiveBack(e, line) => {
@@ -342,6 +370,11 @@ impl<'a> Checker<'a> {
                         "I don't know a thing called '{name}' — declare it with 'let {name} be ...' first"
                     ));
                 };
+                if slot.global && use_ == Use::Move && Slot::owned(&slot.ty) {
+                    return Err(format!(
+                        "'{name}' is a top-level name — use 'copy of {name}' to make an owned value"
+                    ));
+                }
                 if slot.borrowed {
                     match use_ {
                         Use::Move => {
@@ -357,7 +390,7 @@ impl<'a> Checker<'a> {
                         Use::Read | Use::Borrow => {}
                     }
                 }
-                if !Slot::owned(slot.ty) {
+                if !Slot::owned(&slot.ty) {
                     return Ok(());
                 }
                 if slot.state == State::Moved {
@@ -386,7 +419,7 @@ impl<'a> Checker<'a> {
                 let param_borrowed = self.sigs.get(name).map(|sig| &sig.borrowed);
                 for (i, arg) in args.iter().enumerate() {
                     let arg_use = match param_borrowed {
-                        Some(borrowed) if borrowed.get(i).copied().unwrap_or(false) => Use::Read,
+                        Some(borrowed) if borrowed.get(i).cloned().unwrap_or(false) => Use::Read,
                         Some(_) => Use::Move,
                         // A dynamic call has no parameter metadata; its
                         // arguments are read rather than moved.
@@ -411,10 +444,11 @@ impl<'a> Checker<'a> {
                     inner.insert(
                         param.name.clone(),
                         Slot {
-                            ty: param.ty,
+                            ty: param.ty.clone(),
                             state: State::Alive,
                             constant: false,
                             borrowed: param.borrowed,
+                            global: false,
                         },
                     );
                 }
@@ -423,10 +457,11 @@ impl<'a> Checker<'a> {
                         inner.insert(
                             name,
                             Slot {
-                                ty: slot.ty,
+                                ty: slot.ty.clone(),
                                 state: State::Alive,
                                 constant: true,
                                 borrowed: true,
+                                global: false,
                             },
                         );
                     }
@@ -482,7 +517,7 @@ impl<'a> Checker<'a> {
     fn ty_of(&self, e: &Expr, scope: &Scope) -> Result<Option<Ty>, String> {
         let vars: HashMap<String, Ty> = scope
             .iter()
-            .map(|(name, slot)| (name.clone(), slot.ty))
+            .map(|(name, slot)| (name.clone(), slot.ty.clone()))
             .collect();
         crate::types::type_of_with(e, &vars, self.sigs)
     }
@@ -578,9 +613,10 @@ fn merge(base: &Scope, arms: &[(Scope, bool)]) -> Scope {
         }
     }
     for name in new_names {
-        let first = *falling
+        let first = falling
             .iter()
             .find_map(|arm| arm.get(name))
+            .cloned()
             .expect("a new name comes from a falling arm");
         let everywhere_alive = falling.len() == arms.len()
             && falling.iter().all(|arm| {

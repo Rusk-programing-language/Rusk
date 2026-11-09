@@ -900,6 +900,58 @@ fn a_namespaced_modules_own_imports_stay_private() {
 }
 
 #[test]
+fn export_includes_a_file_and_end_stops_it() {
+    let dir = std::env::temp_dir().join(format!("rusk-e2e-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("math.rk"),
+        "to double with n as a number:\n    give back n * 2\nend\nsay \"ignored\"\n",
+    )
+    .unwrap();
+    let main = dir.join("main.rk");
+    std::fs::write(
+        &main,
+        "export \"math.rk\"\nsay double with 21\nexport double\n",
+    )
+    .unwrap();
+
+    let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
+    let out = dir.join("main");
+    rusk::elf::write(&out, &bytes).unwrap();
+    let result = program_command(&out)
+        .output()
+        .expect("exported program should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
+    assert_eq!(result.status.code(), Some(0));
+}
+
+#[test]
+fn export_can_take_selected_functions() {
+    let dir = std::env::temp_dir().join(format!("rusk-e2e-export-select-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("math.rk"),
+        "to double with n as a number:\n    give back n * 2\nto triple with n as a number:\n    give back n * 3\n",
+    )
+    .unwrap();
+    let main = dir.join("main.rk");
+    std::fs::write(&main, "export double from \"math.rk\"\nsay double with 5\n").unwrap();
+
+    let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
+    let out = dir.join("main");
+    rusk::elf::write(&out, &bytes).unwrap();
+    let result = program_command(&out)
+        .output()
+        .expect("selected export program should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(String::from_utf8_lossy(&result.stdout), "10\n");
+    assert_eq!(result.status.code(), Some(0));
+}
+
+#[test]
 fn nested_lists_nest_and_deep_copy() {
     let src = "\
 let rows be [[1, 2], [3, 4], an empty list of numbers]
@@ -1288,5 +1340,139 @@ say make with xs
 ";
     let (stdout, code) = run("nested_closures", src);
     assert_eq!(stdout, "6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn function_parameters_are_called() {
+    let src = "\
+to double with n as a number:
+    give back n * 2
+
+to apply with f as a function taking a number giving back a number and n as a number:
+    give back call f with n
+
+say apply with the function double and 21
+";
+    let (stdout, code) = run("fn_param", src);
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn lists_of_functions_run_each_one() {
+    let src = "\
+to double with n as a number:
+    give back n * 2
+
+to triple with n as a number:
+    give back n * 3
+
+let fs be [the function double, the function triple]
+let n be 1
+for each f in fs:
+    say call f with n
+    set n to n + 1
+";
+    let (stdout, code) = run("fn_list", src);
+    assert_eq!(stdout, "2\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_function_can_give_back_a_function() {
+    let src = "\
+to adder with by as a number:
+    give back a function with n as a number:
+        give back n + by
+
+let add5 be adder with 5
+say call add5 with 10
+";
+    let (stdout, code) = run("fn_return", src);
+    assert_eq!(stdout, "15\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn function_values_print_as_a_word() {
+    let src = "\
+to double with n as a number:
+    give back n * 2
+
+let f be the function double
+say f
+say [f]
+";
+    let (stdout, code) = run("fn_print", src);
+    assert_eq!(stdout, "<function>\n[<function>]\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn functions_can_read_and_change_globals() {
+    let src = "\
+let total be 0
+let greeting be \"hello\"
+
+to bump with n as a number:
+    set total to total + n
+
+to greet:
+    warn greeting
+
+bump with 4
+bump with 6
+say total
+greet
+";
+    let (stdout, stderr, code) = run_full("globals", src);
+    assert_eq!(stdout, "10\n");
+    assert_eq!(stderr, "hello\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_local_can_shadow_a_global() {
+    let src = "\
+let count be 100
+
+to twice with count as a number:
+    let copy be count
+    set count to copy * 2
+    give back count
+
+say twice with 7
+say count
+";
+    let (stdout, code) = run("shadow", src);
+    assert_eq!(stdout, "14\n100\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_function_cannot_move_a_global() {
+    let src = "\
+let greeting be \"hello\"
+
+to steal:
+    let mine be greeting
+    say mine
+";
+    let err = bake_src(src).unwrap_err();
+    assert!(err.contains("top-level name"), "{err}");
+}
+
+#[test]
+fn the_interpreter_written_in_rusk_runs_a_rusk_program() {
+    let interpreter = include_str!("../selfhost/interpreter.rk");
+    let demo = include_str!("../selfhost/demo.rk");
+    let path = std::env::temp_dir().join(format!("rusk-selfhost-demo-{}.rk", std::process::id()));
+    std::fs::write(&path, demo).expect("demo should be written");
+    let path_text = path.to_str().expect("temp path should be text");
+    let (stdout, stderr, code) = run_with("selfhost", interpreter, &[path_text], None, &[]);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(stdout, "42\n15\n51\n");
+    assert_eq!(stderr, "");
     assert_eq!(code, 0);
 }

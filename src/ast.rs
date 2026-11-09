@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::rc::Rc;
 
 /// The plain kinds a list can ultimately hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,78 +32,144 @@ impl Base {
 
 /// The kind of one list item. A depth of 0 is a plain value; each extra level
 /// wraps it in another list, so `{Int, depth: 2}` is a list of lists of
-/// numbers. Keeping this compact and `Copy` lets `Ty` stay cheap even though
-/// lists nest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// numbers. Function items carry their whole signature, so a list of function
+/// values is as specific as a list of numbers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Elem {
     base: Base,
     depth: u8,
+    /// Present when the innermost item is a function value. `base` is then an
+    /// unused placeholder so the shape helper can still report a depth.
+    func: Option<Rc<FuncTy>>,
 }
 
 impl Elem {
     pub const INT: Elem = Elem {
         base: Base::Int,
         depth: 0,
+        func: None,
     };
     pub const STR: Elem = Elem {
         base: Base::Str,
         depth: 0,
+        func: None,
     };
     pub const BOOL: Elem = Elem {
         base: Base::Bool,
         depth: 0,
+        func: None,
     };
 
     pub fn new(base: Base, depth: u8) -> Self {
-        Elem { base, depth }
+        Elem {
+            base,
+            depth,
+            func: None,
+        }
     }
 
-    pub fn base(self) -> Base {
+    pub fn function(ft: Rc<FuncTy>) -> Self {
+        Elem {
+            base: Base::Int,
+            depth: 0,
+            func: Some(ft),
+        }
+    }
+
+    pub fn base(&self) -> Base {
         self.base
     }
 
-    pub fn depth(self) -> u8 {
+    pub fn depth(&self) -> u8 {
         self.depth
     }
 
+    pub fn is_func(&self) -> bool {
+        self.func.is_some() && self.depth == 0
+    }
+
+    pub fn func(&self) -> Option<&Rc<FuncTy>> {
+        if self.depth == 0 {
+            self.func.as_ref()
+        } else {
+            None
+        }
+    }
+
     /// One more list around this item.
-    pub fn nested(self) -> Self {
+    pub fn nested(&self) -> Self {
         Elem {
             base: self.base,
             depth: self.depth + 1,
+            func: self.func.clone(),
+        }
+    }
+
+    /// The item shape inside one list layer, if this is a list shape.
+    pub fn inner(&self) -> Option<Self> {
+        if self.depth == 0 {
+            None
+        } else {
+            Some(Elem {
+                base: self.base,
+                depth: self.depth - 1,
+                func: self.func.clone(),
+            })
         }
     }
 
     /// The kind of a value with this element shape.
-    pub fn ty(self) -> Ty {
+    pub fn ty(&self) -> Ty {
         if self.depth == 0 {
-            match self.base {
-                Base::Int => Ty::Int,
-                Base::Str => Ty::Str,
-                Base::Bool => Ty::Bool,
+            match &self.func {
+                Some(ft) => Ty::Func(ft.clone()),
+                None => match self.base {
+                    Base::Int => Ty::Int,
+                    Base::Str => Ty::Str,
+                    Base::Bool => Ty::Bool,
+                },
             }
         } else {
             Ty::Array(Elem {
                 base: self.base,
                 depth: self.depth - 1,
+                func: self.func.clone(),
             })
         }
     }
 
     /// The element shape of a value kind, if it can sit in a list.
-    pub fn from_ty(ty: Ty) -> Option<Self> {
+    pub fn from_ty(ty: &Ty) -> Option<Self> {
         match ty {
             Ty::Int => Some(Elem::INT),
             Ty::Str => Some(Elem::STR),
             Ty::Bool => Some(Elem::BOOL),
             Ty::Array(elem) => Some(elem.nested()),
-            Ty::Func(_) | Ty::Nothing => None,
+            Ty::Func(ft) => Some(Elem::function(ft.clone())),
+            Ty::Nothing => None,
+        }
+    }
+
+    /// A stable, label-safe name for this shape.
+    pub fn tag(&self) -> String {
+        match (&self.func, self.depth) {
+            (Some(ft), 0) => {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                ft.hash(&mut hasher);
+                format!("func_{:x}", hasher.finish())
+            }
+            _ => format!("{}_{}", self.base.word(), self.depth),
         }
     }
 
     /// The phrase used after "a list of", e.g. `lists of numbers`.
-    pub fn plural(self) -> String {
-        let mut out = self.base.plural().to_string();
+    pub fn plural(&self) -> String {
+        let mut out = match (&self.func, self.depth) {
+            (Some(ft), 0) => format!("function values ({ft})"),
+            _ => self.base.plural().to_string(),
+        };
         for _ in 0..self.depth {
             out = format!("lists of {out}");
         }
@@ -110,68 +177,39 @@ impl Elem {
     }
 }
 
-/// What a function value gives back. Function values cannot give back other
-/// function values in v1.0, so this stays smaller than [`Ty`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RetTy {
-    Int,
-    Str,
-    Bool,
-    Array(Elem),
-    Nothing,
-}
-
-impl RetTy {
-    pub fn from_ty(ty: Ty) -> Option<Self> {
-        match ty {
-            Ty::Int => Some(RetTy::Int),
-            Ty::Str => Some(RetTy::Str),
-            Ty::Bool => Some(RetTy::Bool),
-            Ty::Array(elem) => Some(RetTy::Array(elem)),
-            Ty::Nothing => Some(RetTy::Nothing),
-            Ty::Func(_) => None,
-        }
-    }
-
-    pub fn ty(self) -> Ty {
-        match self {
-            RetTy::Int => Ty::Int,
-            RetTy::Str => Ty::Str,
-            RetTy::Bool => Ty::Bool,
-            RetTy::Array(elem) => Ty::Array(elem),
-            RetTy::Nothing => Ty::Nothing,
-        }
-    }
-}
-
-impl fmt::Display for RetTy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.ty())
-    }
-}
-
-/// The compact type of a callable value: how many things it takes and what it
-/// gives back. Parameter kinds are not stored, so dynamic calls only check the
-/// number of arguments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The full type of a callable value: the kinds of its parameters and what it
+/// gives back. Keeping the parameters here is what lets a function value be
+/// passed to a parameter, stored in a list, or given back from another
+/// function with its signature checked.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FuncTy {
-    pub arity: u8,
-    pub ret: RetTy,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+}
+
+impl FuncTy {
+    pub fn arity(&self) -> usize {
+        self.params.len()
+    }
 }
 
 impl fmt::Display for FuncTy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let things = if self.arity == 1 { "thing" } else { "things" };
+        if self.params.is_empty() {
+            return write!(f, "a function giving back {}", self.ret);
+        }
+        let params: Vec<String> = self.params.iter().map(|t| t.to_string()).collect();
         write!(
             f,
-            "a function taking {} {} giving back {}",
-            self.arity, things, self.ret
+            "a function taking {} giving back {}",
+            params.join(", "),
+            self.ret
         )
     }
 }
 
 /// The kinds of value Rusk understands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Int,
     Str,
@@ -179,15 +217,15 @@ pub enum Ty {
     /// A homogeneous list: a pointer to `[len][capacity][item...]` at runtime.
     Array(Elem),
     /// A callable value: a pointer to `[code][capture count][capture...]`.
-    Func(FuncTy),
+    Func(Rc<FuncTy>),
     /// What a function "gives back" when it uses no `give back` at all.
     Nothing,
 }
 
 impl Ty {
-    pub fn elem(self) -> Option<Elem> {
+    pub fn elem(&self) -> Option<Elem> {
         match self {
-            Ty::Array(elem) => Some(elem),
+            Ty::Array(elem) => Some(elem.clone()),
             _ => None,
         }
     }
@@ -382,6 +420,14 @@ pub enum Stmt {
         names: Vec<(String, Option<String>)>,
         line: usize,
     },
+    /// `export "file.rk"`, `export "file.rk" as name`,
+    /// `export name from "file.rk"`, or `export name, other`.
+    Export {
+        path: Option<String>,
+        alias: Option<String>,
+        names: Vec<(String, Option<String>)>,
+        line: usize,
+    },
     FuncDef {
         name: String,
         params: Vec<Param>,
@@ -571,7 +617,7 @@ fn collect_free_stmts(
                 collect_free_stmts(body, &mut inner, free, seen);
             }
             // A named function is not a closure: it cannot see these locals.
-            Stmt::FuncDef { .. } | Stmt::Import { .. } => {}
+            Stmt::FuncDef { .. } | Stmt::Import { .. } | Stmt::Export { .. } => {}
             Stmt::Break(_) | Stmt::Continue(_) => {}
         }
     }
@@ -596,6 +642,7 @@ impl Stmt {
             | Stmt::ForEachIn { line, .. }
             | Stmt::FuncDef { line, .. }
             | Stmt::Import { line, .. }
+            | Stmt::Export { line, .. }
             | Stmt::GiveBack(_, line)
             | Stmt::Warn(_, line)
             | Stmt::Stop(_, line)

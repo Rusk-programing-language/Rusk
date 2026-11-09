@@ -78,17 +78,46 @@ impl Loader {
 
         let mut items = Vec::new();
         let mut renames: HashMap<String, String> = HashMap::new();
+        let mut exported: Vec<(String, usize)> = Vec::new();
 
         for stmt in parsed.stmts {
-            let Stmt::Import {
-                path,
-                alias,
-                names,
-                line,
-            } = stmt
-            else {
-                items.push(Item::Own(stmt));
-                continue;
+            let (path, alias, names, line) = match stmt {
+                Stmt::Import {
+                    path,
+                    alias,
+                    names,
+                    line,
+                } => (path, alias, names, line),
+                Stmt::Export {
+                    path: Some(path),
+                    alias,
+                    names,
+                    line,
+                } => (path, alias, names, line),
+                Stmt::Export {
+                    path: None,
+                    names,
+                    line,
+                    ..
+                } => {
+                    for (name, alias) in names {
+                        if alias.is_some() {
+                            let message = "'export NAME as OTHER' needs a file: write 'export NAME from \"file\"'";
+                            return Err(match label {
+                                Some(file) => {
+                                    format!("in {}: line {line}: {message}", file.display())
+                                }
+                                None => format!("line {line}: {message}"),
+                            });
+                        }
+                        exported.push((name, line));
+                    }
+                    continue;
+                }
+                other => {
+                    items.push(Item::Own(other));
+                    continue;
+                }
             };
 
             let resolved = resolve(&path, base).map_err(|e| match label {
@@ -174,6 +203,31 @@ impl Loader {
                 }
             }
         }
+
+        if !exported.is_empty() {
+            let defined: HashSet<String> = stmts
+                .iter()
+                .filter_map(top_level_name)
+                .map(str::to_string)
+                .collect();
+            for (name, line) in exported {
+                let prefixed = format!("{prefix}{name}");
+                let renamed = renames.get(&name).map(String::as_str).unwrap_or(&name);
+                if !defined.contains(&name)
+                    && !defined.contains(&prefixed)
+                    && !defined.contains(renamed)
+                {
+                    let message = format!(
+                        "'export {name}' names something that isn't defined at the top level"
+                    );
+                    return Err(match label {
+                        Some(file) => format!("in {}: line {line}: {message}", file.display()),
+                        None => format!("line {line}: {message}"),
+                    });
+                }
+            }
+        }
+
         Ok(Program { stmts })
     }
 
@@ -396,9 +450,9 @@ impl Rewriter<'_> {
             Stmt::Break(line) => Stmt::Break(line),
             Stmt::Continue(line) => Stmt::Continue(line),
             Stmt::Expr(e, line) => Stmt::Expr(self.expr(e, locals), line),
-            // Resolved imports never reach here; leave one alone so the normal
-            // "import wasn't resolved" check can report it.
-            Stmt::Import { .. } => stmt,
+            // Resolved imports and exports never reach here; leave one alone
+            // so the normal "wasn't resolved" check can report it.
+            Stmt::Import { .. } | Stmt::Export { .. } => stmt,
         }
     }
 

@@ -67,7 +67,7 @@
 //! as words when the sentence around them fits, so they can still be names.
 //! ```
 
-use crate::ast::{Base, BinOp, Elem, Expr, Param, Program, Stmt, Ty, UnOp};
+use crate::ast::{Base, BinOp, Elem, Expr, FuncTy, Param, Program, Stmt, Ty, UnOp};
 use crate::lexer::{Tok, Token};
 
 pub struct Parser {
@@ -87,6 +87,8 @@ pub fn parse(toks: Vec<Token>) -> Result<Program, String> {
         }
         if p.is_word("import") || p.is_word("from") {
             stmts.push(p.import_stmt()?);
+        } else if p.is_word("export") {
+            stmts.push(p.export_stmt()?);
         } else {
             stmts.push(p.stmt()?);
         }
@@ -178,7 +180,9 @@ impl Parser {
                 self.bump();
                 Ok(())
             }
-            Tok::Eof => Ok(()),
+            // A body can end right after its last statement; the enclosing
+            // block consumes the dedent.
+            Tok::Eof | Tok::Dedent => Ok(()),
             other => Err(format!(
                 "line {}: I expected the end of the line here, but found {}",
                 self.line(),
@@ -249,12 +253,90 @@ impl Parser {
         })
     }
 
+    fn export_stmt(&mut self) -> Result<Stmt, String> {
+        let line = self.line();
+        self.bump(); // "export"
+
+        if let Tok::Str(path) = self.peek().clone() {
+            self.bump();
+            let alias = if self.eat_word("as") {
+                Some(self.name("after 'as'")?)
+            } else {
+                None
+            };
+            self.end_of_line()?;
+            return Ok(Stmt::Export {
+                path: Some(path),
+                alias,
+                names: Vec::new(),
+                line,
+            });
+        }
+
+        match self.peek().clone() {
+            Tok::Ident(_) => {
+                let mut names = Vec::new();
+                loop {
+                    let name = self.name("after 'export'")?;
+                    let alias = if self.eat_word("as") {
+                        Some(self.name("after 'as'")?)
+                    } else {
+                        None
+                    };
+                    names.push((name, alias));
+                    if self.peek() != &Tok::Comma {
+                        break;
+                    }
+                    self.bump();
+                }
+                if self.eat_word("from") {
+                    let path = match self.peek().clone() {
+                        Tok::Str(s) => {
+                            self.bump();
+                            s
+                        }
+                        Tok::Ident(s) => {
+                            self.bump();
+                            s
+                        }
+                        other => {
+                            return Err(format!(
+                            "line {}: after 'export ... from' I expected a file name, but found {}",
+                            self.line(),
+                            other.describe()
+                        ))
+                        }
+                    };
+                    self.end_of_line()?;
+                    return Ok(Stmt::Export {
+                        path: Some(path),
+                        alias: None,
+                        names,
+                        line,
+                    });
+                }
+                self.end_of_line()?;
+                Ok(Stmt::Export {
+                    path: None,
+                    alias: None,
+                    names,
+                    line,
+                })
+            }
+            other => Err(format!(
+                "line {}: after 'export' I expected a file name in quotes or a name, but found {}",
+                self.line(),
+                other.describe()
+            )),
+        }
+    }
+
     fn stmt(&mut self) -> Result<Stmt, String> {
         let line = self.line();
 
-        if self.is_word("import") || self.is_word("from") {
+        if self.is_word("import") || self.is_word("from") || self.is_word("export") {
             return Err(format!(
-                "line {}: imports only work at the top level, not inside a block",
+                "line {}: imports and exports only work at the top level, not inside a block",
                 self.line()
             ));
         }
@@ -502,6 +584,11 @@ impl Parser {
                     let elem = self.elem_name("after 'list of',")?;
                     return Ok(Ty::Array(elem));
                 }
+                if word == "function" {
+                    self.bump();
+                    let ft = self.func_type_tail(after)?;
+                    return Ok(Ty::Func(std::rc::Rc::new(ft)));
+                }
                 if word == "truth" {
                     self.bump();
                     if !self.eat_word("value") {
@@ -515,7 +602,7 @@ impl Parser {
                     "boolean" | "booleans" => Ty::Bool,
                     _ => {
                         return Err(format!(
-                            "line {}: {after} I expected 'a number', 'text', 'a truth value', or 'a list of ...', but found '{word}'",
+                            "line {}: {after} I expected 'a number', 'text', 'a truth value', 'a list of ...', or 'a function taking ... giving back ...', but found '{word}'",
                             self.line()
                         ))
                     }
@@ -524,11 +611,37 @@ impl Parser {
                 Ok(ty)
             }
             other => Err(format!(
-                "line {}: {after} I expected a kind of value ('a number', 'text', 'a truth value', or 'a list of ...'), but found {}",
+                "line {}: {after} I expected a kind of value ('a number', 'text', 'a truth value', 'a list of ...', or 'a function taking ... giving back ...'), but found {}",
                 self.line(),
                 other.describe()
             )),
         }
+    }
+
+    /// The rest of a function kind, after the word `function`:
+    /// `taking TYPE, TYPE giving back TYPE`, or `giving back TYPE`.
+    fn func_type_tail(&mut self, after: &str) -> Result<FuncTy, String> {
+        let mut params = Vec::new();
+        if self.eat_word("taking") {
+            loop {
+                if !self.eat_word("a") {
+                    self.eat_word("an");
+                }
+                let param = self.type_name("in a function kind,")?;
+                params.push(param);
+                if self.peek() != &Tok::Comma {
+                    break;
+                }
+                self.bump();
+            }
+        }
+        self.need_word("giving", after)?;
+        self.need_word("back", after)?;
+        if !self.eat_word("a") {
+            self.eat_word("an");
+        }
+        let ret = self.type_name("after 'giving back',")?;
+        Ok(FuncTy { params, ret })
     }
 
     /// The plural item phrase after "of", such as `numbers`, `text`,
@@ -541,6 +654,13 @@ impl Parser {
                     self.need_word("of", "after 'lists',")?;
                     let inner = self.elem_name("after 'lists of',")?;
                     return Ok(inner.nested());
+                }
+                if word == "function" || word == "functions" {
+                    self.bump();
+                    // The item phrase names functions in the plural, but the
+                    // kind itself still starts with `taking` or `giving back`.
+                    let ft = self.func_type_tail(after)?;
+                    return Ok(Elem::function(std::rc::Rc::new(ft)));
                 }
                 let base = match word.as_str() {
                     "number" | "numbers" => Base::Int,
@@ -830,6 +950,9 @@ impl Parser {
     }
 
     fn primary(&mut self) -> Result<Expr, String> {
+        if self.is_lambda_start() {
+            return self.lambda_expr();
+        }
         match self.peek().clone() {
             Tok::Int(n) => {
                 self.bump();
@@ -1285,6 +1408,43 @@ mod tests {
                 if names == &vec![
                     ("double".to_string(), Some("twice".to_string())),
                     ("pi".to_string(), None),
+                ]
+        ));
+    }
+
+    #[test]
+    fn exports_parse() {
+        let prog = p("export \"math\"\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Export { path: Some(path), names, .. } if path == "math" && names.is_empty()
+        ));
+
+        let prog = p("export \"math\" as m\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Export { path: Some(path), alias: Some(alias), .. }
+                if path == "math" && alias == "m"
+        ));
+
+        let prog = p("export double, add as plus from \"math\"\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Export { path: Some(path), names, .. }
+                if path == "math"
+                    && names == &vec![
+                        ("double".to_string(), None),
+                        ("add".to_string(), Some("plus".to_string())),
+                    ]
+        ));
+
+        let prog = p("export double, add\n");
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Export { path: None, names, .. }
+                if names == &vec![
+                    ("double".to_string(), None),
+                    ("add".to_string(), None),
                 ]
         ));
     }
