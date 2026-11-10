@@ -2063,6 +2063,9 @@ mod tests {
     #[test]
     fn arguments_and_files_work_at_the_prompt() {
         let path = std::env::temp_dir().join(format!("rusk-repl-io-{}.txt", std::process::id()));
+        // Rusk string literals treat `\` as an escape, so show the path with
+        // forward slashes; Windows accepts them too.
+        let path_text = path.display().to_string().replace('\\', "/");
         let mut session = Session::new();
         session.args = vec![b"alpha".to_vec(), b"beta".to_vec()];
 
@@ -2073,11 +2076,11 @@ mod tests {
         session
             .submit(&format!(
                 "write \"from the prompt\" to file \"{}\"\n",
-                path.display()
+                path_text
             ))
             .unwrap();
         session
-            .submit(&format!("let back be read file \"{}\"\n", path.display()))
+            .submit(&format!("let back be read file \"{}\"\n", path_text))
             .unwrap();
 
         assert_eq!(session.globals["first"], Value::Str(b"alpha".to_vec()));

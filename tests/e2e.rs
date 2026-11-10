@@ -62,6 +62,41 @@ fn bake_to_disk(name: &str, src: &str) -> std::path::PathBuf {
     path
 }
 
+/// A just-written executable can briefly report ETXTBSY while another test
+/// thread is closing a descriptor or the filesystem is catching up. Retrying
+/// for a moment keeps the parallel suite deterministic.
+fn is_text_file_busy(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(26) // ETXTBSY on Linux
+}
+
+fn output_with_retry(command: &mut Command) -> std::process::Output {
+    let mut attempts = 0;
+    loop {
+        match command.output() {
+            Ok(out) => return out,
+            Err(error) if is_text_file_busy(&error) && attempts < 20 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("program should start: {error}"),
+        }
+    }
+}
+
+fn spawn_with_retry(command: &mut Command) -> std::process::Child {
+    let mut attempts = 0;
+    loop {
+        match command.spawn() {
+            Ok(child) => return child,
+            Err(error) if is_text_file_busy(&error) && attempts < 20 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => panic!("program should start: {error}"),
+        }
+    }
+}
+
 fn run(name: &str, src: &str) -> (String, i32) {
     let (stdout, _, code) = run_full(name, src);
     (stdout, code)
@@ -69,9 +104,8 @@ fn run(name: &str, src: &str) -> (String, i32) {
 
 fn run_full(name: &str, src: &str) -> (String, String, i32) {
     let path = bake_to_disk(name, src);
-    let out = program_command(&path)
-        .output()
-        .expect("program should start");
+    let mut command = program_command(&path);
+    let out = output_with_retry(&mut command);
     let _ = std::fs::remove_file(&path);
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -1160,11 +1194,8 @@ fn run_with(
     let out = match input {
         Some(input) => {
             command.stdin(Stdio::piped());
-            let mut child = command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("program should start");
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = spawn_with_retry(&mut command);
             child
                 .stdin
                 .take()
@@ -1173,7 +1204,7 @@ fn run_with(
                 .expect("input should be written");
             child.wait_with_output().expect("program should finish")
         }
-        None => command.output().expect("program should start"),
+        None => output_with_retry(&mut command),
     };
 
     let _ = std::fs::remove_file(&path);
