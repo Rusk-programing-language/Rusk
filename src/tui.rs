@@ -11,8 +11,12 @@
 //! no `crossterm`, no `ratatui`, and no hidden runtime.
 
 use std::fmt::Write as FmtWrite;
-use std::io::{self, IsTerminal, Read, Write};
-use std::os::raw::{c_int, c_ulong};
+#[cfg(unix)]
+use std::io::IsTerminal;
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::raw::c_int;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
 /// The wordmark shown when a terminal session starts.
@@ -23,63 +27,71 @@ pub const BANNER: &str = "\
 
 // ---- libc surface ---------------------------------------------------------
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Termios {
-    c_iflag: u32,
-    c_oflag: u32,
-    c_cflag: u32,
-    c_lflag: u32,
-    c_line: u8,
-    c_cc: [u8; 32],
-    c_ispeed: u32,
-    c_ospeed: u32,
+#[cfg(unix)]
+mod unix_ffi {
+    use std::os::raw::{c_int, c_ulong};
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub(super) struct Termios {
+        pub(super) c_iflag: u32,
+        pub(super) c_oflag: u32,
+        pub(super) c_cflag: u32,
+        pub(super) c_lflag: u32,
+        pub(super) c_line: u8,
+        pub(super) c_cc: [u8; 32],
+        pub(super) c_ispeed: u32,
+        pub(super) c_ospeed: u32,
+    }
+
+    #[repr(C)]
+    pub(super) struct Winsize {
+        pub(super) ws_row: u16,
+        pub(super) ws_col: u16,
+        pub(super) ws_xpixel: u16,
+        pub(super) ws_ypixel: u16,
+    }
+
+    #[repr(C)]
+    pub(super) struct PollFd {
+        pub(super) fd: c_int,
+        pub(super) events: i16,
+        pub(super) revents: i16,
+    }
+
+    pub(super) const TCSANOW: c_int = 0;
+    pub(super) const TIOCGWINSZ: c_ulong = 0x5413;
+    pub(super) const POLLIN: i16 = 0x0001;
+
+    pub(super) const BRKINT: u32 = 0x0002;
+    pub(super) const INPCK: u32 = 0x0010;
+    pub(super) const ISTRIP: u32 = 0x0020;
+    pub(super) const ICRNL: u32 = 0x0100;
+    pub(super) const IXON: u32 = 0x0400;
+
+    pub(super) const OPOST: u32 = 0x0001;
+
+    pub(super) const CS8: u32 = 0x0030;
+    pub(super) const PARENB: u32 = 0x0100;
+
+    pub(super) const ISIG: u32 = 0x0001;
+    pub(super) const ICANON: u32 = 0x0002;
+    pub(super) const ECHO: u32 = 0x0008;
+    pub(super) const IEXTEN: u32 = 0x8000;
+
+    pub(super) const VTIME: usize = 5;
+    pub(super) const VMIN: usize = 6;
+
+    extern "C" {
+        pub(super) fn tcgetattr(fd: c_int, termios: *mut Termios) -> c_int;
+        pub(super) fn tcsetattr(fd: c_int, action: c_int, termios: *const Termios) -> c_int;
+        pub(super) fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+        pub(super) fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
+    }
 }
 
-#[repr(C)]
-struct Winsize {
-    ws_row: u16,
-    ws_col: u16,
-    ws_xpixel: u16,
-    ws_ypixel: u16,
-}
-
-#[repr(C)]
-struct PollFd {
-    fd: c_int,
-    events: i16,
-    revents: i16,
-}
-
-const TCSANOW: c_int = 0;
-const TIOCGWINSZ: c_ulong = 0x5413;
-const POLLIN: i16 = 0x0001;
-
-const BRKINT: u32 = 0x0002;
-const INPCK: u32 = 0x0010;
-const ISTRIP: u32 = 0x0020;
-const ICRNL: u32 = 0x0100;
-const IXON: u32 = 0x0400;
-
-const OPOST: u32 = 0x0001;
-
-const CS8: u32 = 0x0030;
-const PARENB: u32 = 0x0100;
-
-const ISIG: u32 = 0x0001;
-const ICANON: u32 = 0x0002;
-const ECHO: u32 = 0x0008;
-const IEXTEN: u32 = 0x8000;
-
-const VTIME: usize = 5;
-const VMIN: usize = 6;
-
-extern "C" {
-    fn tcgetattr(fd: c_int, termios: *mut Termios) -> c_int;
-    fn tcsetattr(fd: c_int, action: c_int, termios: *const Termios) -> c_int;
-    fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
-    fn poll(fds: *mut PollFd, nfds: c_ulong, timeout: c_int) -> c_int;
-}
+#[cfg(unix)]
+use unix_ffi::*;
 
 // ---- ANSI frames ----------------------------------------------------------
 
@@ -375,6 +387,7 @@ impl KeyDecoder {
 
     /// Called after a short wait: a lone escape is the Esc key, and an
     /// incomplete sequence becomes Unknown instead of hanging forever.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn flush_partial(&mut self) -> Option<Key> {
         if self.pending.is_empty() {
             return None;
@@ -424,6 +437,7 @@ fn tilde_key(params: &[u8]) -> Key {
 // ---- terminal -------------------------------------------------------------
 
 /// A terminal in raw mode, with a plain fallback for pipes and redirection.
+#[cfg(unix)]
 pub struct Terminal {
     fd: c_int,
     original: Option<Termios>,
@@ -434,6 +448,7 @@ pub struct Terminal {
     decoder: KeyDecoder,
 }
 
+#[cfg(unix)]
 impl Terminal {
     /// Detect whether a real terminal is available. Falls back to a 24x80
     /// screen and line-oriented input when stdin or stdout is redirected.
@@ -613,9 +628,92 @@ impl Terminal {
     }
 }
 
+#[cfg(unix)]
 impl Drop for Terminal {
     fn drop(&mut self) {
         let _ = self.leave();
+    }
+}
+
+/// Windows has no POSIX terminal, so the full-screen session falls back to the
+/// ordinary line session. The ANSI buffer and key decoder are still available
+/// so the rest of the tool behaves the same way.
+#[cfg(not(unix))]
+pub struct Terminal {
+    width: u16,
+    height: u16,
+    decoder: KeyDecoder,
+    eof: bool,
+}
+
+#[cfg(not(unix))]
+impl Terminal {
+    pub fn open() -> io::Result<Self> {
+        let mut terminal = Terminal {
+            width: 80,
+            height: 24,
+            decoder: KeyDecoder::new(),
+            eof: false,
+        };
+        terminal.size_from_env();
+        Ok(terminal)
+    }
+
+    pub fn is_interactive(&self) -> bool {
+        false
+    }
+
+    pub fn size(&self) -> (u16, u16) {
+        (self.width, self.height)
+    }
+
+    pub fn enter(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub fn leave(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    pub fn draw(&mut self, frame: &Ansi) -> io::Result<()> {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        out.write_all(frame.bytes())?;
+        out.flush()
+    }
+
+    pub fn read_key(&mut self) -> io::Result<Option<Key>> {
+        loop {
+            if let Some(key) = self.decoder.next_key() {
+                return Ok(Some(key));
+            }
+            if self.eof {
+                return Ok(Some(Key::Eof));
+            }
+            let mut buffer = [0u8; 256];
+            match io::stdin().read(&mut buffer) {
+                Ok(0) => {
+                    self.eof = true;
+                    return Ok(Some(Key::Eof));
+                }
+                Ok(n) => self.decoder.feed(&buffer[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn size_from_env(&mut self) {
+        if let Ok(columns) = std::env::var("COLUMNS") {
+            if let Ok(width) = columns.parse::<u16>() {
+                self.width = width.max(1);
+            }
+        }
+        if let Ok(lines) = std::env::var("LINES") {
+            if let Ok(height) = lines.parse::<u16>() {
+                self.height = height.max(1);
+            }
+        }
     }
 }
 

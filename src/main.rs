@@ -60,6 +60,13 @@ fn run(args: &[String]) -> Result<(), String> {
         "run" => {
             let (input, program_args, target) = parse_run_target(&args[1..])?;
             let bytes = bake_bytes(&input, target)?;
+            if cfg!(windows) {
+                return Err(
+                    "Rusk bakes Linux executables, and Windows can't run ELF files directly. \
+                     Use 'rusk build' and run the result in WSL or on a Linux machine."
+                        .to_string(),
+                );
+            }
             let out = std::env::temp_dir().join(format!("rusk-run-{}", std::process::id()));
             elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
             let status = Command::new(&out)

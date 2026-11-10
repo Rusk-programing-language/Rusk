@@ -89,3 +89,32 @@ jobs:
           cargo run --quiet -- check selfhost/interpreter.rk
           output="$(cargo run --quiet -- run selfhost/interpreter.rk selfhost/demo.rk)"
           test "$output" = "$(printf '42\n15\n51')"
+
+  windows:
+    name: windows (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build and test
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+
+      - name: Check example programs
+        run: |
+          cargo run --quiet -- check examples/hello.rk
+          cargo run --quiet -- check examples/lists.rk
+          cargo run --quiet -- check selfhost/interpreter.rk
+
+      - name: Check the installer syntax
+        shell: bash
+        run: sh -n toastset

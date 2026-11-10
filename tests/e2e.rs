@@ -5,6 +5,10 @@
 //! point `RUSK_E2E_RUNNER` at a user-mode emulator such as `qemu-x86_64` when
 //! that target is not the host. The runner is also found on `PATH`.
 
+// Baked programs are Linux ELF files, so the end-to-end suite needs a Linux
+// host (or an emulator on one). Other platforms still build and check them.
+#![cfg(unix)]
+
 use std::process::Command;
 
 fn e2e_target() -> rusk::Target {

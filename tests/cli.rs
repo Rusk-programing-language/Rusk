@@ -6,6 +6,7 @@ fn rusk() -> &'static str {
     env!("CARGO_BIN_EXE_rusk")
 }
 
+#[cfg(unix)]
 #[test]
 fn run_forwards_arguments_after_the_file() {
     let dir = std::env::temp_dir().join(format!("rusk-cli-{}", std::process::id()));

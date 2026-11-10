@@ -4,8 +4,9 @@ Rusk is a small, English-shaped language with an ahead-of-time compiler that
 emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.1, Linux on AArch64 and x86-64**. Everything here is implemented
-and tested; anything not here does not exist yet.
+Status: **v1.1, Linux on AArch64 and x86-64**. The compiler also builds and
+runs on Windows x86-64, but every program it emits targets Linux. Everything
+here is implemented and tested; anything not here does not exist yet.
 
 ---
 
@@ -922,7 +923,8 @@ that architecture, for example through `binfmt_misc` or QEMU.
 
 Release builds are published both as glibc-linked and statically linked musl
 binaries for AArch64 and x86-64, so the compiler also runs on Termux, Alpine,
-and other systems without a glibc loader.
+and other systems without a glibc loader. A Windows x86-64 build
+(`rusk.exe`) is published too; it compiles the same Linux ELF output.
 
 The output is a static ELF64 executable for the selected target:
 
@@ -1014,11 +1016,15 @@ value; the ownership pass is what prevents it from being moved or changed.
   directories, sockets, processes, or random-access file positions, and a path
   is limited to 4095 bytes.
 - The native TUI uses Linux `termios` and ANSI escapes. It is for the `rusk`
-  tool only; baked programs have no terminal primitives yet.
-- Only Linux is supported. The two backends are AArch64 and x86-64; there is no
-  macOS, Windows, or 32-bit output. The x86-64 backend allocates registers
-  within straight-line blocks and spills at branches and calls, so it is close
-  to the AArch64 output but is not a global register allocator yet.
+  tool only; baked programs have no terminal primitives yet. On Windows the
+  full-screen session falls back to the line-oriented REPL.
+- Only Linux is supported as an output platform. The two backends are AArch64
+  and x86-64; there is no macOS, Windows, or 32-bit output. The compiler host
+  can be Linux or Windows x86-64; on Windows, `rusk build` and `rusk check`
+  work, but `rusk run` cannot start the Linux ELF natively. The x86-64 backend
+  allocates registers within straight-line blocks and spills at branches and
+  calls, so it is close to the AArch64 output but is not a global register
+  allocator yet.
 - At most 8 parameters per function. There is no function overloading.
 
 ## 16. Roadmap

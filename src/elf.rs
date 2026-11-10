@@ -9,6 +9,7 @@ use crate::aarch64::{IMAGE_BASE, TEXT_OFFSET};
 use crate::backend::Target;
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -99,9 +100,12 @@ pub fn build_for(target: Target, text: &[u8], rodata: &[u8], bss: u64) -> Vec<u8
 
 pub fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::write(path, bytes)?;
-    let mut perms = fs::metadata(path)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(path, perms)?;
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms)?;
+    }
     Ok(())
 }
 

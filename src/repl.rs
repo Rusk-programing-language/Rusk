@@ -17,7 +17,6 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -68,6 +67,44 @@ impl Value {
             Value::Func(_) => "<function>".to_string(),
             Value::Nothing => "nothing".to_string(),
         }
+    }
+}
+
+/// Turn Rusk text into a filesystem path. Unix keeps the exact bytes; Windows
+/// has to decode them as UTF-8 because its paths are UTF-16.
+fn path_from_bytes(bytes: &[u8]) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::path::PathBuf::from(OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        std::path::PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+fn os_string_from_bytes(bytes: &[u8]) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        OsStr::from_bytes(bytes).to_os_string()
+    }
+    #[cfg(not(unix))]
+    {
+        std::ffi::OsString::from(String::from_utf8_lossy(bytes).into_owned())
+    }
+}
+
+fn os_string_bytes(value: &OsStr) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        value.as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        value.to_string_lossy().into_owned().into_bytes()
     }
 }
 
@@ -457,7 +494,7 @@ impl Session {
                         ))
                     }
                 };
-                std::fs::write(Path::new(OsStr::from_bytes(&path)), text)
+                std::fs::write(path_from_bytes(&path), text)
                     .map_err(|_| format!("line {}: I can't write to that file", self.line))?;
                 Ok(Flow::Normal)
             }
@@ -859,8 +896,8 @@ impl Session {
                     }
                 };
                 Ok(Value::Str(
-                    std::env::var_os(OsStr::from_bytes(&name))
-                        .map(|v| v.as_bytes().to_vec())
+                    std::env::var_os(os_string_from_bytes(&name))
+                        .map(|v| os_string_bytes(&v))
                         .unwrap_or_default(),
                 ))
             }
@@ -877,7 +914,7 @@ impl Session {
                         ))
                     }
                 };
-                let bytes = std::fs::read(Path::new(OsStr::from_bytes(&path)))
+                let bytes = std::fs::read(path_from_bytes(&path))
                     .map_err(|_| format!("line {}: I can't open that file", self.line))?;
                 Ok(Value::Str(bytes))
             }

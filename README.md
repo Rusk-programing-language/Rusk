@@ -48,7 +48,13 @@ closes a file so chained sources do not run into each other.
 The compiler is a lexer, parser, import expander, type checker, ownership
 checker, target-selecting code generator, two machine-code backends, and an ELF
 writer, with **245 tests**. The end-to-end suite also runs against x86-64 under
-QEMU. It targets **Linux on AArch64 and x86-64**.
+QEMU. It bakes **Linux executables for AArch64 and x86-64**, and the compiler
+itself runs on Linux or on Windows x86-64.
+
+On Windows, `rusk build`, `rusk check`, and both REPL modes work. `rusk run`
+reports that the baked ELF cannot execute natively; build the program and run
+it under WSL or on a Linux machine, use `--target aarch64`/`x86_64` for
+cross-baking, or use a Linux host for the whole loop.
 
 The first self-hosting step also lives in the tree: `selfhost/interpreter.rk`
 is an integer-expression interpreter written in Rusk and compiled by Rusk. See
@@ -79,7 +85,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.1.1
+sh toastset --version 1.1.2
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -88,6 +94,14 @@ On Termux and other musl-based systems (including Alpine), `toastset` picks the
 statically linked musl build automatically; the same static build also runs on
 ordinary glibc Linux. Downloads show a progress bar in a terminal, and running
 the script again upgrades the installed copy in place.
+
+On Windows, run the same command from Git Bash, MSYS2, or Cygwin. `toastset`
+installs `rusk.exe`, adds its bin directory to your shell profile, and updates
+the Windows user `PATH` through PowerShell, so new terminals find `rusk`
+without any manual setup. Pass `--no-modify-path` (or `TOASTSET_NO_MODIFY_PATH=1`)
+to leave profiles alone, or `--bin-dir` to choose the directory yourself. A
+plain PowerShell or `cmd.exe` session has no `sh`, so use Git Bash, MSYS2, or
+Cygwin for the installer.
 
 ## A taste of the language
 
@@ -361,7 +375,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.1 — an English-like language
+Rusk 1.1.2 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -525,7 +539,8 @@ Honest list, so the docs don't lie:
 - Text positions count bytes, not Unicode characters.
 - At most 8 parameters per function. There is no overloading.
 - Linux only, on AArch64 or x86-64. There is no macOS, Windows, or 32-bit
-  backend.
+  backend. The compiler itself also runs on Windows x86-64, but its output is
+  still a Linux ELF, so `rusk run` is unavailable there.
 - The x86-64 register allocator works within straight-line blocks and spills at
   every branch and call. It is much closer to AArch64 than the old
   memory-backed encoder, but it is not a global allocator yet.
@@ -554,6 +569,41 @@ The interpreter is a real bootstrap step: every part of it — tokenising,
 parsing, precedence, and evaluation — is written in Rusk and baked to a static
 ELF with the same compiler that runs it. Full compiler self-hosting is the next
 stage, not a claim of this release.
+
+## What you can build
+
+Rusk is aimed at small, self-contained Linux programs: command-line tools,
+calculators, text and file filters, teaching examples, and experiments in
+compiler and language design. A baked program is a single static ELF with no
+runtime, so it is easy to copy to a server, container, or Termux device.
+
+It is a young language, and that limits the honest answer. Today it has no
+networking, threads, GUI toolkit, package registry, or Windows/macOS output. It
+is not ready for large applications, services, embedded systems, or libraries
+that other languages call into. Treat it as a compact AOT language for small
+programs, not as a general-purpose production platform yet.
+
+## How it compares
+
+- **C** — the closest comparison for small static binaries and direct machine
+  code. Rusk trades C's ecosystem and portability for a smaller compiler and an
+  English-like syntax; C is far more capable and battle-tested.
+- **Go** — also compiles to a self-contained executable with a simple feel, but
+  Go has a large standard library, concurrency, and a mature toolchain. Rusk is
+  orders of magnitude smaller in scope.
+- **Zig** — shares the "small compiler, no hidden runtime, own backend" ethos.
+  Zig is a serious systems language with broad targets; Rusk is a teaching- and
+  experiment-sized language with two Linux targets.
+- **Python, Lua, and shell** — similar beginner-friendly readability, but those
+  are interpreted or scripted. Rusk's difference is ahead-of-time machine code
+  and a dependency-free output binary.
+- **Rust** — shares the name's bakery joke, not the goals. Rust is a
+  full systems language with safety guarantees and a huge ecosystem; Rusk is
+  deliberately tiny and much less safe.
+
+The fair summary: Rusk competes on *simplicity and tiny static output* with
+teaching languages and small CLI tools. It does not yet compete with C, Go, Zig,
+or Rust on capability, libraries, or production readiness.
 
 ## Why the name
 

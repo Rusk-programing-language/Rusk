@@ -65,6 +65,10 @@ You need Rust and Cargo. The compiler itself runs on the host; the programs it
 produces run on **Linux**, on either **AArch64** or **x86-64**. Bakes default to
 the host architecture.
 
+The compiler host can be Linux on AArch64 or x86-64, or Windows on x86-64.
+Builds and checks are identical on Windows, but `rusk run` cannot execute the
+Linux ELF it produces; build it and run it under WSL or on a Linux machine.
+
 ```console
 git clone https://github.com/Rusk-programing-language/Rusk.git
 cd Rusk
@@ -91,11 +95,17 @@ It picks a static musl build on Termux, Alpine, and other musl systems, and a
 glibc build on ordinary Linux. Running it again upgrades in place. A progress
 bar appears while the archive downloads.
 
+On Windows (x86-64), run the same installer from Git Bash, MSYS2, or Cygwin.
+It installs `rusk.exe`, adds the bin directory to your shell profile, and
+updates the Windows user `PATH` via PowerShell. New terminals then find `rusk`
+automatically. Use `--no-modify-path` to skip both profile and `PATH` edits, or
+`--bin-dir` to pick the installation directory.
+
 Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.1 — code, baked ahead of time
+rusk 1.1.2 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -791,7 +801,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.1 — an English-like language
+Rusk 1.1.2 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -886,7 +896,9 @@ and you can continue typing.
   or put `target/release/rusk` on your `PATH`.
 - **The binary won't run** — baked programs are Linux only, for AArch64 or
   x86-64. Check the target with `file ./program` and the host with `uname -m`;
-  cross-baked programs need an emulator or `binfmt_misc`.
+  cross-baked programs need an emulator or `binfmt_misc`. On a Windows host,
+  use the build and run it under WSL or on Linux, because Windows cannot start
+  an ELF file directly.
 - **`rusk build` writes nothing** — baking failed; read the message. `rusk
   check` is useful for editor/CI loops.
 - **A list keeps growing memory usage** — the heap is bump-allocated. Growth
