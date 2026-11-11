@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.1
+# The Rusk Language — Specification v1.1.3
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
 emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.1, Linux on AArch64 and x86-64**. The compiler also builds and
+Status: **v1.1.3, Linux on AArch64 and x86-64**. The compiler also builds and
 runs on Windows x86-64, but every program it emits targets Linux. Everything
 here is implemented and tested; anything not here does not exist yet.
 
@@ -168,12 +168,22 @@ runtime:
 ```rusk
 say number of arguments        # how many arguments follow the program name
 say argument 1                 # the first argument, or empty text
+let every be all arguments     # the whole command line as a list of text
 say environment "HOME"         # the variable's text, or empty text
 
 let name be read line          # one line from standard input, without newline
 let rest be read all input     # everything left on standard input
 let text be read file "notes.txt"
 write "fresh" to file "loaf.txt"
+
+make directory "bakery"        # create one directory; existing is success
+say file exists "bakery"       # a truth value
+say list directory "bakery"    # a list of entry names
+rename "bakery/a.txt" to "bakery/b.txt"
+remove file "bakery/b.txt"     # missing files are ignored
+remove directory "bakery"      # empty directories only
+
+say run command "echo hi"      # run /bin/sh -c, print, then give back 0
 
 warn "the oven is hot"         # like `say`, but on standard error
 stop with 2                    # end now with exit status 2
@@ -204,6 +214,28 @@ Rules:
 - `read line`, `read all input`, `read file`, and `environment` each produce a
   fresh owned text value, so their results follow the same move and `copy of`
   rules as other text.
+- `all arguments` produces a fresh list of text holding every argument after
+  the program name. It is the same data as `argument 1` through
+  `argument N`, in order.
+- `make directory PATH` creates one directory. An existing directory is
+  success; any other failure stops with
+  `burnt: I can't make that directory` and status 1.
+- `file exists PATH` gives back `true` when the path can be reached, and
+  `false` otherwise. It does not distinguish a missing path from one the
+  process may not inspect.
+- `list directory PATH` gives back the entry names as a list of text, in the
+  order the kernel reports them, without `.` and `..`. A missing or unreadable
+  directory stops with `burnt: I can't list that directory` and status 1.
+- `rename OLD to NEW` renames or moves a file or directory. A failure stops
+  with `burnt: I can't rename that path`.
+- `remove file PATH` and `remove directory PATH` ignore a path that is already
+  gone. Other failures, including removing a directory that is not empty, stop
+  with `burnt: I can't remove that path`.
+- `run command TEXT` starts `/bin/sh -c TEXT` as a child process. Standard
+  input, output, and error are shared, and the expression gives back the exit
+  status as a number. A failed fork or missing shell gives back `127`.
+- Every path rule above uses the same 4 KiB scratch area as files, so a path
+  longer than 4095 bytes stops with `burnt: that file path is too long`.
 
 ## 6. Expressions
 
@@ -217,7 +249,7 @@ Operator precedence, loosest first:
 | Sum | `+`, `-` | left |
 | Product | `*`, `/` | left |
 | Unary | `-`, `not` | right |
-| Primary | number, text, truth, list, name, call, text in pieces, list item, `copy of`, `argument N`, `number of arguments`, `environment NAME`, `read line`, `read all input`, `read file PATH`, `( ... )` | — |
+| Primary | number, text, truth, list, name, call, text in pieces, list item, `copy of`, `argument N`, `number of arguments`, `all arguments`, `environment NAME`, `read line`, `read all input`, `read file PATH`, `file exists PATH`, `list directory PATH`, `run command TEXT`, `( ... )` | — |
 
 `+` adds two numbers or joins two pieces of text. `-`, `*`, and `/` are numbers
 only. A bare `is` means `is equal to`: `if name is "Rusk":`.
@@ -260,11 +292,12 @@ Rules:
 
 ### Joining text
 
-Text is immutable. `left + right` allocates a new string in a fixed 1 MiB heap
-inside the program's data area, copies both byte blobs into it, and hands back
-the new value. Nothing is freed: this language is small and programs are short,
-but a long-running loop that keeps joining text will eventually run out of heap
-and stop with `burnt: the program ran out of memory`.
+Text is immutable. `left + right` allocates a new string from the program's
+heap, copies both byte blobs into it, and hands back the new value. The heap
+starts as one mapped chunk, adds chunks on demand, and reuses freed list and
+input buffers, but ordinary text joins are not reclaimed. A long-running loop
+that keeps joining text eventually exhausts memory and stops with
+`burnt: the program ran out of memory`.
 
 ### Measuring, indexing, and slicing text
 
@@ -398,8 +431,8 @@ Rules:
   from the program's point of view; the name keeps ownership.
 - Lists have a capacity behind the scenes. `add` uses spare capacity when it
   can and otherwise reallocates with at least four slots or twice the old
-  capacity. `remove` never shrinks the capacity, and the old block is not
-  reclaimed when a list grows.
+  capacity, then hands the old block back to the heap. `remove` never shrinks
+  the capacity.
 - Lists do not compare with `is` or the ordering operators yet.
 
 ## 7. Blocks
@@ -529,7 +562,7 @@ to roll:
 
 - `to NAME:` starts a function with no parameters.
 - `to NAME with P as KIND and P as KIND:` declares parameters; `and` separates
-  them. A function may have at most 8 parameters.
+  them. A function may have at most 128 parameters.
 - Writing `P as a view of KIND` makes a **borrowed** parameter: the caller's
   value is lent read-only instead of being moved. See §4.1.
 - A function body is an indented block, just like an `if`.
@@ -793,7 +826,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.0.0 — an English-like language
+Rusk 1.1.3 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -908,6 +941,10 @@ crashes:
 | unreadable file | `burnt: I can't open that file` | 1 |
 | unwritable file | `burnt: I can't write to that file` | 1 |
 | file path longer than 4095 bytes | `burnt: that file path is too long` | 1 |
+| directory cannot be made | `burnt: I can't make that directory` | 1 |
+| directory cannot be listed | `burnt: I can't list that directory` | 1 |
+| path cannot be renamed | `burnt: I can't rename that path` | 1 |
+| path cannot be removed | `burnt: I can't remove that path` | 1 |
 
 `stop with CODE` is not an error: it exits immediately with the requested
 status and prints no message.
@@ -932,43 +969,56 @@ The output is a static ELF64 executable for the selected target:
 - one `PT_LOAD` segment mapping the whole image read/write/execute;
 - code at virtual address `0x400000 + 0x78`;
 - writable data (top-level variables, the number buffer, file-path scratch
-  space, the text and list heap, and the x86-64 virtual-register homes) placed
+  space, heap chunk pointers, and the x86-64 virtual-register homes) placed
   on the next 4 KiB boundary after the text and read-only data, zero-filled by
   the kernel, with its address patched into the code after layout;
 - no interpreter, no dynamic section, no load-time relocations, no libc.
 
 Because there is no libc, output and file I/O are direct Linux syscalls.
 AArch64 uses `x8` for the number: `write` is `64`, `exit` is `93`, `read` is
-`63`, `openat` is `56`, and `close` is `57`. x86-64 uses `rax`: `write` is `1`,
-`exit` is `60`, `read` is `0`, `openat` is `257`, and `close` is `3`. The
-initial stack pointer is saved in the data area at entry so command-line
-arguments and environment variables can be walked without a C startup routine.
+`63`, `openat` is `56`, and `close` is `57`; directories and processes use
+`mkdirat` `34`, `unlinkat` `35`, `renameat` `38`, `getdents64` `61`,
+`faccessat` `48`, `clone` `220`, `execve` `221`, `wait4` `260`, and `mmap` `222`.
+x86-64 uses `rax`: `write` is `1`, `exit` is `60`, `read` is `0`, `openat` is
+`257`, and `close` is `3`, with `mkdirat` `258`, `unlinkat` `263`, `renameat`
+`264`, `getdents64` `217`, `faccessat` `269`, `clone` `56`, `execve` `59`,
+`wait4` `61`, and `mmap` `9`. The initial stack pointer is saved in the data
+area at entry so command-line arguments and environment variables can be walked
+without a C startup routine.
 
 The code generator is written against one small virtual-register language:
-arguments in `X0..X7`, the result in `X0`, the frame pointer in `X29`, and a
-zero register `XZR`. On AArch64 those are the real registers, the return
-address rides in `X30`, and each frame stores the caller's `X29`/`X30` at
-`sp+0`/`sp+8`, then its parameters and locals above that. On x86-64 the encoder
-maps virtual registers onto a pool of six caller-saved physical registers
-inside each straight-line block, writes them back to home slots in the data
-area at labels, branches, calls, returns, and syscalls, and reloads them where
-needed. It uses the real `rsp` for `SP` and the processor's `call`/`ret` stack
-for return addresses. Syscall arguments are loaded into `rdi`, `rsi`, `rdx`,
-`r10`, `r8`, and `r9`; AArch64 syscall numbers written by the code generator
-are translated to their x86-64 equivalents. Both backends therefore run the
-same generated program logic and get the same runtime behavior.
+results come back in `X0`, arguments travel in one contiguous stack block
+pointed to by `X18`, the frame pointer is `X29`, and `XZR` is the zero register.
+On AArch64 those are the real registers, the return address rides in `X30`, and
+each frame stores the caller's `X29`/`X30` at `sp+0`/`sp+8`, then its parameters
+and locals above that. On x86-64 the encoder maps virtual registers onto a pool
+of six caller-saved physical registers inside each straight-line block, writes
+them back to home slots in the data area at labels, branches, calls, returns,
+and syscalls, and reloads them where needed. It uses the real `rsp` for `SP` and
+the processor's `call`/`ret` stack for return addresses. Syscall arguments are
+loaded into `rdi`, `rsi`, `rdx`, `r10`, `r8`, and `r9`; AArch64 syscall numbers
+written by the code generator are translated to their x86-64 equivalents. Both
+backends therefore run the same generated program logic and get the same runtime
+behavior.
+
+The heap is a chain of `mmap`-backed chunks. Every block carries a 16-byte
+header holding its size and a link to the next free block; `heap_alloc` walks
+that free list before bumping the current chunk, and `heap_free` puts list and
+input buffers back. When a chunk fills, another one is mapped and linked.
+Joined text, list buffers, and input values all come from this heap.
 
 A list is a pointer to `[len: u64][capacity: u64][item: i64]...`, allocated
-from the same bump heap as joined text. The ownership pass guarantees that only
+from the heap. The ownership pass guarantees that only
 one mutable name refers to a list (apart from read-only views), so changing a
 list never surprises another owner; `copy of` makes a new list and copies every
 item. For nested lists the code generator emits one recursive copy routine and
 one recursive printer per list shape the program actually uses. `array_get` and
 `array_set` check the 1-based index against the stored length and report `an
 item outside the list` on failure. `array_add` writes into spare capacity, or
-allocates a larger block and copies the items when the list is full.
-`array_remove_last` and `array_remove_at` reduce the length and shift later
-items left; removing from an empty list reports `there's nothing to remove`.
+allocates a larger block, copies the items, and frees the old block when the
+list is full. `array_remove_last` and `array_remove_at` reduce the length and
+shift later items left; removing from an empty list reports `there's nothing to
+remove`.
 
 A function value is a pointer to `[code: u64][capture count: u64][capture:
 i64]...`. A dynamic call checks the argument count and kinds, reads the first
@@ -999,8 +1049,9 @@ value; the ownership pass is what prevents it from being moved or changed.
   position-independent, but the data area follows the final text and read-only
   size, so growing a program moves its data instead of colliding with it.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
-- Joined text and list literals come from a 1 MiB bump-allocated heap. Nothing
-  is reclaimed; exhausting it is reported, but memory is not reused.
+- Joined text and list literals come from an `mmap`-backed heap that grows in
+  chunks and reuses freed list and input buffers. Ordinary text joins are not
+  reclaimed, so exhausting memory is still reported rather than collected.
 - Ownership is single-owner. `a view of VALUE` and `as a view of ...` lend a
   value read-only, but views cannot be moved, changed, or stored, and they do
   not outlive the owner's frame. `copy of` is the escape hatch.
@@ -1009,12 +1060,12 @@ value; the ownership pass is what prevents it from being moved or changed.
   value, and text and lists as shared read-only views.
 - Lists are homogeneous but may nest to any depth. They can grow with
   `add VALUE to LIST`, which uses spare capacity or copies the whole list to
-  fresh heap space, and shrink with `remove last from LIST` or
-  `remove item N from LIST`. Capacity never shrinks, and the heap never
-  reclaims old blocks.
-- System I/O covers text files and the three standard streams. There are no
-  directories, sockets, processes, or random-access file positions, and a path
-  is limited to 4095 bytes.
+  fresh heap space and frees the old block, and shrink with
+  `remove last from LIST` or `remove item N from LIST`. Capacity never shrinks.
+- System I/O covers text files, the three standard streams, directories, and
+  shell commands. There are no sockets, threads, signals, baked-program terminal
+  primitives, or random-access file positions, and a path is limited to 4095
+  bytes.
 - The native TUI uses Linux `termios` and ANSI escapes. It is for the `rusk`
   tool only; baked programs have no terminal primitives yet. On Windows the
   full-screen session falls back to the line-oriented REPL.
@@ -1025,18 +1076,22 @@ value; the ownership pass is what prevents it from being moved or changed.
   allocates registers within straight-line blocks and spills at branches and
   calls, so it is close to the AArch64 output but is not a global register
   allocator yet.
-- At most 8 parameters per function. There is no function overloading.
+- At most 128 parameters per function. There is no function overloading.
 
 ## 16. Roadmap
 
 v1.1 implements everything the v1.0 roadmap listed: function-typed parameters,
 function values in lists, functions that give back functions, a
 register-allocating x86-64 encoder, a relocation-aware data layout, and a
-self-hosting interpreter. What remains:
+self-hosting interpreter. v1.1.3 adds the systems core: directory and process
+operations, the whole command line as a list, a growable heap, and 128
+parameters. What remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression
   interpreter written in Rusk and compiled by Rusk.
 - a global x86-64 register allocator that keeps values in registers across
   branches and calls.
-- reclaiming heap memory instead of the current 1 MiB bump allocator.
+- broader systems primitives: IPv4 TCP sockets and baked-program terminal
+  raw-mode input are next, followed by threads and a package registry.
+- reusing memory for joined text instead of only list and input buffers.

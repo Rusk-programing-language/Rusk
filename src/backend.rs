@@ -7,8 +7,8 @@
 
 pub use crate::aarch64::{
     CC_EQ, CC_GE, CC_GT, CC_LE, CC_LT, CC_NE, IMAGE_BASE, SP, SYS_EXIT, SYS_WRITE, TEXT_OFFSET, X0,
-    X1, X10, X11, X12, X13, X14, X15, X16, X17, X19, X2, X20, X21, X22, X23, X24, X29, X3, X30, X4,
-    X5, X6, X7, X8, X9, XZR,
+    X1, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X2, X20, X21, X22, X23, X24, X29, X3,
+    X30, X4, X5, X6, X7, X8, X9, XZR,
 };
 
 use crate::aarch64;
@@ -163,6 +163,13 @@ impl Asm {
         match &mut self.inner {
             Inner::AArch64(a) => a.strb(rt, rn, disp),
             Inner::X86_64(a) => a.strb(rt, rn, disp),
+        }
+    }
+
+    pub fn ldrh(&mut self, rt: u8, rn: u8, disp: u32) {
+        match &mut self.inner {
+            Inner::AArch64(a) => a.ldrh(rt, rn, disp),
+            Inner::X86_64(a) => a.ldrh(rt, rn, disp),
         }
     }
 

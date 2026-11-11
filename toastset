@@ -50,6 +50,17 @@ PATH_PROFILE=""
 [ -n "${TOASTSET_BIN_DIR:-}" ] && EXPLICIT_BIN_DIR=1
 [ "${TOASTSET_NO_MODIFY_PATH:-0}" = "1" ] && MODIFY_PATH=0
 
+# The download bar only uses color when stderr is a terminal and the user has
+# not asked for plain output.
+if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
+    BAR_ORANGE="$(printf '\033[38;5;208m')"
+    BAR_RESET="$(printf '\033[0m')"
+else
+    BAR_ORANGE=""
+    BAR_RESET=""
+fi
+CURSOR_HIDDEN=0
+
 say() { printf '%s\n' "$*"; }
 info() { printf 'toastset: %s\n' "$*"; }
 warn() { printf 'toastset: warning: %s\n' "$*" >&2; }
@@ -127,8 +138,97 @@ download() {
     fetch "$1" "$2" quiet
 }
 
+# Draw one step of the block-style download bar on stderr. Kept POSIX so it
+# works in Termux's busybox ash as well as bash, dash, and zsh.
+print_progress() {
+    bar_bytes="$1"
+    bar_total="$2"
+    [ "$bar_total" -gt 0 ] || return 0
+
+    bar_width=50
+    bar_percent=$(( bar_bytes * 100 / bar_total ))
+    if [ "$bar_percent" -gt 100 ]; then
+        bar_percent=100
+    fi
+    bar_on=$(( bar_percent * bar_width / 100 ))
+    bar_off=$(( bar_width - bar_on ))
+
+    bar_filled=""
+    bar_i=0
+    while [ "$bar_i" -lt "$bar_on" ]; do
+        bar_filled="${bar_filled}■"
+        bar_i=$(( bar_i + 1 ))
+    done
+    bar_empty=""
+    bar_i=0
+    while [ "$bar_i" -lt "$bar_off" ]; do
+        bar_empty="${bar_empty}･"
+        bar_i=$(( bar_i + 1 ))
+    done
+
+    printf '\r%s%s%s %3d%%%s' \
+        "$BAR_ORANGE" "$bar_filled" "$bar_empty" "$bar_percent" "$BAR_RESET" >&4
+}
+
+# Poll the growing download file so the bar updates smoothly without making
+# the renderer depend on how many bytes arrive at once.
 download_with_progress() {
-    fetch "$1" "$2" bar
+    dl_url="$1"
+    dl_output="$2"
+
+    # Windows shells and non-terminal output keep the plain curl/wget bar.
+    if is_windows || [ ! -t 2 ]; then
+        if ! fetch "$dl_url" "$dl_output" bar; then
+            return 1
+        fi
+        return 0
+    fi
+
+    dl_headers="${dl_output}.headers"
+    exec 4>&2
+    printf '\033[?25l' >&2
+    CURSOR_HIDDEN=1
+
+    if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -fsL -D "$dl_headers" -o "$dl_output" "$dl_url" &
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$dl_url" -O "$dl_output" &
+    else
+        printf '\033[?25h' >&2
+        CURSOR_HIDDEN=0
+        exec 4>&-
+        die "I need curl or wget to download Rusk"
+    fi
+    dl_pid=$!
+
+    while kill -0 "$dl_pid" 2>/dev/null; do
+        if [ -f "$dl_output" ]; then
+            dl_total=0
+            if [ -f "$dl_headers" ]; then
+                dl_total="$(grep -i '^content-length:' "$dl_headers" 2>/dev/null | tail -n 1 | tr -dc '0-9')"
+            fi
+            dl_so_far="$(ls -ln "$dl_output" 2>/dev/null | awk '{print $5}')"
+            [ -n "$dl_so_far" ] || dl_so_far=0
+            print_progress "$dl_so_far" "${dl_total:-0}"
+        fi
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+
+    dl_status=0
+    wait "$dl_pid" || dl_status=$?
+
+    if [ "$dl_status" -eq 0 ] && [ -f "$dl_output" ]; then
+        dl_so_far="$(ls -ln "$dl_output" | awk '{print $5}')"
+        print_progress "$dl_so_far" "$dl_so_far"
+    fi
+    printf '\n' >&4
+    exec 4>&-
+    if [ "$CURSOR_HIDDEN" = "1" ]; then
+        printf '\033[?25h' >&2
+        CURSOR_HIDDEN=0
+    fi
+    rm -f "$dl_headers"
+    return "$dl_status"
 }
 
 latest_version() {
@@ -205,43 +305,53 @@ path_line() {
     printf 'export PATH="%s:$PATH"' "$BIN_DIR"
 }
 
+add_path_to() {
+    profile="$1"
+    if grep -F -q "$BIN_DIR" "$profile" 2>/dev/null; then
+        PATH_UPDATED=1
+        PATH_PROFILE="${PATH_PROFILE:-$profile}"
+        return 0
+    fi
+    if {
+        printf '\n# Added by toastset (Rusk)\n'
+        path_line
+        printf '\n'
+    } >>"$profile" 2>/dev/null; then
+        info "added $BIN_DIR to PATH in $profile"
+        PATH_UPDATED=1
+        PATH_PROFILE="${PATH_PROFILE:-$profile}"
+    else
+        warn "I couldn't update $profile; add $BIN_DIR to PATH yourself"
+    fi
+}
+
 add_to_profile() {
     [ "$MODIFY_PATH" = "1" ] || return 0
     [ "$EXPLICIT_BIN_DIR" = "1" ] && return 0
 
-    found=0
-    for profile in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.zshrc"; do
-        [ -e "$profile" ] || continue
-        found=1
-        if grep -F -q "$BIN_DIR" "$profile" 2>/dev/null; then
-            PATH_UPDATED=1
-            PATH_PROFILE="${PATH_PROFILE:-$profile}"
-            continue
-        fi
-        {
-            printf '\n# Added by toastset (Rusk)\n'
-            path_line
-            printf '\n'
-        } >>"$profile"
-        info "added $BIN_DIR to PATH in $profile"
-        PATH_UPDATED=1
-        PATH_PROFILE="${PATH_PROFILE:-$profile}"
-    done
-
-    if [ "$found" = "0" ]; then
-        profile="$HOME/.profile"
-        if {
-            printf '\n# Added by toastset (Rusk)\n'
-            path_line
-            printf '\n'
-        } >>"$profile" 2>/dev/null; then
-            info "added $BIN_DIR to PATH in $profile"
-            PATH_UPDATED=1
-            PATH_PROFILE="$profile"
-        else
-            warn "I couldn't create $profile; add $BIN_DIR to PATH yourself"
-        fi
+    # Login shells read .profile, but Termux and many desktop terminals start
+    # an interactive shell that only reads .bashrc (or .zshrc). Update both so
+    # `rusk` is found in the next shell, not just after a manual export.
+    add_path_to "$HOME/.profile"
+    case "${SHELL:-}" in
+        *zsh*) add_path_to "$HOME/.zshrc" ;;
+        *) add_path_to "$HOME/.bashrc" ;;
+    esac
+    # Also update the other shell's rc file when the user clearly has one, so
+    # switching between bash and zsh keeps finding rusk.
+    if [ -e "$HOME/.zshrc" ]; then
+        add_path_to "$HOME/.zshrc"
     fi
+    if [ -e "$HOME/.bashrc" ]; then
+        add_path_to "$HOME/.bashrc"
+    fi
+    if [ -e "$HOME/.bash_profile" ]; then
+        add_path_to "$HOME/.bash_profile"
+    fi
+    if [ -e "$HOME/.zprofile" ]; then
+        add_path_to "$HOME/.zprofile"
+    fi
+    return 0
 }
 
 add_to_windows_path() {
@@ -357,7 +467,12 @@ archive="${name}.tar.gz"
 url="${BASE_URL}/v${VERSION}/${archive}"
 
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/toastset.XXXXXX")"
-cleanup() { rm -rf "$tmpdir"; }
+cleanup() {
+    if [ "${CURSOR_HIDDEN:-0}" = "1" ]; then
+        printf '\033[?25h' >&2 2>/dev/null || true
+    fi
+    rm -rf "$tmpdir"
+}
 trap cleanup EXIT INT TERM
 
 info "downloading Rusk ${VERSION} for ${TARGET}"

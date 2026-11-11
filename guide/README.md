@@ -5,7 +5,7 @@ time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies.
 
-This guide is for v1.1. For the exact language rules, see
+This guide is for v1.1.3. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -105,7 +105,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.2 — code, baked ahead of time
+rusk 1.1.3 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -352,7 +352,7 @@ say factorial with 5        # 120
 ```
 
 A function with no `give back` gives nothing back and cannot be used as a
-value. At most 8 parameters are allowed.
+value. A function may have up to 128 parameters.
 
 Declared kinds are `a number`, `text`, `a truth value`, and list kinds such as
 `a list of numbers`, `a list of text`, `a list of truth values`, or
@@ -533,8 +533,8 @@ need to keep it.
 
 Behind the scenes, a list stores both a length and a capacity. `add` writes
 into spare capacity when it can. When the list is full, the runtime allocates
-a new block with at least four slots or twice the old capacity and copies the
-items over. Old blocks are not reclaimed.
+a new block with at least four slots or twice the old capacity, copies the
+items over, and hands the old block back to the heap.
 
 ### Removing
 
@@ -672,6 +672,14 @@ one
 two
 ```
 
+`all arguments` gives the whole command line as a list of text, which is handy
+for loops:
+
+```rusk
+for each arg in all arguments:
+    say "[" + arg + "]"
+```
+
 ### Standard input
 
 ```rusk
@@ -701,7 +709,41 @@ write "baked fresh" to file "loaf.txt"
 ```
 
 Paths are used as written. A missing or unreadable file, or a path longer than
-the 4 KiB scratch area, is a Rusk error. Reading stops if the 1 MiB heap fills.
+the 4 KiB scratch area, is a Rusk error.
+
+### Directories and paths
+
+```rusk
+make directory "bakery"
+say file exists "bakery"                 # true
+
+write "rye" to file "bakery/list.txt"
+say list directory "bakery"              # [list.txt]
+
+rename "bakery/list.txt" to "bakery/old.txt"
+remove file "bakery/old.txt"
+remove directory "bakery"
+```
+
+- `make directory PATH` creates one directory. An existing directory is success.
+- `file exists PATH` gives back a truth value and follows the usual filesystem
+  rules for links and permissions.
+- `list directory PATH` gives back a list of entry names as text, without `.`
+  and `..`.
+- `rename OLD to NEW` moves or renames a file or directory.
+- `remove file PATH` deletes a file; `remove directory PATH` deletes an empty
+  directory. Both ignore a path that is already gone.
+
+### Running commands
+
+```rusk
+say run command "echo from the shell"    # prints from the shell, then 0
+say run command "exit 3"                 # 3
+```
+
+`run command TEXT` hands the text to `/bin/sh -c`, lets the child share standard
+input, output, and error, and gives back the exit status. A missing shell or a
+failed fork also gives back `127`.
 
 ### Standard error and exit status
 
@@ -801,7 +843,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.2 — an English-like language
+Rusk 1.1.3 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -884,7 +926,8 @@ burnt: line 4: an item outside the list
 burnt: line 5: there's nothing to remove
 burnt: line 2: division by zero
 burnt: line 7: recursion went too deep
-burnt: line 9: the heap is full
+burnt: line 9: the program ran out of memory
+burnt: line 11: I can't list that directory
 ```
 
 A runtime error stops the program. In the REPL/TUI, the session stays alive
@@ -901,8 +944,10 @@ and you can continue typing.
   an ELF file directly.
 - **`rusk build` writes nothing** — baking failed; read the message. `rusk
   check` is useful for editor/CI loops.
-- **A list keeps growing memory usage** — the heap is bump-allocated. Growth
-  and removal never reclaim old blocks.
+- **A list keeps growing memory usage** — the heap grows in `mmap` chunks.
+  Freed list and input buffers are reused, but text joining still allocates.
+- **`run command` says 127** — `/bin/sh` could not be started, or the shell
+  exited with 127 itself.
 - **Text positions look odd** — `length of`, `letter`, and `part` count bytes,
   not Unicode characters.
 
@@ -983,6 +1028,9 @@ Implemented and checked:
 - Top-level names visible inside functions, with local shadowing
 - A register-allocating x86-64 backend and a relocation-aware data layout
 - Arguments, environment, standard input, files, `warn`, and `stop with`
+- Directory creation, listing, renaming, removal, and existence checks
+- `all arguments` and shell commands with `run command`
+- A growable `mmap`-backed heap with a free list
 - Line REPL and native full-screen TUI
 - A Rusk-in-Rusk interpreter (`selfhost/interpreter.rk`)
 
@@ -991,19 +1039,22 @@ Not implemented yet:
 - Full compiler self-hosting; the interpreter is the bootstrap stage
 - A global x86-64 register allocator that keeps values across branches and
   calls
-- Reclaiming heap memory
+- Sockets, threads, signals, terminal primitives in baked programs, and GUI
+  toolkits
+- A package registry
 
 Backend limits worth knowing:
 
 - The image is placed at a fixed base and is not position-independent, but the
   data area follows the final text size, so large programs grow instead of
   colliding.
-- Lists and joined text share a 1 MiB bump heap. Nothing is reclaimed.
+- Lists and joined text share a growable heap made of mapped chunks. Freed list
+  and input buffers are reused; other allocations are not reclaimed.
 - List capacity never shrinks.
 - A list can hold at most one kind, and lists cannot be compared.
 - Function values cannot be compared. Dynamic calls check arity and argument
   kinds.
-- At most 8 parameters per function.
+- At most 128 parameters per function.
 - The single load segment is RWX.
 
 For the full details, read [`docs/SPEC.md`](../docs/SPEC.md).

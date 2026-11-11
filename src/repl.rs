@@ -498,6 +498,37 @@ impl Session {
                     .map_err(|_| format!("line {}: I can't write to that file", self.line))?;
                 Ok(Flow::Normal)
             }
+            Stmt::MakeDirectory { path, .. } => {
+                let path = self.eval_text(path, env, "make directory")?;
+                match std::fs::create_dir(path_from_bytes(&path)) {
+                    Ok(()) => Ok(Flow::Normal),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(Flow::Normal),
+                    Err(_) => Err(format!("line {}: I can't make that directory", self.line)),
+                }
+            }
+            Stmt::RemoveFile { path, .. } => {
+                let path = self.eval_text(path, env, "remove file")?;
+                match std::fs::remove_file(path_from_bytes(&path)) {
+                    Ok(()) => Ok(Flow::Normal),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Flow::Normal),
+                    Err(_) => Err(format!("line {}: I can't remove that file", self.line)),
+                }
+            }
+            Stmt::RemoveDirectory { path, .. } => {
+                let path = self.eval_text(path, env, "remove directory")?;
+                match std::fs::remove_dir(path_from_bytes(&path)) {
+                    Ok(()) => Ok(Flow::Normal),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Flow::Normal),
+                    Err(_) => Err(format!("line {}: I can't remove that directory", self.line)),
+                }
+            }
+            Stmt::RenamePath { from, to, .. } => {
+                let from = self.eval_text(from, env, "rename")?;
+                let to = self.eval_text(to, env, "rename")?;
+                std::fs::rename(path_from_bytes(&from), path_from_bytes(&to))
+                    .map_err(|_| format!("line {}: I can't rename that path", self.line))?;
+                Ok(Flow::Normal)
+            }
             Stmt::If {
                 cond, then, other, ..
             } => {
@@ -918,6 +949,44 @@ impl Session {
                     .map_err(|_| format!("line {}: I can't open that file", self.line))?;
                 Ok(Value::Str(bytes))
             }
+            Expr::ListDirectory(path) => {
+                let path = self.eval_text(path, env, "list directory")?;
+                let entries = std::fs::read_dir(path_from_bytes(&path))
+                    .map_err(|_| format!("line {}: I can't list that directory", self.line))?;
+                let mut names = Vec::new();
+                for entry in entries.flatten() {
+                    names.push(Value::Str(os_string_bytes(entry.file_name().as_os_str())));
+                }
+                Ok(Value::Array(Rc::new(RefCell::new(names))))
+            }
+            Expr::FileExists(path) => {
+                let path = self.eval_text(path, env, "file exists")?;
+                Ok(Value::Bool(path_from_bytes(&path).exists()))
+            }
+            Expr::AllArguments => Ok(Value::Array(Rc::new(RefCell::new(
+                self.args
+                    .iter()
+                    .cloned()
+                    .map(Value::Str)
+                    .collect::<Vec<_>>(),
+            )))),
+            Expr::RunCommand(command) => {
+                let command = self.eval_text(command, env, "run command")?;
+                let mut cmd = if cfg!(windows) {
+                    let mut c = std::process::Command::new("cmd");
+                    c.arg("/C");
+                    c
+                } else {
+                    let mut c = std::process::Command::new("sh");
+                    c.arg("-c");
+                    c
+                };
+                cmd.arg(os_string_from_bytes(&command));
+                let status = cmd
+                    .status()
+                    .map_err(|_| format!("line {}: I can't run that command", self.line))?;
+                Ok(Value::Int(status.code().unwrap_or(1) as i64))
+            }
             Expr::Unary(op, inner) => {
                 let value = self.eval(inner, env)?;
                 match (op, value) {
@@ -976,6 +1045,22 @@ impl Session {
             Value::Int(n) => Ok(n),
             other => Err(format!(
                 "line {}: I expected a number here, but found {}",
+                self.line,
+                kind_name(&other)
+            )),
+        }
+    }
+
+    fn eval_text(
+        &mut self,
+        expr: &Expr,
+        env: &mut HashMap<String, Value>,
+        what: &str,
+    ) -> Result<Vec<u8>, String> {
+        match self.eval(expr, env)? {
+            Value::Str(bytes) => Ok(bytes),
+            other => Err(format!(
+                "line {}: '{what}' needs text here, but this is {}",
                 self.line,
                 kind_name(&other)
             )),

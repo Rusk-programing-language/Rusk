@@ -373,6 +373,23 @@ impl Rewriter<'_> {
                 path: self.expr(path, locals),
                 line,
             },
+            Stmt::MakeDirectory { path, line } => Stmt::MakeDirectory {
+                path: self.expr(path, locals),
+                line,
+            },
+            Stmt::RemoveFile { path, line } => Stmt::RemoveFile {
+                path: self.expr(path, locals),
+                line,
+            },
+            Stmt::RemoveDirectory { path, line } => Stmt::RemoveDirectory {
+                path: self.expr(path, locals),
+                line,
+            },
+            Stmt::RenamePath { from, to, line } => Stmt::RenamePath {
+                from: self.expr(from, locals),
+                to: self.expr(to, locals),
+                line,
+            },
             Stmt::If {
                 cond,
                 then,
@@ -506,6 +523,10 @@ impl Rewriter<'_> {
             Expr::ArgCount => Expr::ArgCount,
             Expr::Environment(name) => Expr::Environment(Box::new(self.expr(*name, locals))),
             Expr::ReadFile(path) => Expr::ReadFile(Box::new(self.expr(*path, locals))),
+            Expr::ListDirectory(path) => Expr::ListDirectory(Box::new(self.expr(*path, locals))),
+            Expr::FileExists(path) => Expr::FileExists(Box::new(self.expr(*path, locals))),
+            Expr::AllArguments => Expr::AllArguments,
+            Expr::RunCommand(command) => Expr::RunCommand(Box::new(self.expr(*command, locals))),
             Expr::Unary(op, inner) => Expr::Unary(op, Box::new(self.expr(*inner, locals))),
             Expr::Binary(op, left, right) => Expr::Binary(
                 op,

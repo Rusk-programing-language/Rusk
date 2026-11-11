@@ -28,6 +28,14 @@ syscalls.
 
 ## Status
 
+v1.1.3 is the systems-core release. Programs can create, list, rename, and
+remove directories, ask whether a path exists, read the whole command line with
+`all arguments`, and run a shell command with `run command`. The old fixed
+1 MiB heap became a growable set of `mmap` chunks with a free list, so list
+growth and long inputs reuse space instead of exhausting one block. The
+parameter limit rose from 8 to 128, and a call now passes its arguments in one
+contiguous stack block instead of registers.
+
 v1.1 makes functions first-class: **function-typed parameters**, **function
 values in lists**, **functions that give back functions**, and closures that
 can do all three. A kind such as
@@ -47,7 +55,7 @@ closes a file so chained sources do not run into each other.
 
 The compiler is a lexer, parser, import expander, type checker, ownership
 checker, target-selecting code generator, two machine-code backends, and an ELF
-writer, with **245 tests**. The end-to-end suite also runs against x86-64 under
+writer, with **251 tests**. The end-to-end suite also runs against x86-64 under
 QEMU. It bakes **Linux executables for AArch64 and x86-64**, and the compiler
 itself runs on Linux or on Windows x86-64.
 
@@ -85,7 +93,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.1.2
+sh toastset --version 1.1.3
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -361,6 +369,33 @@ Function values may be stored, copied with `copy of`, put in lists, printed
 (`<function>`), and given back. They still cannot be compared. A dynamic call
 checks both the number of arguments and their kinds.
 
+Files and directories are ordinary statements and expressions:
+
+```rusk
+make directory "notes"
+write "hello" to file "notes/today.txt"
+
+say file exists "notes/today.txt"      # true
+say list directory "notes"             # [today.txt]
+
+rename "notes/today.txt" to "notes/old.txt"
+remove file "notes/old.txt"
+remove directory "notes"
+
+say run command "echo from the shell"  # prints, then 0
+say run command "exit 3"               # 3
+```
+
+`make directory` treats an existing directory as success, and `remove file` /
+`remove directory` ignore a path that is already gone. `run command` hands its
+text to `/bin/sh -c` and gives back the exit status. Command-line arguments are
+available one at a time with `argument N` and all at once with `all arguments`:
+
+```rusk
+for each arg in all arguments:
+    say arg
+```
+
 Everything is line-based, blocks are colon-plus-indentation, and `#` starts a
 comment. Full reference: [docs/SPEC.md](docs/SPEC.md). A hands-on tour lives in
 the [guide](guide/README.md).
@@ -375,7 +410,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.2 — an English-like language
+Rusk 1.1.3 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -470,36 +505,44 @@ Runtime facts worth knowing:
   computed at the end of code generation instead of being fixed. Top-level
   variables, the number buffer, file-path scratch space, the heap, and the
   x86-64 register homes all live in that data area.
-- The code generator speaks one small virtual-register language: arguments go
-  in `X0..X7`, results come back in `X0`, and the frame pointer is `X29`.
-  AArch64 uses those registers directly. x86-64 maps virtual registers onto a
-  pool of six caller-saved physical registers inside each straight-line block,
-  writes them back at labels, branches, calls, returns, and syscalls, and uses
-  the real `rsp` for `SP`. Its home slots and every data address are patched
-  once the text size is known. The return address lives on the process stack
-  rather than in `X30`.
+- The code generator speaks one small virtual-register language: results come
+  back in `X0`, arguments travel in one contiguous stack block pointed to by
+  `X18`, and the frame pointer is `X29`. AArch64 uses those registers directly.
+  x86-64 maps virtual registers onto a pool of six caller-saved physical
+  registers inside each straight-line block, writes them back at labels,
+  branches, calls, returns, and syscalls, and uses the real `rsp` for `SP`. Its
+  home slots and every data address are patched once the text size is known.
+  The return address lives on the process stack rather than in `X30`.
 - Strings are stored as `[len: u64][bytes...]`, so a string value is just a
-  pointer to its length. Joining two strings bumps a 1 MiB heap in the data
-  area and copies both byte blobs into it.
-- Lists are stored as `[len: u64][capacity: u64][item: i64]...` in the same
-  bump heap. A list value is a pointer, but the ownership checker allows only
+  pointer to its length. Joining two strings allocates from the heap and copies
+  both byte blobs into it.
+- The heap is a list of `mmap`-backed chunks. Each block has a 16-byte header
+  (`size`, `next free`), allocation walks the free list before bumping the
+  current chunk, and freed list or input buffers go back on that list. When a
+  chunk fills, another one is mapped, so memory grows with the program instead
+  of stopping at a fixed limit.
+- Lists are stored as `[len: u64][capacity: u64][item: i64]...` in that heap.
+  A list value is a pointer, but the ownership checker allows only
   one live name for it, so `let b be a` moves the list and `copy of a` makes a
   new one. Nested lists are pointers too; `copy of` and `say` use recursive
   routines that the code generator emits once per list shape. Item and bounds
   checks happen in the runtime helper `array_get` / `array_set`. `array_add`
   appends in place while the length is below the capacity; when it must grow it
   allocates a new block with at least four slots, or twice the old capacity,
-  and leaves the old block behind. `array_remove_last` and `array_remove_at`
-  shorten the list in place, shift later items left, and keep the capacity
-  unchanged.
+  copies the items, and frees the old block. `array_remove_last` and
+  `array_remove_at` shorten the list in place, shift later items left, and keep
+  the capacity unchanged.
 - Text compares byte by byte (unsigned), then by length, so `"b"` is more than
   `"abc"` and `"ab"` is less than `"abc"` — ordinary dictionary order. Lists do
   not compare yet.
-- The kernel's initial stack pointer is saved at entry, so `argument N` and
-  `environment NAME` can walk `argv` and `envp` directly. File paths are copied
-  into a 4 KiB scratch area and NUL-terminated before `openat(2)`. Standard
-  input and files are read with `read(2)`; files are written with
-  `openat(2)`/`write(2)`/`close(2)`.
+- The kernel's initial stack pointer is saved at entry, so `argument N`,
+  `all arguments`, and `environment NAME` can walk `argv` and `envp` directly.
+  File paths are copied into a 4 KiB scratch area and NUL-terminated before
+  `openat(2)`. Standard input and files are read with `read(2)`; files are
+  written with `openat(2)`/`write(2)`/`close(2)`. Directories use
+  `mkdirat(2)`, `unlinkat(2)`, `renameat(2)`, `getdents64(2)`, and
+  `faccessat(2)`. `run command` forks with `clone(2)`, runs `/bin/sh -c`
+  through `execve(2)`, and collects the status with `wait4(2)`.
 - `say` of a number calls a hand-built itoa loop that divides by ten and writes
   digits backwards into a 32-byte buffer. Syscall numbers are translated per
   target: AArch64 `write`/`exit`/`read`/`openat`/`close` are
@@ -514,12 +557,13 @@ Runtime facts worth knowing:
   relocation pass. Data addresses are patched into the finished machine code,
   so growing the text section moves the data instead of colliding with it.
 
-## What v1.1 doesn't do yet
+## What v1.1.3 doesn't do yet
 
 Honest list, so the docs don't lie:
 
-- Text is immutable. Joining allocates from a fixed 1 MiB heap, and nothing is
-  reclaimed. Running past the end is a Rusk error rather than a crash.
+- Text is immutable. Joining allocates from the heap and nothing is reclaimed
+  automatically, though the heap now grows in chunks instead of stopping at a
+  fixed 1 MiB ceiling.
 - Ownership is single-owner. A `view` lends a value read-only, but a view
   cannot be changed, moved, stored, or used where an owner is needed; `copy of`
   is still the escape hatch. Views do not extend a value's lifetime beyond the
@@ -529,18 +573,20 @@ Honest list, so the docs don't lie:
 - Lists are homogeneous and may nest, but they cannot be compared. Their
   contents can be replaced with `set item`, `add VALUE to LIST` appends with
   spare capacity, and `remove last from LIST` / `remove item N from LIST`
-  shorten them. Capacity never shrinks, and removal does not give memory back
-  to the heap.
-- System I/O is intentionally small: text files and standard streams only, no
-  directories, sockets, processes, or random access. A path is limited by the
-  4 KiB scratch area, and reading stops when the 1 MiB heap is full.
+  shorten them. Capacity never shrinks.
+- System I/O now covers text files, standard streams, directories, and shell
+  commands. There are still no sockets, threads, signals, terminal primitives
+  in baked programs, or random-access file positions. A path is limited by the
+  4 KiB scratch area.
 - Imports and exports have plain, named, and selective forms. There are no
   package manifests or a standard module registry.
 - Text positions count bytes, not Unicode characters.
-- At most 8 parameters per function. There is no overloading.
+- At most 128 parameters per function. There is no overloading.
 - Linux only, on AArch64 or x86-64. There is no macOS, Windows, or 32-bit
   backend. The compiler itself also runs on Windows x86-64, but its output is
   still a Linux ELF, so `rusk run` is unavailable there.
+- GUI toolkits, networking, and pthread-style threads are not in this release.
+  They are the next systems layer, not a claim of v1.1.3.
 - The x86-64 register allocator works within straight-line blocks and spills at
   every branch and call. It is much closer to AArch64 than the old
   memory-backed encoder, but it is not a global allocator yet.

@@ -30,11 +30,13 @@ use std::collections::HashMap;
 /// Offset of the itoa scratch buffer inside the data area.
 const ITOA_OFFSET: u64 = 0x2000;
 const ITOA_CAPACITY: u64 = 32;
-/// Fixed slots in the zeroed data area for the text heap.
+/// Fixed slots in the zeroed data area for the heap allocator.
 const HEAP_PTR_OFFSET: u64 = 0x1000;
-const HEAP_START_OFFSET: u64 = 0x1_0000;
-const HEAP_SIZE: u64 = 0x10_0000;
-const HEAP_END_OFFSET: u64 = HEAP_START_OFFSET + HEAP_SIZE;
+const HEAP_END_OFFSET: u64 = 0x1008;
+const HEAP_FREE_OFFSET: u64 = 0x1010;
+const HEAP_CHUNKS_OFFSET: u64 = 0x1018;
+/// The first heap chunk. More chunks are mapped when this one fills up.
+const HEAP_CHUNK_SIZE: u64 = 0x10_0000;
 /// Where the runtime keeps the current call depth.
 const DEPTH_OFFSET: u64 = 0x1800;
 /// Where the initial stack pointer (argc/argv/envp) is remembered.
@@ -42,12 +44,44 @@ const ARGS_SP_OFFSET: u64 = 0x1808;
 /// Scratch space for turning Rusk text into a NUL-terminated path.
 const PATH_OFFSET: u64 = 0x3000;
 const PATH_CAPACITY: u64 = 4096;
+/// A second path scratch area, for rename and other two-path calls.
+const PATH2_OFFSET: u64 = 0x4000;
+/// Scratch used to launch a child process: `/bin/sh`, `-c`, argv, status.
+const RUN_SH_OFFSET: u64 = 0x5000;
+const RUN_DASH_C_OFFSET: u64 = 0x5008;
+const RUN_ARGV_OFFSET: u64 = 0x5010;
+const RUN_STATUS_OFFSET: u64 = 0x5030;
+/// Directory entries are read into this fixed buffer, one batch at a time.
+const DENTS_OFFSET: u64 = 0x6000;
 /// `SYS_read`
 const SYS_READ: u64 = 63;
 /// `SYS_openat`
 const SYS_OPENAT: u64 = 56;
 /// `SYS_close`
 const SYS_CLOSE: u64 = 57;
+/// `SYS_mkdirat`
+const SYS_MKDIRAT: u64 = 34;
+/// `SYS_unlinkat`
+const SYS_UNLINKAT: u64 = 35;
+/// `SYS_renameat`
+const SYS_RENAMEAT: u64 = 38;
+/// `SYS_getdents64`
+const SYS_GETDENTS64: u64 = 61;
+/// `SYS_faccessat`
+const SYS_FACCESSAT: u64 = 48;
+/// `SYS_clone`
+const SYS_CLONE: u64 = 220;
+/// `SYS_execve`
+const SYS_EXECVE: u64 = 221;
+/// `SYS_mmap`
+const SYS_MMAP: u64 = 222;
+/// `SYS_wait4`
+const SYS_WAIT4: u64 = 260;
+/// `AT_FDCWD`, as a two's-complement value.
+const AT_FDCWD: u64 = (-100i64) as u64;
+/// Directory entries fit in a modest buffer; getdents64 is called until it
+/// reports no more.
+const DENTS_CAPACITY: u64 = 8192;
 /// Deepest call nesting the runtime will allow before it reports an error.
 const MAX_DEPTH: u64 = 1000;
 const HEAP_ERROR: &str = "burnt: the program ran out of memory\n";
@@ -95,11 +129,22 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     cg.asm.mov_data_addr(X1, ARGS_SP_OFFSET);
     cg.asm.add_imm(X2, SP, 0);
     cg.asm.str(X2, X1, 0);
-    // The text heap starts at a fixed spot; a bump pointer in the data area
-    // remembers where the next joined string goes.
+    // `run command` launches `/bin/sh -c`; the two words it needs never move.
+    cg.asm.mov_data_addr(X1, RUN_SH_OFFSET);
+    cg.asm.mov_imm64(X2, 0x0068_732f_6e69_622f); // "/bin/sh\0"
+    cg.asm.mov_imm64(X3, 0x0000_0000_0000_632d); // "-c\0"
+    cg.asm.str(X2, X1, 0);
+    cg.asm.str(X3, X1, 8);
+    // The heap is a list of mapped chunks; the first one is claimed now and
+    // every allocation goes through `heap_alloc`, which reuses freed blocks.
     cg.asm.mov_data_addr(X1, HEAP_PTR_OFFSET);
-    cg.asm.mov_data_addr(X0, HEAP_START_OFFSET);
-    cg.asm.str(X0, X1, 0);
+    cg.asm.str(XZR, X1, 0);
+    cg.asm.mov_data_addr(X1, HEAP_FREE_OFFSET);
+    cg.asm.str(XZR, X1, 0);
+    cg.asm.mov_data_addr(X1, HEAP_CHUNKS_OFFSET);
+    cg.asm.str(XZR, X1, 0);
+    cg.asm.mov_imm64(X0, HEAP_CHUNK_SIZE);
+    cg.asm.bl_label("heap_grow");
 
     for stmt in &program.stmts {
         if matches!(stmt, Stmt::FuncDef { .. }) {
@@ -150,9 +195,19 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     cg.emit_read_stream();
     cg.emit_read_file();
     cg.emit_write_file();
+    cg.emit_make_directory();
+    cg.emit_remove_path();
+    cg.emit_rename_path();
+    cg.emit_list_directory();
+    cg.emit_file_exists();
+    cg.emit_all_arguments();
+    cg.emit_run_command();
     cg.emit_text_copy();
     cg.emit_array_copy_scalar();
     cg.emit_array_copy_text();
+    cg.emit_heap_grow();
+    cg.emit_heap_alloc();
+    cg.emit_heap_free();
     cg.emit_heap_fail();
     cg.emit_runtime_fail();
 
@@ -284,6 +339,9 @@ impl Codegen {
         (self.next_global * 8)
             .max(ITOA_OFFSET + ITOA_CAPACITY)
             .max(PATH_OFFSET + PATH_CAPACITY)
+            .max(PATH2_OFFSET + PATH_CAPACITY)
+            .max(RUN_STATUS_OFFSET + 8)
+            .max(DENTS_OFFSET + DENTS_CAPACITY)
             .max(crate::x86_64::VREG_OFFSET + crate::x86_64::VREG_OFFSET_SLACK)
     }
 
@@ -328,13 +386,6 @@ impl Codegen {
     /// The sentence a runtime failure should print, tied to the current line.
     fn runtime_message(&self, what: &str) -> String {
         format!("burnt: line {}: {what}\n", self.line)
-    }
-
-    /// Fail with the heap message if `reg` has grown past the end of the heap.
-    fn emit_heap_check(&mut self, reg: u8) {
-        self.asm.mov_data_addr(X8, HEAP_END_OFFSET);
-        self.asm.cmp_reg_reg(reg, X8);
-        self.asm.bcond_label(CC_GT, "heap_fail");
     }
 
     fn store_var(&mut self, var: &Var) {
@@ -415,6 +466,16 @@ impl Codegen {
             }
             Stmt::WriteFile { text, path, line } => {
                 self.write_file(text, path).map_err(|m| at(*line, m))
+            }
+            Stmt::MakeDirectory { path, line } => {
+                self.make_directory(path).map_err(|m| at(*line, m))
+            }
+            Stmt::RemoveFile { path, line } => self.remove_path(path, 0).map_err(|m| at(*line, m)),
+            Stmt::RemoveDirectory { path, line } => {
+                self.remove_path(path, 0x200).map_err(|m| at(*line, m))
+            }
+            Stmt::RenamePath { from, to, line } => {
+                self.rename_path(from, to).map_err(|m| at(*line, m))
             }
             Stmt::If {
                 cond,
@@ -633,6 +694,47 @@ impl Codegen {
         self.asm.mov_reg_reg(X1, X0);
         self.asm.pop_reg(X0);
         self.asm.bl_label("write_file");
+        Ok(())
+    }
+
+    fn path_expr(&mut self, expr: &Expr, what: &str) -> Result<(), String> {
+        let ty = self.expr(expr)?;
+        if ty != Ty::Str {
+            return Err(format!("'{what}' needs a path as text, but this is {ty}"));
+        }
+        Ok(())
+    }
+
+    fn make_directory(&mut self, path: &Expr) -> Result<(), String> {
+        self.path_expr(path, "make directory")?;
+        self.asm.bl_label("make_directory");
+        Ok(())
+    }
+
+    fn remove_path(&mut self, path: &Expr, flags: u64) -> Result<(), String> {
+        self.path_expr(path, "remove")?;
+        self.asm.mov_imm64(X1, flags);
+        self.asm.bl_label("remove_path");
+        Ok(())
+    }
+
+    fn rename_path(&mut self, from: &Expr, to: &Expr) -> Result<(), String> {
+        let from_ty = self.expr(from)?;
+        if from_ty != Ty::Str {
+            return Err(format!(
+                "'rename' needs the old path as text, but this is {from_ty}"
+            ));
+        }
+        self.asm.push_reg(X0);
+        let to_ty = self.expr(to)?;
+        if to_ty != Ty::Str {
+            return Err(format!(
+                "'rename' needs the new path as text, but this is {to_ty}"
+            ));
+        }
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.pop_reg(X0);
+        self.asm.bl_label("rename_path");
         Ok(())
     }
 
@@ -906,8 +1008,11 @@ impl Codegen {
         name: Option<&str>,
     ) -> Result<(), String> {
         let what = name.unwrap_or("a function value");
-        if params.len() > 8 {
-            return Err(format!("'{what}' has too many parameters (8 at most)"));
+        if params.len() > crate::types::MAX_PARAMS {
+            return Err(format!(
+                "'{what}' has too many parameters ({} at most)",
+                crate::types::MAX_PARAMS
+            ));
         }
 
         let slots = 1 + params.len() as u64 + captures.len() as u64 + count_slots(body);
@@ -966,7 +1071,11 @@ impl Codegen {
                     global: false,
                 },
             );
-            self.asm.str(i as u8, X29, frame_offset(i as u64 + 1));
+            // Arguments arrive in a contiguous block pointed to by X18. Copy
+            // each one into its frame slot so the body never depends on the
+            // caller's stack.
+            self.asm.ldr(X0, X18, (i * 8) as u32);
+            self.asm.str(X0, X29, frame_offset(i as u64 + 1));
         }
 
         // Copy captures out of the environment record into ordinary frame
@@ -1034,13 +1143,9 @@ impl Codegen {
     fn emit_function_record(&mut self, code_label: &str, captures: &[String]) {
         let count = captures.len() as u64;
         let size = 16 + count * 8;
-        let heap_ptr = HEAP_PTR_OFFSET;
-        self.asm.mov_data_addr(X5, heap_ptr);
-        self.asm.ldr(X6, X5, 0);
-        self.asm.mov_imm64(X7, size);
-        self.asm.add_reg_reg(X7, X6, X7);
-        self.emit_heap_check(X7);
-        self.asm.str(X7, X5, 0);
+        self.asm.mov_imm64(X0, size);
+        self.asm.bl_label("heap_alloc");
+        self.asm.mov_reg_reg(X6, X0);
         self.asm.mov_label_addr(X7, code_label);
         self.asm.str(X7, X6, 0);
         self.asm.mov_imm64(X7, count);
@@ -1051,6 +1156,31 @@ impl Codegen {
             self.asm.str(X0, X6, (16 + i * 8) as u32);
         }
         self.asm.mov_reg_reg(X0, X6);
+    }
+
+    /// Evaluate `args` into a contiguous block on the stack and point X18 at
+    /// it. Returns the block's size in bytes, which the caller must add back
+    /// to SP after the call.
+    fn arg_block(&mut self, args: &[Expr]) -> Result<u32, String> {
+        if args.is_empty() {
+            return Ok(0);
+        }
+        if args.len() > crate::types::MAX_PARAMS {
+            return Err(format!(
+                "a call can pass at most {} things",
+                crate::types::MAX_PARAMS
+            ));
+        }
+        let bytes = args.len() * 8;
+        let block = bytes.div_ceil(16) * 16;
+        self.asm.sub_imm(SP, SP, block as u32);
+        for (i, arg) in args.iter().enumerate() {
+            self.expr(arg)?;
+            self.asm.str(X0, SP, (i * 8) as u32);
+        }
+        // `mov_reg_reg` treats 31 as the zero register, so copy SP with `add`.
+        self.asm.add_imm(X18, SP, 0);
+        Ok(block as u32)
     }
 
     /// Call a function value: `[code][capture count][capture...]`. The code
@@ -1075,21 +1205,18 @@ impl Codegen {
                 args.len()
             ));
         }
-        if args.len() > 8 {
-            return Err("a call can pass at most 8 things".to_string());
-        }
+        // Keep the record above the argument block so evaluating the
+        // arguments cannot overwrite it.
         self.asm.push_reg(X0);
-        for arg in args {
-            self.expr(arg)?;
-            self.asm.push_reg(X0);
-        }
-        for i in (0..args.len()).rev() {
-            self.asm.pop_reg(i as u8);
-        }
-        self.asm.pop_reg(X16);
+        let block = self.arg_block(args)?;
+        self.asm.ldr(X16, SP, block);
         self.asm.ldr(X14, X16, 0);
         self.asm.add_imm(X17, X16, 16);
         self.asm.call_reg(X14);
+        if block > 0 {
+            self.asm.add_imm(SP, SP, block);
+        }
+        self.asm.pop_reg(X16);
         Ok(ft.ret.clone())
     }
 
@@ -1149,18 +1276,12 @@ impl Codegen {
                         args.len()
                     ));
                 }
-                if args.len() > 8 {
-                    return Err("a call can pass at most 8 things".to_string());
-                }
-                for arg in args {
-                    self.expr(arg)?;
-                    self.asm.push_reg(X0);
-                }
-                for i in (0..args.len()).rev() {
-                    self.asm.pop_reg(i as u8);
-                }
+                let block = self.arg_block(args)?;
                 self.asm.movz_reg(X17, 0);
                 self.asm.bl_label(&format!("fn_{name}"));
+                if block > 0 {
+                    self.asm.add_imm(SP, SP, block);
+                }
                 Ok(sig.ret)
             }
             Expr::CallValue { func, args } => self.dynamic_call(func, args),
@@ -1296,13 +1417,9 @@ impl Codegen {
                 if n * 8 + 16 >= 4096 * 8 {
                     return Err("this list literal is too long".to_string());
                 }
-                let heap_ptr = HEAP_PTR_OFFSET;
-                self.asm.mov_data_addr(X5, heap_ptr);
-                self.asm.ldr(X6, X5, 0);
-                self.asm.mov_imm64(X7, n * 8 + 16);
-                self.asm.add_reg_reg(X7, X6, X7);
-                self.emit_heap_check(X7);
-                self.asm.str(X7, X5, 0);
+                self.asm.mov_imm64(X0, n * 8 + 16);
+                self.asm.bl_label("heap_alloc");
+                self.asm.mov_reg_reg(X6, X0);
                 self.asm.mov_imm64(X7, n);
                 self.asm.str(X7, X6, 0);
                 self.asm.str(X7, X6, 8); // capacity starts equal to length
@@ -1314,16 +1431,10 @@ impl Codegen {
                 Ok(Ty::Array(elem.unwrap()))
             }
             Expr::EmptyArray(elem) => {
-                let heap_ptr = HEAP_PTR_OFFSET;
-                self.asm.mov_data_addr(X5, heap_ptr);
-                self.asm.ldr(X6, X5, 0);
-                self.asm.add_imm(X7, X6, 16);
-                self.emit_heap_check(X7);
-                self.asm.str(X7, X5, 0);
-                self.asm.movz_reg(X7, 0);
-                self.asm.str(X7, X6, 0); // length
-                self.asm.str(X7, X6, 8); // capacity
-                self.asm.mov_reg_reg(X0, X6);
+                self.asm.mov_imm64(X0, 16);
+                self.asm.bl_label("heap_alloc");
+                self.asm.str(XZR, X0, 0); // length
+                self.asm.str(XZR, X0, 8); // capacity
                 Ok(Ty::Array(elem.clone()))
             }
             Expr::Item(index, array) => {
@@ -1414,6 +1525,30 @@ impl Codegen {
                 }
                 self.asm.bl_label("read_file");
                 Ok(Ty::Str)
+            }
+            Expr::ListDirectory(path) => {
+                self.path_expr(path, "list directory")?;
+                self.asm.bl_label("list_directory");
+                Ok(Ty::Array(Elem::STR))
+            }
+            Expr::FileExists(path) => {
+                self.path_expr(path, "file exists")?;
+                self.asm.bl_label("file_exists");
+                Ok(Ty::Bool)
+            }
+            Expr::AllArguments => {
+                self.asm.bl_label("all_arguments");
+                Ok(Ty::Array(Elem::STR))
+            }
+            Expr::RunCommand(command) => {
+                let ty = self.expr(command)?;
+                if ty != Ty::Str {
+                    return Err(format!(
+                        "'run command' needs the command as text, but this is {ty}"
+                    ));
+                }
+                self.asm.bl_label("run_command");
+                Ok(Ty::Int)
             }
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
@@ -1762,7 +1897,6 @@ impl Codegen {
         let l_done = self.new_label("acopy_nested_done");
         let child = elem.inner().expect("a nested list shape");
         let child_label = self.list_copy_label(&child);
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label(&label);
@@ -1776,19 +1910,13 @@ impl Codegen {
 
         a.mov_reg_reg(X19, X0); // source list
         a.ldr(X21, X19, 0); // length
-        a.mov_data_addr(X5, heap_ptr);
-        a.ldr(X6, X5, 0); // destination start
-        a.mov_reg_reg(X7, X21);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_imm(X7, X7, 16);
-        a.mov_reg_reg(X9, X6);
-        a.add_reg_reg(X9, X9, X7);
-        a.mov_data_addr(X8, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X9, X8);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X9, X5, 0);
+        a.mov_reg_reg(X0, X21);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0); // length * 8
+        a.add_imm(X0, X0, 16);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0); // destination start
         a.str(X21, X6, 0);
         a.str(X21, X6, 8);
 
@@ -1947,26 +2075,30 @@ impl Codegen {
     /// length-prefixed string. There is no bound check yet; the heap is
     /// 1 MiB, which is generous for a language this size.
     fn emit_text_concat(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_concat");
-        a.ldr(X2, X0, 0); // left length
-        a.ldr(X3, X1, 0); // right length
-        a.add_reg_reg(X4, X2, X3); // total length
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X30, SP, 16);
 
-        a.mov_data_addr(X5, heap_ptr);
-        a.ldr(X6, X5, 0); // new string starts here
-        a.add_reg_reg(X7, X6, X4);
-        a.add_imm(X7, X7, 8);
-        a.mov_data_addr(X8, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X7, X8);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X7, X5, 0); // bump the heap pointer
-        a.str(X4, X6, 0); // write the length
+        a.mov_reg_reg(X19, X0); // left
+        a.mov_reg_reg(X20, X1); // right
+        a.ldr(X2, X19, 0);
+        a.ldr(X3, X20, 0);
+        a.add_reg_reg(X4, X2, X3);
+        a.add_imm(X0, X4, 8);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0);
+
+        a.ldr(X2, X19, 0);
+        a.ldr(X3, X20, 0);
+        a.add_reg_reg(X4, X2, X3); // total length
+        a.str(X4, X6, 0);
         a.add_imm(X9, X6, 8); // destination bytes
 
-        a.add_imm(X8, X0, 8); // left bytes
+        a.add_imm(X8, X19, 8);
         a.mov_reg_reg(X10, X2);
         a.label("tcat_left");
         a.cmp_reg_reg(X10, XZR);
@@ -1979,7 +2111,7 @@ impl Codegen {
         a.b_label("tcat_left");
 
         a.label("tcat_right");
-        a.add_imm(X8, X1, 8); // right bytes
+        a.add_imm(X8, X20, 8);
         a.mov_reg_reg(X10, X3);
         a.label("tcat_right_loop");
         a.cmp_reg_reg(X10, XZR);
@@ -1993,6 +2125,10 @@ impl Codegen {
 
         a.label("tcat_done");
         a.mov_reg_reg(X0, X6);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X30, SP, 16);
+        a.add_imm(SP, SP, 32);
         a.ret();
     }
 
@@ -2049,7 +2185,6 @@ impl Codegen {
     /// Allocates a fresh one-byte string on the heap. X4 holds the
     /// length-prefixed runtime error to print if the index falls outside.
     fn emit_text_letter(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_letter");
@@ -2060,23 +2195,27 @@ impl Codegen {
         a.cmp_reg_reg(X0, X2);
         a.bcond_label(CC_GT, "letter_fail");
 
-        // A one-byte string is [len = 1][byte], nine bytes in all.
-        a.mov_data_addr(X5, heap_ptr);
-        a.ldr(X6, X5, 0);
-        a.add_imm(X7, X6, 9);
-        a.mov_data_addr(X8, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X7, X8);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X7, X5, 0);
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X30, SP, 16);
+        a.mov_reg_reg(X19, X0);
+        a.mov_reg_reg(X20, X1);
+        a.movz_reg(X0, 9); // [len = 1][byte]
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0);
         a.movz_reg(X3, 1);
         a.str(X3, X6, 0);
-
-        a.add_imm(X1, X1, 8);
-        a.sub_imm(X0, X0, 1);
+        a.add_imm(X1, X20, 8);
+        a.sub_imm(X0, X19, 1);
         a.add_reg_reg(X1, X1, X0);
         a.ldrb(X3, X1, 0);
         a.strb(X3, X6, 8);
         a.mov_reg_reg(X0, X6);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X30, SP, 16);
+        a.add_imm(SP, SP, 32);
         a.ret();
 
         a.label("letter_fail");
@@ -2087,7 +2226,6 @@ impl Codegen {
     /// `text_part`: X0 = start, X1 = end (both 1-based and inclusive),
     /// X2 = text, result in X0. X4 holds the runtime error.
     fn emit_text_part(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_part");
@@ -2101,27 +2239,36 @@ impl Codegen {
         a.cmp_reg_reg(X1, X5);
         a.bcond_label(CC_GT, "part_fail");
         a.cmp_reg_reg(X1, X0);
-        a.bcond_label(CC_LT, "part_empty");
+        a.bcond_label(CC_LT, "part_zero");
 
         // count = end - start + 1
         a.sub_reg_reg(X6, X1, X0);
         a.add_imm(X6, X6, 1);
+        a.b_label("part_have_count");
 
-        a.mov_data_addr(X7, heap_ptr);
-        a.ldr(X8, X7, 0);
-        a.add_reg_reg(X9, X8, X6);
-        a.add_imm(X9, X9, 8);
-        a.mov_data_addr(X10, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X9, X10);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X9, X7, 0);
-        a.str(X6, X8, 0);
+        a.label("part_zero");
+        a.movz_reg(X6, 0);
+
+        a.label("part_have_count");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X30, SP, 24);
+        a.mov_reg_reg(X19, X0); // start
+        a.mov_reg_reg(X20, X2); // text
+        a.mov_reg_reg(X21, X6); // count
+        a.add_imm(X0, X6, 8);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X8, X0);
+        a.str(X21, X8, 0);
 
         // Source bytes start at text + 8 + (start - 1).
-        a.sub_imm(X10, X0, 1);
-        a.add_reg_reg(X10, X2, X10);
+        a.sub_imm(X10, X19, 1);
+        a.add_reg_reg(X10, X20, X10);
         a.add_imm(X10, X10, 8);
         a.add_imm(X11, X8, 8);
+        a.mov_reg_reg(X6, X21);
         a.label("part_copy");
         a.cmp_reg_reg(X6, XZR);
         a.bcond_label(CC_EQ, "part_done");
@@ -2134,19 +2281,11 @@ impl Codegen {
 
         a.label("part_done");
         a.mov_reg_reg(X0, X8);
-        a.ret();
-
-        a.label("part_empty");
-        a.mov_data_addr(X7, heap_ptr);
-        a.ldr(X8, X7, 0);
-        a.add_imm(X9, X8, 8);
-        a.mov_data_addr(X10, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X9, X10);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X9, X7, 0);
-        a.movz_reg(X9, 0);
-        a.str(X9, X8, 0);
-        a.mov_reg_reg(X0, X8);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X30, SP, 24);
+        a.add_imm(SP, SP, 48);
         a.ret();
 
         a.label("part_fail");
@@ -2212,12 +2351,20 @@ impl Codegen {
     /// has spare capacity; otherwise it copies the items to a fresh block with
     /// twice the capacity and gives back the new list in X0.
     fn emit_array_add(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("array_add");
-        a.ldr(X2, X0, 0); // old length
-        a.ldr(X3, X0, 8); // capacity
+        a.sub_imm(SP, SP, 64);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        a.str(X30, SP, 40);
+        a.mov_reg_reg(X19, X0); // list
+        a.mov_reg_reg(X20, X1); // new item
+        a.ldr(X2, X19, 0); // old length
+        a.ldr(X3, X19, 8); // capacity
         a.cmp_reg_reg(X2, X3);
         a.bcond_label(CC_LT, "array_add_room");
 
@@ -2230,31 +2377,27 @@ impl Codegen {
         a.mov_reg_reg(X5, X6);
         a.label("array_add_capacity_ready");
 
-        // Allocate [length][capacity][items...].
-        a.mov_data_addr(X3, heap_ptr);
-        a.ldr(X4, X3, 0); // destination
-        a.mov_reg_reg(X6, X5);
-        a.add_reg_reg(X6, X6, X6); // *2
-        a.add_reg_reg(X6, X6, X6); // *4
-        a.add_reg_reg(X6, X6, X6); // *8
-        a.add_imm(X6, X6, 16);
-        a.add_reg_reg(X7, X4, X6);
-        a.mov_data_addr(X10, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X7, X10);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X7, X3, 0);
+        a.mov_reg_reg(X21, X5); // new capacity
+        a.mov_reg_reg(X22, X2); // old length
+        a.mov_reg_reg(X0, X5);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_imm(X0, X0, 16);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X23, X0); // new list
 
-        a.movz_reg(X9, 1);
-        a.add_reg_reg(X9, X2, X9); // new length
-        a.str(X9, X4, 0);
-        a.str(X5, X4, 8); // new capacity
+        a.movz_reg(X6, 1);
+        a.add_reg_reg(X6, X22, X6); // new length
+        a.str(X6, X23, 0);
+        a.str(X21, X23, 8);
 
-        a.add_imm(X7, X4, 16); // destination items
-        a.add_imm(X8, X0, 16); // source items
-        a.mov_reg_reg(X9, X2);
+        a.add_imm(X7, X23, 16); // destination items
+        a.add_imm(X8, X19, 16); // source items
+        a.mov_reg_reg(X9, X22);
         a.label("array_add_loop");
         a.cmp_reg_reg(X9, XZR);
-        a.bcond_label(CC_EQ, "array_add_done");
+        a.bcond_label(CC_EQ, "array_add_copied");
         a.ldr(X11, X8, 0);
         a.str(X11, X7, 0);
         a.add_imm(X8, X8, 8);
@@ -2262,25 +2405,37 @@ impl Codegen {
         a.sub_imm(X9, X9, 1);
         a.b_label("array_add_loop");
 
-        a.label("array_add_done");
-        a.str(X1, X7, 0); // the new item
-        a.mov_reg_reg(X0, X4);
-        a.ret();
+        a.label("array_add_copied");
+        a.str(X20, X7, 0); // the new item
+                           // The old buffer is unreachable now, so hand it back to the allocator.
+        a.mov_reg_reg(X0, X19);
+        a.bl_label("heap_free");
+        a.mov_reg_reg(X0, X23);
+        a.b_label("array_add_done");
 
         // There is room: append at items[length] without allocating.
         a.label("array_add_room");
-        a.mov_reg_reg(X4, X0);
+        a.mov_reg_reg(X4, X19);
         a.mov_reg_reg(X5, X2);
         a.add_reg_reg(X5, X5, X5); // *2
         a.add_reg_reg(X5, X5, X5); // *4
         a.add_reg_reg(X5, X5, X5); // *8
         a.add_imm(X5, X5, 16);
         a.add_reg_reg(X5, X4, X5);
-        a.str(X1, X5, 0);
+        a.str(X20, X5, 0);
         a.movz_reg(X6, 1);
         a.add_reg_reg(X6, X2, X6);
         a.str(X6, X4, 0); // new length
         a.mov_reg_reg(X0, X4);
+
+        a.label("array_add_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.ldr(X30, SP, 40);
+        a.add_imm(SP, SP, 64);
         a.ret();
     }
 
@@ -2347,29 +2502,31 @@ impl Codegen {
 
     /// `empty_text`: a fresh text value with length zero, in X0.
     fn emit_empty_text(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("empty_text");
-        a.mov_data_addr(X1, heap_ptr);
-        a.ldr(X2, X1, 0);
-        a.add_imm(X3, X2, 8);
-        a.mov_data_addr(X4, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X3, X4);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X3, X1, 0);
-        a.str(XZR, X2, 0);
-        a.mov_reg_reg(X0, X2);
+        a.sub_imm(SP, SP, 16);
+        a.str(X30, SP, 0);
+        a.movz_reg(X0, 8);
+        a.bl_label("heap_alloc");
+        a.str(XZR, X0, 0);
+        a.ldr(X30, SP, 0);
+        a.add_imm(SP, SP, 16);
         a.ret();
     }
 
     /// `cstr_copy`: X0 = a NUL-terminated C string. Copies it into a fresh Rusk
     /// text value and gives that back in X0.
     fn emit_cstr_copy(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("cstr_copy");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X30, SP, 16);
+
+        a.mov_reg_reg(X19, X0); // source
         a.mov_reg_reg(X1, X0); // scan pointer
         a.label("cstr_len_loop");
         a.ldrb(X2, X1, 0);
@@ -2379,20 +2536,15 @@ impl Codegen {
         a.b_label("cstr_len_loop");
 
         a.label("cstr_len_done");
-        a.sub_reg_reg(X2, X1, X0); // length
-        a.mov_data_addr(X3, heap_ptr);
-        a.ldr(X4, X3, 0); // destination
-        a.add_reg_reg(X5, X4, X2);
-        a.add_imm(X5, X5, 8);
-        a.mov_data_addr(X6, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X5, X6);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X5, X3, 0);
-        a.str(X2, X4, 0);
+        a.sub_reg_reg(X20, X1, X19); // length
+        a.add_imm(X0, X20, 8);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X4, X0);
+        a.str(X20, X4, 0);
 
         a.add_imm(X5, X4, 8); // destination bytes
-        a.mov_reg_reg(X6, X0); // source bytes
-        a.mov_reg_reg(X7, X2);
+        a.mov_reg_reg(X6, X19); // source bytes
+        a.mov_reg_reg(X7, X20);
         a.label("cstr_copy_loop");
         a.cmp_reg_reg(X7, XZR);
         a.bcond_label(CC_EQ, "cstr_copy_done");
@@ -2405,6 +2557,10 @@ impl Codegen {
 
         a.label("cstr_copy_done");
         a.mov_reg_reg(X0, X4);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X30, SP, 16);
+        a.add_imm(SP, SP, 32);
         a.ret();
     }
 
@@ -2512,27 +2668,64 @@ impl Codegen {
 
     /// `read_stream`: X0 = file descriptor, X1 = 1 to stop at a newline or 0 to
     /// read to end of file. Gives back text in X0.
+    ///
+    /// Bytes gather in a growable heap buffer with `[capacity][length]`, then
+    /// an exact-size text is allocated and the buffer is handed back.
     fn emit_read_stream(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("read_stream");
-        a.sub_imm(SP, SP, 32);
+        a.sub_imm(SP, SP, 48);
         a.str(X19, SP, 0);
         a.str(X20, SP, 8);
         a.str(X21, SP, 16);
         a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        a.str(X30, SP, 40);
 
         a.mov_reg_reg(X19, X0); // fd
         a.mov_reg_reg(X20, X1); // mode
-        a.mov_data_addr(X21, heap_ptr);
-        a.ldr(X22, X21, 0); // text value starts here
-        a.add_imm(X10, X22, 8); // write pointer
+        a.mov_imm64(X21, 4096); // initial capacity
+        a.add_imm(X0, X21, 16);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X22, X0); // buffer
+        a.str(X21, X22, 0); // capacity
+        a.str(XZR, X22, 8); // length
 
         a.label("read_stream_loop");
-        a.mov_data_addr(X12, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X10, X12);
-        a.bcond_label(CC_GE, "heap_fail");
+        a.ldr(X23, X22, 8); // length
+        a.cmp_reg_reg(X23, X21);
+        a.bcond_label(CC_LT, "read_stream_room");
+
+        // Full: double the capacity, copy the bytes, and free the old buffer.
+        a.add_reg_reg(X21, X21, X21); // new capacity
+        a.add_imm(X0, X21, 16);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0);
+        a.str(X21, X6, 0);
+        a.ldr(X23, X22, 8);
+        a.str(X23, X6, 8);
+        a.add_imm(X7, X22, 16);
+        a.add_imm(X8, X6, 16);
+        a.mov_reg_reg(X9, X23);
+        a.label("read_stream_copy");
+        a.cmp_reg_reg(X9, XZR);
+        a.bcond_label(CC_EQ, "read_stream_copied");
+        a.ldrb(X11, X7, 0);
+        a.strb(X11, X8, 0);
+        a.add_imm(X7, X7, 1);
+        a.add_imm(X8, X8, 1);
+        a.sub_imm(X9, X9, 1);
+        a.b_label("read_stream_copy");
+        a.label("read_stream_copied");
+        a.mov_reg_reg(X0, X22);
+        a.bl_label("heap_free");
+        a.mov_reg_reg(X22, X6);
+
+        a.label("read_stream_room");
+        a.ldr(X23, X22, 8);
+        a.add_imm(X10, X22, 16);
+        a.add_reg_reg(X10, X10, X23); // write pointer
         a.mov_reg_reg(X0, X19);
         a.mov_reg_reg(X1, X10);
         a.movz_reg(X2, 1);
@@ -2547,20 +2740,40 @@ impl Codegen {
         a.cmp_reg_reg(X11, X12);
         a.bcond_label(CC_EQ, "read_stream_done");
         a.label("read_stream_keep");
-        a.add_imm(X10, X10, 1);
+        a.add_imm(X23, X23, 1);
+        a.str(X23, X22, 8);
         a.b_label("read_stream_loop");
 
         a.label("read_stream_done");
-        a.add_imm(X12, X22, 8);
-        a.sub_reg_reg(X12, X10, X12);
-        a.str(X12, X22, 0);
-        a.str(X10, X21, 0);
+        a.ldr(X23, X22, 8); // length
+        a.add_imm(X0, X23, 8);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0); // exact text
+        a.str(X23, X6, 0);
+        a.add_imm(X7, X22, 16);
+        a.add_imm(X8, X6, 8);
+        a.mov_reg_reg(X9, X23);
+        a.label("read_stream_finish_copy");
+        a.cmp_reg_reg(X9, XZR);
+        a.bcond_label(CC_EQ, "read_stream_finish_done");
+        a.ldrb(X11, X7, 0);
+        a.strb(X11, X8, 0);
+        a.add_imm(X7, X7, 1);
+        a.add_imm(X8, X8, 1);
+        a.sub_imm(X9, X9, 1);
+        a.b_label("read_stream_finish_copy");
+        a.label("read_stream_finish_done");
+        a.mov_reg_reg(X23, X6);
         a.mov_reg_reg(X0, X22);
+        a.bl_label("heap_free");
+        a.mov_reg_reg(X0, X23);
         a.ldr(X19, SP, 0);
         a.ldr(X20, SP, 8);
         a.ldr(X21, SP, 16);
         a.ldr(X22, SP, 24);
-        a.add_imm(SP, SP, 32);
+        a.ldr(X23, SP, 32);
+        a.ldr(X30, SP, 40);
+        a.add_imm(SP, SP, 48);
         a.ret();
     }
 
@@ -2571,14 +2784,21 @@ impl Codegen {
         let a = &mut self.asm;
 
         a.label("path_copy");
-        a.ldr(X1, X0, 0); // length
-        a.mov_imm64(X2, PATH_CAPACITY - 1);
-        a.cmp_reg_reg(X1, X2);
+        a.mov_data_addr(X1, PATH_OFFSET);
+        a.b_label("path_copy_to");
+
+        a.label("path_copy_second");
+        a.mov_data_addr(X1, PATH2_OFFSET);
+
+        a.label("path_copy_to");
+        a.ldr(X2, X0, 0); // length
+        a.mov_imm64(X3, PATH_CAPACITY - 1);
+        a.cmp_reg_reg(X2, X3);
         a.bcond_label(CC_GT, "path_copy_fail");
-        a.add_imm(X3, X0, 8);
-        a.mov_data_addr(X4, PATH_OFFSET);
-        a.mov_reg_reg(X5, X4);
-        a.mov_reg_reg(X6, X1);
+        a.add_imm(X3, X0, 8); // source bytes
+        a.mov_reg_reg(X4, X1); // write cursor
+        a.mov_reg_reg(X5, X1); // start of the destination
+        a.mov_reg_reg(X6, X2); // bytes left
         a.label("path_copy_loop");
         a.cmp_reg_reg(X6, XZR);
         a.bcond_label(CC_EQ, "path_copy_done");
@@ -2684,27 +2904,372 @@ impl Codegen {
         a.b_label("runtime_fail");
     }
 
+    /// `make_directory`: X0 = path text. Creates the directory, treating an
+    /// already-existing one as success.
+    fn emit_make_directory(&mut self) {
+        let error = self.intern("burnt: I can't make that directory\n");
+        let a = &mut self.asm;
+
+        a.label("make_directory");
+        a.sub_imm(SP, SP, 32);
+        a.str(X30, SP, 0);
+
+        a.bl_label("path_copy");
+        a.mov_imm64(X0, AT_FDCWD);
+        a.mov_data_addr(X1, PATH_OFFSET);
+        a.mov_imm64(X2, 511); // 0o777
+        a.mov_imm64(X8, SYS_MKDIRAT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GE, "make_directory_done");
+        a.mov_imm64(X1, (-17i64) as u64); // EEXIST
+        a.cmp_reg_reg(X0, X1);
+        a.bcond_label(CC_EQ, "make_directory_done");
+        a.mov_abs(X0, error);
+        a.b_label("runtime_fail");
+
+        a.label("make_directory_done");
+        a.ldr(X30, SP, 0);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
+    /// `remove_path`: X0 = path text, X1 = unlinkat flags. Missing paths are
+    /// ignored, matching the REPL.
+    fn emit_remove_path(&mut self) {
+        let error = self.intern("burnt: I can't remove that path\n");
+        let a = &mut self.asm;
+
+        a.label("remove_path");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X30, SP, 8);
+
+        a.mov_reg_reg(X19, X1); // flags
+        a.bl_label("path_copy");
+        a.mov_imm64(X0, AT_FDCWD);
+        a.mov_data_addr(X1, PATH_OFFSET);
+        a.mov_reg_reg(X2, X19);
+        a.mov_imm64(X8, SYS_UNLINKAT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GE, "remove_path_done");
+        a.mov_imm64(X1, (-2i64) as u64); // ENOENT
+        a.cmp_reg_reg(X0, X1);
+        a.bcond_label(CC_EQ, "remove_path_done");
+        a.mov_abs(X0, error);
+        a.b_label("runtime_fail");
+
+        a.label("remove_path_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X30, SP, 8);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
+    /// `rename_path`: X0 = old path text, X1 = new path text.
+    fn emit_rename_path(&mut self) {
+        let error = self.intern("burnt: I can't rename that path\n");
+        let a = &mut self.asm;
+
+        a.label("rename_path");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X30, SP, 16);
+
+        a.mov_reg_reg(X19, X0);
+        a.mov_reg_reg(X20, X1);
+        a.mov_reg_reg(X0, X19);
+        a.bl_label("path_copy");
+        a.mov_reg_reg(X0, X20);
+        a.bl_label("path_copy_second");
+
+        a.mov_imm64(X0, AT_FDCWD);
+        a.mov_data_addr(X1, PATH_OFFSET);
+        a.mov_imm64(X2, AT_FDCWD);
+        a.mov_data_addr(X3, PATH2_OFFSET);
+        a.mov_imm64(X8, SYS_RENAMEAT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GE, "rename_path_done");
+        a.mov_abs(X0, error);
+        a.b_label("runtime_fail");
+
+        a.label("rename_path_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X30, SP, 16);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
+    /// `file_exists`: X0 = path text, result is true or false in X0.
+    fn emit_file_exists(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("file_exists");
+        a.sub_imm(SP, SP, 16);
+        a.str(X30, SP, 0);
+        a.bl_label("path_copy");
+        a.mov_imm64(X0, AT_FDCWD);
+        a.mov_data_addr(X1, PATH_OFFSET);
+        a.movz_reg(X2, 0); // F_OK
+        a.movz_reg(X3, 0);
+        a.mov_imm64(X8, SYS_FACCESSAT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.cset(X0, CC_EQ);
+        a.ldr(X30, SP, 0);
+        a.add_imm(SP, SP, 16);
+        a.ret();
+    }
+
+    /// `all_arguments`: builds a list of every command-line argument after the
+    /// program's own name.
+    fn emit_all_arguments(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("all_arguments");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X30, SP, 32);
+
+        a.mov_data_addr(X1, ARGS_SP_OFFSET);
+        a.ldr(X1, X1, 0); // initial stack pointer
+        a.ldr(X19, X1, 0); // argc
+        a.add_imm(X20, X1, 8); // argv
+
+        a.movz_reg(X0, 48);
+        a.bl_label("heap_alloc");
+        a.str(XZR, X0, 0);
+        a.movz_reg(X1, 4);
+        a.str(X1, X0, 8);
+        a.mov_reg_reg(X21, X0); // list
+        a.movz_reg(X22, 1); // skip argv[0]
+
+        a.label("all_arguments_loop");
+        a.cmp_reg_reg(X22, X19);
+        a.bcond_label(CC_GE, "all_arguments_done");
+        a.mov_reg_reg(X2, X22);
+        a.add_reg_reg(X2, X2, X2);
+        a.add_reg_reg(X2, X2, X2);
+        a.add_reg_reg(X2, X2, X2);
+        a.add_reg_reg(X2, X20, X2);
+        a.ldr(X0, X2, 0);
+        a.bl_label("cstr_copy");
+        a.mov_reg_reg(X1, X0);
+        a.mov_reg_reg(X0, X21);
+        a.bl_label("array_add");
+        a.mov_reg_reg(X21, X0);
+        a.add_imm(X22, X22, 1);
+        a.b_label("all_arguments_loop");
+
+        a.label("all_arguments_done");
+        a.mov_reg_reg(X0, X21);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X30, SP, 32);
+        a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// `list_directory`: X0 = path text, result is a list of entry names.
+    fn emit_list_directory(&mut self) {
+        let error = self.intern("burnt: I can't list that directory\n");
+        let a = &mut self.asm;
+
+        a.label("list_directory");
+        a.sub_imm(SP, SP, 64);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        a.str(X30, SP, 40);
+
+        a.bl_label("path_copy");
+        a.mov_imm64(X0, AT_FDCWD);
+        a.mov_data_addr(X1, PATH_OFFSET);
+        a.mov_imm64(X2, 0x1_0000); // O_RDONLY | O_DIRECTORY
+        a.movz_reg(X3, 0);
+        a.mov_imm64(X8, SYS_OPENAT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "list_directory_fail");
+        a.mov_reg_reg(X19, X0); // fd
+
+        a.movz_reg(X0, 48);
+        a.bl_label("heap_alloc");
+        a.str(XZR, X0, 0);
+        a.movz_reg(X1, 4);
+        a.str(X1, X0, 8);
+        a.mov_reg_reg(X20, X0); // list
+
+        a.label("list_directory_fill");
+        a.mov_reg_reg(X0, X19);
+        a.mov_data_addr(X1, DENTS_OFFSET);
+        a.mov_imm64(X2, DENTS_CAPACITY);
+        a.mov_imm64(X8, SYS_GETDENTS64);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_EQ, "list_directory_done");
+        a.bcond_label(CC_LT, "list_directory_fail");
+        a.mov_reg_reg(X22, X0); // bytes in this batch
+        a.mov_data_addr(X21, DENTS_OFFSET);
+
+        a.label("list_directory_entry");
+        a.ldrh(X23, X21, 16); // d_reclen
+        a.add_imm(X9, X21, 19); // d_name
+
+        // Skip "." and "..".
+        a.ldrb(X10, X9, 0);
+        a.movz_reg(X11, 46); // '.'
+        a.cmp_reg_reg(X10, X11);
+        a.bcond_label(CC_NE, "list_directory_keep");
+        a.ldrb(X10, X9, 1);
+        a.cmp_reg_reg(X10, XZR);
+        a.bcond_label(CC_EQ, "list_directory_skip");
+        a.movz_reg(X11, 46);
+        a.cmp_reg_reg(X10, X11);
+        a.bcond_label(CC_NE, "list_directory_keep");
+        a.ldrb(X10, X9, 2);
+        a.cmp_reg_reg(X10, XZR);
+        a.bcond_label(CC_EQ, "list_directory_skip");
+
+        a.label("list_directory_keep");
+        a.mov_reg_reg(X0, X9);
+        a.bl_label("cstr_copy");
+        a.mov_reg_reg(X1, X0);
+        a.mov_reg_reg(X0, X20);
+        a.bl_label("array_add");
+        a.mov_reg_reg(X20, X0);
+
+        a.label("list_directory_skip");
+        a.add_reg_reg(X21, X21, X23);
+        a.sub_reg_reg(X22, X22, X23);
+        a.cmp_reg_reg(X22, XZR);
+        a.bcond_label(CC_GT, "list_directory_entry");
+        a.b_label("list_directory_fill");
+
+        a.label("list_directory_done");
+        a.mov_reg_reg(X0, X19);
+        a.mov_imm64(X8, SYS_CLOSE);
+        a.svc();
+        a.mov_reg_reg(X0, X20);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.ldr(X30, SP, 40);
+        a.add_imm(SP, SP, 64);
+        a.ret();
+
+        a.label("list_directory_fail");
+        a.mov_abs(X0, error);
+        a.b_label("runtime_fail");
+    }
+
+    /// `run_command`: X0 = command text, result is the shell's exit status.
+    fn emit_run_command(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("run_command");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X30, SP, 8);
+
+        a.bl_label("path_copy");
+        // argv = ["/bin/sh", "-c", command, NULL]
+        a.mov_data_addr(X1, RUN_ARGV_OFFSET);
+        a.mov_data_addr(X2, RUN_SH_OFFSET);
+        a.str(X2, X1, 0);
+        a.mov_data_addr(X2, RUN_DASH_C_OFFSET);
+        a.str(X2, X1, 8);
+        a.mov_data_addr(X2, PATH_OFFSET);
+        a.str(X2, X1, 16);
+        a.str(XZR, X1, 24);
+
+        a.movz_reg(X0, 17); // SIGCHLD
+        a.movz_reg(X1, 0);
+        a.movz_reg(X2, 0);
+        a.movz_reg(X3, 0);
+        a.movz_reg(X4, 0);
+        a.mov_imm64(X8, SYS_CLONE);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_EQ, "run_command_child");
+        a.bcond_label(CC_LT, "run_command_fail");
+        a.mov_reg_reg(X19, X0); // child pid
+
+        a.mov_reg_reg(X0, X19);
+        a.mov_data_addr(X1, RUN_STATUS_OFFSET);
+        a.movz_reg(X2, 0);
+        a.movz_reg(X3, 0);
+        a.mov_imm64(X8, SYS_WAIT4);
+        a.svc();
+        a.mov_data_addr(X1, RUN_STATUS_OFFSET);
+        a.ldr(X0, X1, 0);
+        a.mov_imm64(X1, 256);
+        a.udiv_reg_reg(X0, X0, X1); // WEXITSTATUS
+        a.ldr(X19, SP, 0);
+        a.ldr(X30, SP, 8);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+
+        a.label("run_command_child");
+        a.mov_data_addr(X0, ARGS_SP_OFFSET);
+        a.ldr(X0, X0, 0); // initial stack pointer
+        a.ldr(X1, X0, 0); // argc
+        a.add_imm(X2, X0, 8); // end of argv
+        a.add_reg_reg(X3, X1, X1);
+        a.add_reg_reg(X3, X3, X3);
+        a.add_reg_reg(X3, X3, X3);
+        a.add_reg_reg(X2, X2, X3);
+        a.add_imm(X2, X2, 8); // envp
+        a.mov_data_addr(X0, RUN_SH_OFFSET);
+        a.mov_data_addr(X1, RUN_ARGV_OFFSET);
+        a.mov_imm64(X8, SYS_EXECVE);
+        a.svc();
+        // The shell could not be started; report it like a shell would.
+        a.mov_imm64(X8, SYS_EXIT);
+        a.movz_reg(X0, 127);
+        a.svc();
+
+        a.label("run_command_fail");
+        a.movz_reg(X0, 127);
+        a.ldr(X19, SP, 0);
+        a.ldr(X30, SP, 8);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
     /// `text_copy`: X0 = text, result is a fresh copy of it in X0.
     fn emit_text_copy(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("text_copy");
-        a.ldr(X2, X0, 0); // length
-        a.mov_reg_reg(X3, X0); // source text
-        a.mov_data_addr(X5, heap_ptr);
-        a.ldr(X6, X5, 0); // destination
-        a.add_reg_reg(X7, X6, X2);
-        a.add_imm(X7, X7, 8);
-        a.mov_data_addr(X8, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X7, X8);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X7, X5, 0);
-        a.str(X2, X6, 0);
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X30, SP, 16);
 
-        a.add_imm(X3, X3, 8);
+        a.mov_reg_reg(X19, X0); // source text
+        a.ldr(X20, X19, 0); // length
+        a.add_imm(X0, X20, 8);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0); // destination
+        a.str(X20, X6, 0);
+
+        a.add_imm(X3, X19, 8);
         a.add_imm(X4, X6, 8);
-        a.mov_reg_reg(X9, X2);
+        a.mov_reg_reg(X9, X20);
         a.label("tcopy_loop");
         a.cmp_reg_reg(X9, XZR);
         a.bcond_label(CC_EQ, "tcopy_done");
@@ -2717,38 +3282,39 @@ impl Codegen {
 
         a.label("tcopy_done");
         a.mov_reg_reg(X0, X6);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X30, SP, 16);
+        a.add_imm(SP, SP, 32);
         a.ret();
     }
 
     /// `array_copy_scalar`: X0 = list of numbers or truth values. A fresh list
     /// is allocated and the words are copied into it.
     fn emit_array_copy_scalar(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("array_copy_scalar");
-        a.mov_reg_reg(X1, X0); // source list
-        a.ldr(X2, X1, 0); // length
-        a.mov_data_addr(X5, heap_ptr);
-        a.ldr(X6, X5, 0); // destination
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X30, SP, 16);
 
-        a.mov_reg_reg(X7, X2);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_imm(X7, X7, 16);
-        a.mov_reg_reg(X9, X6);
-        a.add_reg_reg(X9, X9, X7);
-        a.mov_data_addr(X8, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X9, X8);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X9, X5, 0);
-        a.str(X2, X6, 0); // length
-        a.str(X2, X6, 8); // capacity
+        a.mov_reg_reg(X19, X0); // source list
+        a.ldr(X20, X19, 0); // length
+        a.mov_reg_reg(X0, X20);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0); // length * 8
+        a.add_imm(X0, X0, 16);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0); // destination
+        a.str(X20, X6, 0); // length
+        a.str(X20, X6, 8); // capacity
 
-        a.add_imm(X1, X1, 16);
+        a.add_imm(X1, X19, 16);
         a.add_imm(X3, X6, 16);
-        a.mov_reg_reg(X4, X2);
+        a.mov_reg_reg(X4, X20);
         a.label("acopy_scalar_loop");
         a.cmp_reg_reg(X4, XZR);
         a.bcond_label(CC_EQ, "acopy_scalar_done");
@@ -2761,13 +3327,16 @@ impl Codegen {
 
         a.label("acopy_scalar_done");
         a.mov_reg_reg(X0, X6);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X30, SP, 16);
+        a.add_imm(SP, SP, 32);
         a.ret();
     }
 
     /// `array_copy_text`: X0 = list of text. Each text item is copied too, so
     /// the new list and the old list do not share any heap value.
     fn emit_array_copy_text(&mut self) {
-        let heap_ptr = HEAP_PTR_OFFSET;
         let a = &mut self.asm;
 
         a.label("array_copy_text");
@@ -2781,21 +3350,15 @@ impl Codegen {
         // caller's link register in the frame or `ret` returns into the loop.
         a.str(X30, SP, 40);
 
-        a.mov_reg_reg(X19, X0); // source items cursor
+        a.mov_reg_reg(X19, X0); // source list
         a.ldr(X21, X19, 0); // length
-        a.mov_data_addr(X5, heap_ptr);
-        a.ldr(X6, X5, 0); // destination start
-        a.mov_reg_reg(X7, X21);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_reg_reg(X7, X7, X7);
-        a.add_imm(X7, X7, 16);
-        a.mov_reg_reg(X9, X6);
-        a.add_reg_reg(X9, X9, X7);
-        a.mov_data_addr(X8, HEAP_END_OFFSET);
-        a.cmp_reg_reg(X9, X8);
-        a.bcond_label(CC_GT, "heap_fail");
-        a.str(X9, X5, 0);
+        a.mov_reg_reg(X0, X21);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0);
+        a.add_reg_reg(X0, X0, X0); // length * 8
+        a.add_imm(X0, X0, 16);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X6, X0); // destination start
         a.str(X21, X6, 0); // length
         a.str(X21, X6, 8); // capacity
 
@@ -2823,6 +3386,157 @@ impl Codegen {
         a.ldr(X23, SP, 32);
         a.ldr(X30, SP, 40);
         a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// `heap_grow`: X0 = the smallest useful chunk. Maps at least one chunk,
+    /// records it in the chunk list, and makes it the current bump region.
+    fn emit_heap_grow(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("heap_grow");
+        a.mov_imm64(X2, HEAP_CHUNK_SIZE);
+        a.cmp_reg_reg(X0, X2);
+        a.bcond_label(CC_GE, "heap_grow_size_ok");
+        a.mov_reg_reg(X0, X2);
+        a.label("heap_grow_size_ok");
+        // Round the chunk up to a 16-byte boundary.
+        a.add_imm(X1, X0, 15);
+        a.movz_reg(X2, 16);
+        a.udiv_reg_reg(X1, X1, X2);
+        a.mul_reg_reg(X1, X1, X2);
+        a.mov_reg_reg(X12, X1);
+
+        a.movz_reg(X0, 0); // let the kernel choose the address
+        a.mov_reg_reg(X1, X12);
+        a.movz_reg(X2, 3); // PROT_READ | PROT_WRITE
+        a.mov_imm64(X3, 0x22); // MAP_PRIVATE | MAP_ANONYMOUS
+        a.mov_imm64(X4, (-1i64) as u64);
+        a.movz_reg(X5, 0);
+        a.mov_imm64(X8, SYS_MMAP);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "heap_fail");
+
+        // Chunk header: [end][next]. The first block starts just after it.
+        a.add_reg_reg(X2, X0, X12);
+        a.str(X2, X0, 0);
+        a.mov_data_addr(X3, HEAP_CHUNKS_OFFSET);
+        a.ldr(X4, X3, 0);
+        a.str(X4, X0, 8);
+        a.str(X0, X3, 0);
+        a.add_imm(X2, X0, 16);
+        a.mov_data_addr(X3, HEAP_PTR_OFFSET);
+        a.str(X2, X3, 0);
+        a.add_reg_reg(X2, X0, X12);
+        a.mov_data_addr(X3, HEAP_END_OFFSET);
+        a.str(X2, X3, 0);
+        a.ret();
+    }
+
+    /// `heap_alloc`: X0 = payload bytes, result is a 16-byte-aligned pointer.
+    /// Freed blocks are reused before the bump pointer moves.
+    fn emit_heap_alloc(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("heap_alloc");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X30, SP, 16);
+
+        // need = max(32, round_up_16(size + 16))
+        a.add_imm(X1, X0, 31);
+        a.movz_reg(X2, 16);
+        a.udiv_reg_reg(X1, X1, X2);
+        a.mul_reg_reg(X1, X1, X2);
+        a.movz_reg(X2, 32);
+        a.cmp_reg_reg(X1, X2);
+        a.bcond_label(CC_GE, "alloc_min_ok");
+        a.mov_reg_reg(X1, X2);
+        a.label("alloc_min_ok");
+        a.mov_reg_reg(X19, X1);
+
+        // First fit on the free list.
+        a.mov_data_addr(X3, HEAP_FREE_OFFSET);
+        a.ldr(X4, X3, 0);
+        a.movz_reg(X5, 0);
+        a.label("alloc_free_loop");
+        a.cmp_reg_reg(X4, XZR);
+        a.bcond_label(CC_EQ, "alloc_bump");
+        a.ldr(X6, X4, 0);
+        a.cmp_reg_reg(X6, X19);
+        a.bcond_label(CC_GE, "alloc_free_hit");
+        a.mov_reg_reg(X5, X4);
+        a.ldr(X4, X4, 8);
+        a.b_label("alloc_free_loop");
+
+        a.label("alloc_free_hit");
+        a.ldr(X6, X4, 8); // the next free block
+        a.cmp_reg_reg(X5, XZR);
+        a.bcond_label(CC_EQ, "alloc_free_head");
+        a.str(X6, X5, 8);
+        a.b_label("alloc_free_unlinked");
+        a.label("alloc_free_head");
+        a.str(X6, X3, 0);
+        a.label("alloc_free_unlinked");
+        a.add_imm(X0, X4, 16);
+        a.b_label("alloc_done");
+
+        a.label("alloc_bump");
+        a.mov_data_addr(X7, HEAP_PTR_OFFSET);
+        a.ldr(X8, X7, 0);
+        a.add_reg_reg(X9, X8, X19);
+        a.mov_data_addr(X10, HEAP_END_OFFSET);
+        a.ldr(X11, X10, 0);
+        a.cmp_reg_reg(X9, X11);
+        a.bcond_label(CC_LE, "alloc_commit");
+        a.mov_reg_reg(X0, X19);
+        a.bl_label("heap_grow");
+        a.b_label("alloc_bump");
+
+        a.label("alloc_commit");
+        a.str(X9, X7, 0);
+        a.str(X19, X8, 0);
+        a.str(XZR, X8, 8);
+        a.add_imm(X0, X8, 16);
+
+        a.label("alloc_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X30, SP, 16);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
+    /// `heap_free`: X0 = a payload pointer. Pointers outside the mapped chunks
+    /// (string literals, for example) are ignored, so freeing is always safe.
+    fn emit_heap_free(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("heap_free");
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_EQ, "free_done");
+        a.sub_imm(X1, X0, 16);
+        a.mov_data_addr(X2, HEAP_CHUNKS_OFFSET);
+        a.ldr(X2, X2, 0);
+        a.label("free_scan");
+        a.cmp_reg_reg(X2, XZR);
+        a.bcond_label(CC_EQ, "free_done");
+        a.ldr(X3, X2, 0);
+        a.cmp_reg_reg(X1, X2);
+        a.bcond_label(CC_LT, "free_next");
+        a.cmp_reg_reg(X1, X3);
+        a.bcond_label(CC_GE, "free_next");
+        a.mov_data_addr(X4, HEAP_FREE_OFFSET);
+        a.ldr(X5, X4, 0);
+        a.str(X5, X1, 8);
+        a.str(X1, X4, 0);
+        a.b_label("free_done");
+        a.label("free_next");
+        a.ldr(X2, X2, 8);
+        a.b_label("free_scan");
+        a.label("free_done");
         a.ret();
     }
 
@@ -2945,11 +3659,24 @@ say double with 21
 
     #[test]
     fn too_many_parameters() {
-        let src = "\
-to wide with a as a number and b as a number and c as a number and d as a number and e as a number and f as a number and g as a number and h as a number and i as a number:
-    give back a
-";
-        assert!(bake(src).is_err());
+        let params: Vec<String> = (1..=crate::types::MAX_PARAMS + 1)
+            .map(|n| format!("p{n} as a number"))
+            .collect();
+        let src = format!("to wide with {}:\n    give back p1\n", params.join(" and "));
+        assert!(bake(&src).is_err());
+    }
+
+    #[test]
+    fn many_parameters_bake() {
+        let params: Vec<String> = (1..=crate::types::MAX_PARAMS)
+            .map(|n| format!("p{n} as a number"))
+            .collect();
+        let src = format!(
+            "to wide with {}:\n    give back p1\nsay wide with {}\n",
+            params.join(" and "),
+            vec!["1"; crate::types::MAX_PARAMS].join(" and ")
+        );
+        assert!(bake(&src).is_ok());
     }
 
     #[test]

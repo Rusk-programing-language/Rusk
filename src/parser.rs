@@ -399,6 +399,23 @@ impl Parser {
             return Ok(Stmt::WriteFile { text, path, line });
         }
 
+        if self.is_word("make") {
+            self.bump();
+            self.need_word("directory", "after 'make',")?;
+            let path = self.expr(true)?;
+            self.end_of_line()?;
+            return Ok(Stmt::MakeDirectory { path, line });
+        }
+
+        if self.is_word("rename") {
+            self.bump();
+            let from = self.expr(true)?;
+            self.need_word("to", "after the old path in 'rename',")?;
+            let to = self.expr(true)?;
+            self.end_of_line()?;
+            return Ok(Stmt::RenamePath { from, to, line });
+        }
+
         if self.is_word("break") {
             self.bump();
             self.end_of_line()?;
@@ -422,6 +439,16 @@ impl Parser {
 
         if self.is_word("remove") {
             self.bump();
+            if self.eat_word("file") {
+                let path = self.expr(true)?;
+                self.end_of_line()?;
+                return Ok(Stmt::RemoveFile { path, line });
+            }
+            if self.eat_word("directory") {
+                let path = self.expr(true)?;
+                self.end_of_line()?;
+                return Ok(Stmt::RemoveDirectory { path, line });
+            }
             let index = if self.eat_word("last") {
                 None
             } else if self.eat_word("item") {
@@ -1083,6 +1110,29 @@ impl Parser {
                         self.line(),
                         self.peek().describe()
                     ));
+                }
+                if word == "list" && matches!(self.peek_at(1), Tok::Ident(s) if s == "directory") {
+                    self.bump(); // "list"
+                    self.bump(); // "directory"
+                    let path = self.primary()?;
+                    return Ok(Expr::ListDirectory(Box::new(path)));
+                }
+                if word == "file" && matches!(self.peek_at(1), Tok::Ident(s) if s == "exists") {
+                    self.bump(); // "file"
+                    self.bump(); // "exists"
+                    let path = self.primary()?;
+                    return Ok(Expr::FileExists(Box::new(path)));
+                }
+                if word == "all" && matches!(self.peek_at(1), Tok::Ident(s) if s == "arguments") {
+                    self.bump(); // "all"
+                    self.bump(); // "arguments"
+                    return Ok(Expr::AllArguments);
+                }
+                if word == "run" && matches!(self.peek_at(1), Tok::Ident(s) if s == "command") {
+                    self.bump(); // "run"
+                    self.bump(); // "command"
+                    let command = self.expr(true)?;
+                    return Ok(Expr::RunCommand(Box::new(command)));
                 }
                 if word == "copy" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
                     self.bump(); // "copy"

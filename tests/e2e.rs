@@ -1274,6 +1274,90 @@ fn files_can_be_written_and_read_back() {
 }
 
 #[test]
+fn directories_can_be_made_listed_renamed_and_removed() {
+    let dir = std::env::temp_dir().join(format!("rusk-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dir_text = format!("\"{}\"", dir.display());
+    let src = format!(
+        "\
+make directory {dir_text}
+say file exists {dir_text}
+write \"hello\" to file {dir_text} + \"/one.txt\"
+let names be list directory {dir_text}
+say length of names
+say item 1 of names
+rename ({dir_text} + \"/one.txt\") to ({dir_text} + \"/two.txt\")
+say file exists ({dir_text} + \"/two.txt\")
+remove file ({dir_text} + \"/two.txt\")
+say file exists ({dir_text} + \"/two.txt\")
+remove directory {dir_text}
+say file exists {dir_text}
+"
+    );
+    let (stdout, stderr, code) = run_with("directories", &src, &[], None, &[]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(stdout, "true\n1\none.txt\ntrue\nfalse\nfalse\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn making_an_existing_directory_and_removing_a_missing_file_are_fine() {
+    let dir = std::env::temp_dir().join(format!("rusk-dir-again-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dir_text = format!("\"{}\"", dir.display());
+    let src = format!(
+        "\
+make directory {dir_text}
+make directory {dir_text}
+remove file {dir_text} + \"/missing.txt\"
+remove directory {dir_text}
+"
+    );
+    let (stdout, stderr, code) = run_with("directories_again", &src, &[], None, &[]);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(stdout, "");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn all_arguments_is_a_list_of_the_command_line() {
+    let src = "\
+let args be all arguments
+say length of args
+for each a in args:
+    say a
+";
+    let (stdout, stderr, code) =
+        run_with("all_arguments", src, &["alpha", "beta gamma"], None, &[]);
+    assert_eq!(stdout, "2\nalpha\nbeta gamma\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn run_command_returns_the_shell_exit_status_and_shares_output() {
+    let src = "\
+say run command \"echo from child\"
+say run command \"exit 7\"
+";
+    let (stdout, stderr, code) = run_with("run_command", src, &[], None, &[]);
+    assert_eq!(stdout, "from child\n0\n7\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_bad_directory_path_stops_with_a_sentence() {
+    let src = "say list directory \"/definitely/not/here\"\n";
+    let (stdout, stderr, code) = run_full("missing_directory", src);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 1);
+    assert!(stderr.contains("I can't list that directory"), "{stderr}");
+}
+
+#[test]
 fn warn_goes_to_standard_error() {
     let src = "say \"normal\"\nwarn \"careful\"\nwarn 42\nwarn true\n";
     let (stdout, stderr, code) = run_full("warn", src);

@@ -51,11 +51,29 @@ const AARCH64_EXIT: u64 = 93;
 const AARCH64_OPENAT: u64 = 56;
 const AARCH64_CLOSE: u64 = 57;
 const AARCH64_READ: u64 = 63;
+const AARCH64_MKDIRAT: u64 = 34;
+const AARCH64_UNLINKAT: u64 = 35;
+const AARCH64_RENAMEAT: u64 = 38;
+const AARCH64_GETDENTS64: u64 = 61;
+const AARCH64_FACCESSAT: u64 = 48;
+const AARCH64_CLONE: u64 = 220;
+const AARCH64_EXECVE: u64 = 221;
+const AARCH64_MMAP: u64 = 222;
+const AARCH64_WAIT4: u64 = 260;
 const X86_WRITE: u64 = 1;
 const X86_EXIT: u64 = 60;
 const X86_OPENAT: u64 = 257;
 const X86_CLOSE: u64 = 3;
 const X86_READ: u64 = 0;
+const X86_MKDIRAT: u64 = 258;
+const X86_UNLINKAT: u64 = 263;
+const X86_RENAMEAT: u64 = 264;
+const X86_GETDENTS64: u64 = 217;
+const X86_FACCESSAT: u64 = 269;
+const X86_CLONE: u64 = 56;
+const X86_EXECVE: u64 = 59;
+const X86_MMAP: u64 = 9;
+const X86_WAIT4: u64 = 61;
 
 enum Fixup {
     Label {
@@ -401,6 +419,25 @@ impl Asm {
         self.u32(disp);
     }
 
+    fn load_half_sp(&mut self, phys: u8, disp: u32) {
+        let rex = 0x48 | (((phys >> 3) & 1) << 2);
+        self.u8(rex);
+        self.u8(0x0F);
+        self.u8(0xB7);
+        self.u8(0x84 | ((phys & 7) << 3));
+        self.u8(0x24);
+        self.u32(disp);
+    }
+
+    fn load_half_rcx(&mut self, phys: u8, disp: u32) {
+        let rex = 0x48 | (((phys >> 3) & 1) << 2);
+        self.u8(rex);
+        self.u8(0x0F);
+        self.u8(0xB7);
+        self.u8(0x81 | ((phys & 7) << 3));
+        self.u32(disp);
+    }
+
     fn load_base(&mut self, reg: u8) {
         if reg == SP {
             // RCX = RSP; the caller uses the RSP-specific memory forms.
@@ -424,6 +461,15 @@ impl Asm {
                 AARCH64_OPENAT => X86_OPENAT,
                 AARCH64_CLOSE => X86_CLOSE,
                 AARCH64_READ => X86_READ,
+                AARCH64_MKDIRAT => X86_MKDIRAT,
+                AARCH64_UNLINKAT => X86_UNLINKAT,
+                AARCH64_RENAMEAT => X86_RENAMEAT,
+                AARCH64_GETDENTS64 => X86_GETDENTS64,
+                AARCH64_FACCESSAT => X86_FACCESSAT,
+                AARCH64_CLONE => X86_CLONE,
+                AARCH64_EXECVE => X86_EXECVE,
+                AARCH64_MMAP => X86_MMAP,
+                AARCH64_WAIT4 => X86_WAIT4,
                 other => other,
             }
         } else {
@@ -527,6 +573,20 @@ impl Asm {
         } else {
             self.load_base(rn);
             self.load_byte_rcx(RAX, disp);
+        }
+        self.store_vreg(rt, RAX);
+    }
+
+    /// `ldrh wt, [rn, #disp]`
+    pub fn ldrh(&mut self, rt: u8, rn: u8, disp: u32) {
+        if rt == XZR {
+            return;
+        }
+        if rn == SP {
+            self.load_half_sp(RAX, disp);
+        } else {
+            self.load_base(rn);
+            self.load_half_rcx(RAX, disp);
         }
         self.store_vreg(rt, RAX);
     }

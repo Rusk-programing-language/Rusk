@@ -223,6 +223,12 @@ impl Asm {
         self.emit(0x3900_0000 | (disp << 10) | ((rn as u32) << 5) | rt as u32);
     }
 
+    /// `ldrh wt, [rn, #disp]`
+    pub fn ldrh(&mut self, rt: u8, rn: u8, disp: u32) {
+        debug_assert!(disp.is_multiple_of(2) && disp < 8192);
+        self.emit(0x7940_0000 | ((disp / 2) << 10) | ((rn as u32) << 5) | rt as u32);
+    }
+
     // ---- arithmetic ------------------------------------------------------
 
     pub fn add_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {

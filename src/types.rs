@@ -19,6 +19,12 @@ pub struct Sig {
     pub ret: Ty,
 }
 
+/// The most parameters a function or function value may take. Arguments are
+/// passed through a stack block, so this is far above the old eight-register
+/// limit while keeping every frame comfortably inside the architecture's
+/// immediate-offset range.
+pub const MAX_PARAMS: usize = 128;
+
 #[derive(Clone)]
 struct SigInfer {
     params: Vec<Ty>,
@@ -427,6 +433,19 @@ fn infer_stmts(
                     }
                 }
             }
+            Stmt::MakeDirectory { path, line } => {
+                infer_text_path(path, "make directory", scope, sigs, *line)?;
+            }
+            Stmt::RemoveFile { path, line } => {
+                infer_text_path(path, "remove file", scope, sigs, *line)?;
+            }
+            Stmt::RemoveDirectory { path, line } => {
+                infer_text_path(path, "remove directory", scope, sigs, *line)?;
+            }
+            Stmt::RenamePath { from, to, line } => {
+                infer_text_path(from, "rename", scope, sigs, *line)?;
+                infer_text_path(to, "rename", scope, sigs, *line)?;
+            }
             Stmt::If {
                 cond,
                 then,
@@ -599,6 +618,25 @@ fn infer_stmts(
     Ok(())
 }
 
+fn infer_text_path(
+    e: &Expr,
+    what: &str,
+    scope: &Scope,
+    sigs: &Sigs,
+    line: usize,
+) -> Result<(), String> {
+    let t = type_of(e, scope, sigs).map_err(|m| at(line, m))?;
+    if let Some(t) = t {
+        if t != Ty::Str {
+            return Err(at(
+                line,
+                format!("'{what}' needs a path as text, but this is {t}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
     match e {
         Expr::Int(_) => Ok(Some(Ty::Int)),
@@ -674,8 +712,10 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             let Some(sig) = sigs.get(name) else {
                 return Err(format!("I don't know a function called '{name}'"));
             };
-            if sig.params.len() > 8 {
-                return Err("a function can't take more than 8 things".to_string());
+            if sig.params.len() > MAX_PARAMS {
+                return Err(format!(
+                    "a function can't take more than {MAX_PARAMS} things"
+                ));
             }
             let Some(ret) = sig.ret.clone() else {
                 return Ok(None);
@@ -691,8 +731,10 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }))))
         }
         Expr::Lambda { params, body } => {
-            if params.len() > 8 {
-                return Err("a function value can't take more than 8 things".to_string());
+            if params.len() > MAX_PARAMS {
+                return Err(format!(
+                    "a function value can't take more than {MAX_PARAMS} things"
+                ));
             }
             let mut inner = scope.clone();
             for param in params {
@@ -851,6 +893,40 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
                 }
             }
             Ok(Some(Ty::Str))
+        }
+        Expr::ListDirectory(path) => {
+            let t = type_of(path, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Str {
+                    return Err(format!(
+                        "'list directory' needs a path as text, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Array(Elem::STR)))
+        }
+        Expr::FileExists(path) => {
+            let t = type_of(path, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Str {
+                    return Err(format!(
+                        "'file exists' needs a path as text, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Bool))
+        }
+        Expr::AllArguments => Ok(Some(Ty::Array(Elem::STR))),
+        Expr::RunCommand(command) => {
+            let t = type_of(command, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Str {
+                    return Err(format!(
+                        "'run command' needs the command as text, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Int))
         }
         Expr::Item(index, array) => {
             let it = type_of(index, scope, sigs)?;

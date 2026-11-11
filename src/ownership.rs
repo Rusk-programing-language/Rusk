@@ -223,6 +223,15 @@ impl<'a> Checker<'a> {
                 Self::line_at(*line, self.expr(text, scope, Use::Read))?;
                 Self::line_at(*line, self.expr(path, scope, Use::Read))?;
             }
+            Stmt::MakeDirectory { path, line }
+            | Stmt::RemoveFile { path, line }
+            | Stmt::RemoveDirectory { path, line } => {
+                Self::line_at(*line, self.expr(path, scope, Use::Read))?;
+            }
+            Stmt::RenamePath { from, to, line } => {
+                Self::line_at(*line, self.expr(from, scope, Use::Read))?;
+                Self::line_at(*line, self.expr(to, scope, Use::Read))?;
+            }
             Stmt::If {
                 cond,
                 then,
@@ -413,6 +422,10 @@ impl<'a> Checker<'a> {
             Expr::Environment(name) => self.expr(name, scope, Use::Read)?,
             Expr::ReadLine | Expr::ReadAll => {}
             Expr::ReadFile(path) => self.expr(path, scope, Use::Read)?,
+            Expr::ListDirectory(path) | Expr::FileExists(path) | Expr::RunCommand(path) => {
+                self.expr(path, scope, Use::Read)?
+            }
+            Expr::AllArguments => {}
             Expr::Call(name, args) => {
                 // A borrowed parameter is a read-only view of its argument, so
                 // passing an owned value to it does not move the value.

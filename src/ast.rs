@@ -305,6 +305,14 @@ pub enum Expr {
     ReadAll,
     /// `read file PATH` — a file's contents as text.
     ReadFile(Box<Expr>),
+    /// `list directory PATH` — the names inside a directory, as text.
+    ListDirectory(Box<Expr>),
+    /// `file exists PATH` — whether a path can be reached.
+    FileExists(Box<Expr>),
+    /// `all arguments` — the whole command line as a list of text.
+    AllArguments,
+    /// `run command TEXT` — run a shell command, giving back its exit status.
+    RunCommand(Box<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
@@ -378,6 +386,27 @@ pub enum Stmt {
     WriteFile {
         text: Expr,
         path: Expr,
+        line: usize,
+    },
+    /// `make directory PATH` — create a directory, ignoring one that exists.
+    MakeDirectory {
+        path: Expr,
+        line: usize,
+    },
+    /// `remove file PATH` — delete a file, ignoring one that is already gone.
+    RemoveFile {
+        path: Expr,
+        line: usize,
+    },
+    /// `remove directory PATH` — delete an empty directory.
+    RemoveDirectory {
+        path: Expr,
+        line: usize,
+    },
+    /// `rename OLD to NEW` — move or rename a file or directory.
+    RenamePath {
+        from: Expr,
+        to: Expr,
         line: usize,
     },
     If {
@@ -497,6 +526,9 @@ fn collect_free_expr(
         | Expr::Argument(inner)
         | Expr::Environment(inner)
         | Expr::ReadFile(inner)
+        | Expr::ListDirectory(inner)
+        | Expr::FileExists(inner)
+        | Expr::RunCommand(inner)
         | Expr::Unary(_, inner) => collect_free_expr(inner, bound, free, seen),
         Expr::Letter(a, b) | Expr::Item(a, b) | Expr::Binary(_, a, b) => {
             collect_free_expr(a, bound, free, seen);
@@ -507,7 +539,7 @@ fn collect_free_expr(
             collect_free_expr(from, bound, free, seen);
             collect_free_expr(to, bound, free, seen);
         }
-        Expr::EmptyArray(_) | Expr::ReadLine | Expr::ReadAll => {}
+        Expr::EmptyArray(_) | Expr::ReadLine | Expr::ReadAll | Expr::AllArguments => {}
     }
 }
 
@@ -580,6 +612,15 @@ fn collect_free_stmts(
                 collect_free_expr(text, bound, free, seen);
                 collect_free_expr(path, bound, free, seen);
             }
+            Stmt::MakeDirectory { path, .. }
+            | Stmt::RemoveFile { path, .. }
+            | Stmt::RemoveDirectory { path, .. } => {
+                collect_free_expr(path, bound, free, seen);
+            }
+            Stmt::RenamePath { from, to, .. } => {
+                collect_free_expr(from, bound, free, seen);
+                collect_free_expr(to, bound, free, seen);
+            }
             Stmt::If {
                 cond, then, other, ..
             } => {
@@ -635,6 +676,10 @@ impl Stmt {
             | Stmt::AddTo { line, .. }
             | Stmt::Remove { line, .. }
             | Stmt::WriteFile { line, .. }
+            | Stmt::MakeDirectory { line, .. }
+            | Stmt::RemoveFile { line, .. }
+            | Stmt::RemoveDirectory { line, .. }
+            | Stmt::RenamePath { line, .. }
             | Stmt::If { line, .. }
             | Stmt::Repeat { line, .. }
             | Stmt::While { line, .. }
