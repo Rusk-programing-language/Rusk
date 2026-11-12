@@ -28,13 +28,15 @@ syscalls.
 
 ## Status
 
-v1.1.3 is the systems-core release. Programs can create, list, rename, and
-remove directories, ask whether a path exists, read the whole command line with
-`all arguments`, and run a shell command with `run command`. The old fixed
-1 MiB heap became a growable set of `mmap` chunks with a free list, so list
-growth and long inputs reuse space instead of exhausting one block. The
-parameter limit rose from 8 to 128, and a call now passes its arguments in one
-contiguous stack block instead of registers.
+v1.1.4 is the networking-and-terminal release. Programs can open IPv4 TCP
+connections with `connect to HOST at PORT`, listen with `listen at PORT`, accept
+with `accept from LISTENER`, exchange text with `send`, `read line from`, and
+`read all from`, and close descriptors with `close`. They can also put standard
+input into raw mode with `turn on raw terminal`, read one byte at a time with
+`read key`, and restore the terminal with `turn off raw terminal`; normal exit
+and `stop with` restore it automatically. v1.1.3 added the systems core:
+directory operations, `run command`, `all arguments`, a growable `mmap`-backed
+heap with a free list, and the 128-parameter limit.
 
 v1.1 makes functions first-class: **function-typed parameters**, **function
 values in lists**, **functions that give back functions**, and closures that
@@ -93,7 +95,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.1.3
+sh toastset --version 1.1.4
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -266,6 +268,31 @@ unreadable file, or a path too long for the runtime scratch area, is reported
 as a Rusk error. `rusk run file.rk one two` passes `one` and `two` through to
 `argument 1` and `argument 2`.
 
+The v1.1.4 systems surface adds IPv4 TCP and raw terminal input:
+
+```rusk
+let server be listen at 8080
+let client be connect to "127.0.0.1" at 8080
+let peer be accept from server
+
+send "fresh bread\n" to client
+say read line from peer
+
+close peer
+close client
+close server
+
+turn on raw terminal
+let key be read key
+turn off raw terminal
+```
+
+Sockets and listeners are ordinary numbers (file descriptors), or `-1` when a
+call fails. `send` writes every byte, `read line from` drops the newline, and
+`read all from` runs to end of stream. Raw mode is restored on normal exit, on
+`stop with`, and on a runtime error; on a pipe it is simply ignored, so the
+same program still runs under redirection.
+
 A file can pull in several modules; each file is included at most once:
 
 ```rusk
@@ -285,6 +312,22 @@ say math_square with 12
 say units.convert with 3
 say pad_left with "x"
 ```
+
+The checkout ships small Rusk libraries under `ruskmods/`: `text`, `math`,
+`date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`,
+and `shutils`. The `rusklib/` folder adds higher-level file and archive
+helpers, plus a bundle that imports everything:
+
+```rusk
+import "rusklib/rusklib"
+say date_format_iso with 2026 and 11 and 12
+say files_exists with "notes.txt"
+```
+
+Every public name carries its module's prefix (`date_`, `files_`, and so on)
+because a plain import shares one global namespace. Import one module directly
+when a program does not need the bundle. See
+[`ruskmods/README.md`](ruskmods/README.md) for the function list.
 
 A line containing only `end`, `end.`, `<e>`, `</e>`, or `end of file` stops the
 file there, so chained or concatenated files do not run into each other. That
@@ -410,7 +453,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.3 — an English-like language
+Rusk 1.1.4 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -557,7 +600,7 @@ Runtime facts worth knowing:
   relocation pass. Data addresses are patched into the finished machine code,
   so growing the text section moves the data instead of colliding with it.
 
-## What v1.1.3 doesn't do yet
+## What v1.1.4 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -574,10 +617,17 @@ Honest list, so the docs don't lie:
   contents can be replaced with `set item`, `add VALUE to LIST` appends with
   spare capacity, and `remove last from LIST` / `remove item N from LIST`
   shorten them. Capacity never shrinks.
-- System I/O now covers text files, standard streams, directories, and shell
-  commands. There are still no sockets, threads, signals, terminal primitives
-  in baked programs, or random-access file positions. A path is limited by the
-  4 KiB scratch area.
+- System I/O now covers text files, standard streams, directories, shell
+  commands, IPv4 TCP sockets, and raw terminal input. Networking is TCP only:
+  there is no IPv6, UDP, DNS, TLS, timeout, non-blocking mode, or half-close.
+  A host name other than a numeric dotted address is treated as `127.0.0.1`
+  (that includes `localhost`). Socket calls are blocking, `send` ignores a
+  failed write, and reading from a bad descriptor gives empty text.
+- Raw mode changes standard input only and does not decode keys: arrow keys
+  arrive as their escape bytes. A pipe is left alone, so the same program still
+  runs under redirection.
+- There are still no threads, signals, or random-access file positions. A path
+  is limited by the 4 KiB scratch area.
 - Imports and exports have plain, named, and selective forms. There are no
   package manifests or a standard module registry.
 - Text positions count bytes, not Unicode characters.
@@ -585,8 +635,8 @@ Honest list, so the docs don't lie:
 - Linux only, on AArch64 or x86-64. There is no macOS, Windows, or 32-bit
   backend. The compiler itself also runs on Windows x86-64, but its output is
   still a Linux ELF, so `rusk run` is unavailable there.
-- GUI toolkits, networking, and pthread-style threads are not in this release.
-  They are the next systems layer, not a claim of v1.1.3.
+- GUI toolkits, pthread-style threads, and a package registry are not in this
+  release. They are later layers, not a claim of v1.1.4.
 - The x86-64 register allocator works within straight-line blocks and spills at
   every branch and call. It is much closer to AArch64 than the old
   memory-backed encoder, but it is not a global allocator yet.

@@ -239,6 +239,16 @@ impl Asm {
         self.emit(0xCB00_0000 | ((rm as u32) << 16) | ((rn as u32) << 5) | rd as u32);
     }
 
+    /// `and rd, rn, rm`.
+    pub fn and_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.emit(0x8A00_0000 | ((rm as u32) << 16) | ((rn as u32) << 5) | rd as u32);
+    }
+
+    /// `orr rd, rn, rm`.
+    pub fn orr_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.emit(0xAA00_0000 | ((rm as u32) << 16) | ((rn as u32) << 5) | rd as u32);
+    }
+
     pub fn mul_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
         self.emit(0x9B00_0000 | ((rm as u32) << 16) | (31 << 10) | ((rn as u32) << 5) | rd as u32);
     }

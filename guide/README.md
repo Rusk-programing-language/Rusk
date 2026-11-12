@@ -5,7 +5,7 @@ time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies.
 
-This guide is for v1.1.3. For the exact language rules, see
+This guide is for v1.1.4. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -105,7 +105,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.3 — code, baked ahead of time
+rusk 1.1.4 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -745,6 +745,62 @@ say run command "exit 3"                 # 3
 input, output, and error, and gives back the exit status. A missing shell or a
 failed fork also gives back `127`.
 
+### IPv4 sockets
+
+Sockets are ordinary numbers: a connection, a listener, or `-1` when a call
+fails. A client and a server can live in one program:
+
+```rusk
+let server be listen at 8080
+let client be connect to "127.0.0.1" at 8080
+let peer be accept from server
+
+send "fresh bread\n" to client
+say read line from peer
+
+close peer
+close client
+close server
+```
+
+- `connect to HOST at PORT` opens an IPv4 TCP stream. A dotted numeric host is
+  parsed directly; any other host text, including `localhost`, means
+  `127.0.0.1`. There is no DNS lookup.
+- `listen at PORT` listens on `0.0.0.0` with `SO_REUSEADDR`, so a quick restart
+  can reuse the port. Pick a port above 1023.
+- `accept from LISTENER` blocks until a client arrives.
+- `send TEXT to SOCKET` writes every byte. A failed write is ignored, so check
+  the descriptor when that matters.
+- `read line from SOCKET` drops the newline; `read all from SOCKET` reads until
+  the peer closes. Both block until data or end of stream.
+- `close SOCKET` works on a connection or a listener. Closing twice is
+  harmless.
+
+The surface is TCP only. There is no IPv6, UDP, DNS, TLS, timeout, or
+non-blocking mode yet.
+
+### Raw terminal input
+
+```rusk
+turn on raw terminal
+say "press q to leave"
+let key be read key
+while key is not "q":
+    say "you pressed " + key
+    set key to read key
+turn off raw terminal
+```
+
+`turn on raw terminal` saves the current settings of standard input, clears
+echo and line buffering, and sets a one-byte read. `read key` gives back one
+byte as text, or empty text at end of input. It does not decode arrow keys or
+other escape sequences; those arrive as several separate bytes.
+
+The runtime restores the saved settings on normal exit, on `stop with`, and on
+a runtime error, so an explicit `turn off raw terminal` is convenient but not
+required. When standard input is a pipe or a file, raw mode is skipped and
+`read key` simply reads a byte, which keeps the same program usable in scripts.
+
 ### Standard error and exit status
 
 ```rusk
@@ -833,6 +889,34 @@ export "math.rk"
 say double with 21        # 42
 ```
 
+The checkout also ships libraries written in Rusk. `ruskmods/` holds focused
+modules (`text`, `math`, `date`, `time`, `random`, `statistics`, `json`,
+`toml`, `sys`, `os`, `path`, `shutils`); `rusklib/` adds file, archive, and
+bundle helpers:
+
+```rusk
+import "date/date"
+import "rusklib/files"
+
+say date_format_iso with 2026 and 11 and 12
+say files_exists with "notes.txt"
+```
+
+For everything at once:
+
+```rusk
+import "rusklib/rusklib"
+
+say time_format with 9 and 5 and 3
+say path_join with "/tmp" and "notes.txt"
+say files_size with "notes.txt"
+```
+
+Each module keeps a prefix (`date_`, `path_`, `files_`, ...) because a plain
+import shares one global namespace. See
+[`ruskmods/README.md`](../ruskmods/README.md) and
+[`rusklib/README.md`](../rusklib/README.md) for the full lists.
+
 ## 10. The interactive session
 
 Run `rusk` with no arguments (or `rusk repl`) to start a line-oriented session:
@@ -843,7 +927,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.3 — an English-like language
+Rusk 1.1.4 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -974,6 +1058,8 @@ src/tui.rs            native full-screen terminal UI
 src/main.rs           command-line interface
 tests/e2e.rs          bake and run compiled programs
 tests/cli.rs          CLI and piped-session tests
+ruskmods/             standard modules written in Rusk
+rusklib/              higher-level file helpers and one-import bundle
 selfhost/             a Rusk interpreter written in Rusk
 ```
 
@@ -1030,18 +1116,22 @@ Implemented and checked:
 - Arguments, environment, standard input, files, `warn`, and `stop with`
 - Directory creation, listing, renaming, removal, and existence checks
 - `all arguments` and shell commands with `run command`
+- IPv4 TCP sockets (`connect`, `listen`, `accept`, `send`, `close`) and line
+  or whole-stream reads
+- Raw terminal input with `turn on/off raw terminal` and `read key`
 - A growable `mmap`-backed heap with a free list
 - Line REPL and native full-screen TUI
 - A Rusk-in-Rusk interpreter (`selfhost/interpreter.rk`)
+- Standard modules under `ruskmods/` and higher-level file helpers in
+  `rusklib/`
 
 Not implemented yet:
 
 - Full compiler self-hosting; the interpreter is the bootstrap stage
 - A global x86-64 register allocator that keeps values across branches and
   calls
-- Sockets, threads, signals, terminal primitives in baked programs, and GUI
-  toolkits
-- A package registry
+- Threads, signals, GUI toolkits, and a package registry
+- IPv6, UDP, DNS, TLS, socket timeouts, and non-blocking sockets
 
 Backend limits worth knowing:
 
@@ -1054,6 +1144,9 @@ Backend limits worth knowing:
 - A list can hold at most one kind, and lists cannot be compared.
 - Function values cannot be compared. Dynamic calls check arity and argument
   kinds.
+- IPv4 TCP sockets are blocking and share the descriptor table; `send` ignores
+  write errors and a bad socket reads as empty text. Raw mode affects standard
+  input only and does not decode escape sequences.
 - At most 128 parameters per function.
 - The single load segment is RWX.
 

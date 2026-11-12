@@ -595,6 +595,42 @@ double with 21
     assert!(out.status.success());
 }
 
+#[test]
+fn the_repl_can_use_tcp_sockets() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rusk"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the repl should start");
+
+    let input = "\
+let server be listen at 39481
+let client be connect to \"127.0.0.1\" at 39481
+let peer be accept from server
+send \"bread\\n\" to client
+read line from peer
+close peer
+close client
+close server
+:quit
+";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(stdout, "bread\n");
+    assert!(out.status.success());
+}
+
 // ---- lists and constants ---------------------------------------------
 
 #[test]
@@ -1592,6 +1628,88 @@ fn the_interpreter_written_in_rusk_runs_a_rusk_program() {
     let (stdout, stderr, code) = run_with("selfhost", interpreter, &[path_text], None, &[]);
     let _ = std::fs::remove_file(&path);
     assert_eq!(stdout, "42\n15\n51\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+// ---- v1.1.4 sockets and raw input ------------------------------------
+
+#[test]
+fn tcp_sockets_carry_text_in_both_directions() {
+    let src = "\
+let server be listen at 39471
+if server is less than 0:
+    say \"listen failed\"
+    stop with 1
+let client be connect to \"127.0.0.1\" at 39471
+if client is less than 0:
+    say \"connect failed\"
+    stop with 1
+let peer be accept from server
+send \"hello\\n\" to client
+say \"server got: \" + (read line from peer)
+close peer
+close client
+close server
+
+let second be listen at 39472
+let reader be connect to \"localhost\" at 39472
+let writer be accept from second
+send \"a\\nb\\nc\" to reader
+close reader
+say \"all:[\" + (read all from writer) + \"]\"
+close writer
+close second
+";
+    let (stdout, stderr, code) = run_full("sockets", src);
+    assert_eq!(stdout, "server got: hello\nall:[a\nb\nc]\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_failed_connection_gives_back_minus_one() {
+    let src = "\
+let dead be connect to \"127.0.0.1\" at 39473
+say dead
+";
+    let (stdout, code) = run("socket_dead", src);
+    assert_eq!(stdout, "-1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn read_key_takes_one_byte_and_raw_mode_is_safe_without_a_terminal() {
+    let src = "\
+turn on raw terminal
+say \"ready\"
+let key be read key
+say \"key:[\" + key + \"]\"
+turn off raw terminal
+";
+    let (stdout, stderr, code) = run_with("read_key", src, &[], Some("z"), &[]);
+    assert_eq!(stdout, "ready\nkey:[z]\n");
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn raw_terminal_is_restored_when_the_program_stops_early() {
+    let src = "\
+turn on raw terminal
+say \"before\"
+stop with 7
+";
+    let (stdout, code) = run("raw_stop", src);
+    assert_eq!(stdout, "before\n");
+    assert_eq!(code, 7);
+}
+
+#[test]
+fn a_line_drops_a_carriage_return_before_the_newline() {
+    let src = "say read line\n";
+    let (stdout, stderr, code) = run_with("crlf_line", src, &[], Some("left\r\n"), &[]);
+    assert_eq!(stdout, "left\n");
     assert_eq!(stderr, "");
     assert_eq!(code, 0);
 }

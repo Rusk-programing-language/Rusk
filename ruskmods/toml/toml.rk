@@ -1,0 +1,243 @@
+# toml.rk — small TOML writer and line reader written in Rusk.
+#
+# Import it with `import "toml/toml"`. This is not a full TOML parser: it writes
+# fields and sections, and reads one `key = value` line at a time from the first
+# matching line. That covers ordinary configuration files.
+
+# Reverse some text, one letter at a time.
+to toml_reverse with s as text:
+    let out be ""
+    let i be length of s
+    while i is at least 1:
+        set out to out + (letter i of s)
+        set i to i - 1
+    give back out
+
+# A whole number as decimal text, including a minus sign when negative.
+to toml_number with n as a number:
+    if n is 0:
+        give back "0"
+    let value be n
+    let sign be ""
+    if value is less than 0:
+        set sign to "-"
+        set value to 0 - value
+    let digits be ""
+    while value is more than 0:
+        let digit be value - (value / 10) * 10
+        set digits to digits + (letter (digit + 1) of "0123456789")
+        set value to value / 10
+    give back sign + (toml_reverse with digits)
+
+# True or false as TOML text.
+to toml_bool with flag as a truth value:
+    if flag:
+        give back "true"
+    give back "false"
+
+# Escape the inside of a basic TOML string.
+to toml_escape with s as text:
+    let out be ""
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "\"":
+            set out to out + "\\\""
+        otherwise if ch is "\\":
+            set out to out + "\\\\"
+        otherwise if ch is "\n":
+            set out to out + "\\n"
+        otherwise if ch is "\t":
+            set out to out + "\\t"
+        otherwise if ch is "\r":
+            set out to out + "\\r"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+# A basic TOML string, wrapped in double quotes.
+to toml_string with s as text:
+    give back "\"" + (toml_escape with s) + "\""
+
+# Undo the escapes written by `toml_escape`.
+to toml_unescape with s as text:
+    let out be ""
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "\\" and i is less than n:
+            set i to i + 1
+            let next be letter i of s
+            if next is "n":
+                set out to out + "\n"
+            otherwise if next is "t":
+                set out to out + "\t"
+            otherwise if next is "r":
+                set out to out + "\r"
+            otherwise:
+                set out to out + next
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+# True when a letter may appear unquoted in a TOML key.
+to toml_bare_letter with ch as text:
+    if ch is "_" or ch is "-":
+        give back true
+    if ch is at least "0" and ch is at most "9":
+        give back true
+    if ch is at least "a" and ch is at most "z":
+        give back true
+    give back ch is at least "A" and ch is at most "Z"
+
+# A key, left bare when it is simple and quoted otherwise.
+to toml_key with key as text:
+    if length of key is 0:
+        give back "\"\""
+    let simple be true
+    let at be 1
+    let n be length of key
+    while at is at most n:
+        if not toml_bare_letter with (letter at of key):
+            set simple to false
+        set at to at + 1
+    if simple:
+        give back key
+    give back toml_string with key
+
+# One `key = value` line. The value must already be TOML text.
+to toml_field with key as text and value as text:
+    give back (toml_key with key) + " = " + value
+
+# A section header such as `[server]`.
+to toml_section with name as text:
+    give back "[" + name + "]"
+
+# A value list such as `[1, 2, 3]`; items must already be TOML text.
+to toml_array with items as a view of a list of text:
+    let out be "["
+    let first be true
+    for each item in items:
+        if not first:
+            set out to out + ", "
+        set out to out + item
+        set first to false
+    give back out + "]"
+
+# The 1-based position of a letter in text, or 0 when absent.
+to toml_find with haystack as text and needle as text:
+    let n be length of needle
+    if n is 0:
+        give back 1
+    let last be (length of haystack) - n + 1
+    if last is less than 1:
+        give back 0
+    let i be 1
+    while i is at most last:
+        if part i to (i + n - 1) of haystack is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+# Skip spaces and tabs from `i`, stopping at a newline.
+to toml_skip_space with text as text and i as a number:
+    let at be i
+    let n be length of text
+    while at is at most n:
+        let ch be letter at of text
+        if ch is " " or ch is "\t":
+            set at to at + 1
+        otherwise:
+            give back at
+    give back at
+
+# The position just past the end of the line containing `i`.
+to toml_line_end with text as text and i as a number:
+    let at be i
+    let n be length of text
+    while at is at most n and letter at of text is not "\n":
+        set at to at + 1
+    give back at
+
+# The text of the line containing `i`, without its newline.
+to toml_line_text with text as text and i as a number:
+    let start be i
+    let stop be toml_line_end with (copy of text) and i
+    if stop is start:
+        give back ""
+    give back part start to (stop - 1) of text
+
+# The raw value for the first line that assigns `key`, or empty text.
+# Leading and trailing spaces are removed. Strings keep their quotes here.
+to toml_extract with text as text and key as text:
+    let needle be toml_key with key
+    let size be length of needle
+    let n be length of text
+    let at be 1
+    while at is at most n:
+        set at to toml_skip_space with (copy of text) and at
+        let after be at + size
+        if after - 1 is at most n and (part at to (after - 1) of text) is needle:
+            let next be toml_skip_space with (copy of text) and after
+            if next is at most n and letter next of text is "=":
+                let start be toml_skip_space with (copy of text) and (next + 1)
+                let stop be toml_line_end with (copy of text) and start
+                let end be stop
+                while end is more than start and (letter (end - 1) of text is " " or letter (end - 1) of text is "\t" or letter (end - 1) of text is "\r"):
+                    set end to end - 1
+                if end is start:
+                    give back ""
+                give back part start to (end - 1) of text
+        set at to (toml_line_end with (copy of text) and at) + 1
+    give back ""
+
+# The value for `key` with surrounding quotes removed. A single-quoted value is
+# taken literally; a double-quoted value is unescaped.
+to toml_extract_string with text as text and key as text:
+    let value be toml_extract with text and key
+    let n be length of value
+    if n is at least 2:
+        let first be letter 1 of value
+        let last be letter n of value
+        if first is "\"" and last is "\"":
+            if n is 2:
+                give back ""
+            give back toml_unescape with (part 2 to (n - 1) of value)
+        if first is "'" and last is "'":
+            if n is 2:
+                give back ""
+            give back part 2 to (n - 1) of value
+    give back value
+
+# True when the file has a `[section]` line with this exact name.
+to toml_has_section with text as text and name as text:
+    let needle be "[" + name + "]"
+    let n be length of text
+    let at be 1
+    while at is at most n:
+        let start be toml_skip_space with (copy of text) and at
+        let line be toml_line_text with (copy of text) and start
+        if line is needle:
+            give back true
+        set at to (toml_line_end with (copy of text) and at) + 1
+    give back false
+
+# True when a `key = ...` line exists.
+to toml_has with text as text and key as text:
+    let needle be toml_key with key
+    let size be length of needle
+    let n be length of text
+    let at be 1
+    while at is at most n:
+        set at to toml_skip_space with (copy of text) and at
+        let after be at + size
+        if after - 1 is at most n and (part at to (after - 1) of text) is needle:
+            let next be toml_skip_space with (copy of text) and after
+            if next is at most n and letter next of text is "=":
+                give back true
+        set at to (toml_line_end with (copy of text) and at) + 1
+    give back false

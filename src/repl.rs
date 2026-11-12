@@ -11,12 +11,13 @@
 //! bytes, not Unicode scalars, or the REPL would disagree with a baked program.
 
 use crate::ast::*;
-use crate::tui::{Ansi, Color, Key, Terminal, BANNER};
+use crate::tui::{Ansi, Color, Key, RawMode, Terminal, BANNER};
 use crate::types::{self, Sig};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -132,6 +133,13 @@ struct Func {
     body: Vec<Stmt>,
 }
 
+/// A live network object at the prompt. The number the language sees is the
+/// key in `Session::connections`, mirroring a file descriptor in a baked run.
+enum Connection {
+    Stream(TcpStream),
+    Listener(TcpListener),
+}
+
 struct Session {
     stmts: Vec<Stmt>,
     globals: HashMap<String, Value>,
@@ -147,6 +155,12 @@ struct Session {
     stop: Option<i32>,
     line: usize,
     depth: usize,
+    /// Sockets and listeners opened by the session, numbered like descriptors.
+    connections: HashMap<i64, Connection>,
+    next_connection: i64,
+    /// Raw input stays in place until `turn off raw terminal` or the session
+    /// ends; dropping it restores the original terminal settings.
+    raw_mode: Option<RawMode>,
 }
 
 impl Session {
@@ -162,6 +176,9 @@ impl Session {
             stop: None,
             line: 0,
             depth: 0,
+            connections: HashMap::new(),
+            next_connection: 3,
+            raw_mode: None,
         }
     }
 
@@ -172,6 +189,16 @@ impl Session {
         self.funcs.clear();
         self.sigs.clear();
         self.stop = None;
+        self.connections.clear();
+        self.raw_mode = None;
+    }
+
+    /// Give a new network object the next descriptor-like number.
+    fn add_connection(&mut self, connection: Connection) -> i64 {
+        let number = self.next_connection;
+        self.next_connection += 1;
+        self.connections.insert(number, connection);
+        number
     }
 
     /// Collect everything the session prints instead of writing it to stdout.
@@ -527,6 +554,31 @@ impl Session {
                 let to = self.eval_text(to, env, "rename")?;
                 std::fs::rename(path_from_bytes(&from), path_from_bytes(&to))
                     .map_err(|_| format!("line {}: I can't rename that path", self.line))?;
+                Ok(Flow::Normal)
+            }
+            Stmt::Send { text, socket, .. } => {
+                let text = self.eval_text(text, env, "send")?;
+                let socket = self.eval_int(socket, env)?;
+                if let Some(Connection::Stream(stream)) = self.connections.get(&socket) {
+                    let mut writer = stream;
+                    let _ = writer.write_all(&text);
+                }
+                Ok(Flow::Normal)
+            }
+            Stmt::Close { socket, .. } => {
+                let socket = self.eval_int(socket, env)?;
+                self.connections.remove(&socket);
+                Ok(Flow::Normal)
+            }
+            Stmt::RawTerminal { on, .. } => {
+                if *on {
+                    if self.raw_mode.is_none() {
+                        self.raw_mode = crate::tui::enter_raw_input().ok().flatten();
+                    }
+                } else {
+                    // Dropping the guard puts the saved settings back.
+                    self.raw_mode = None;
+                }
                 Ok(Flow::Normal)
             }
             Stmt::If {
@@ -987,6 +1039,72 @@ impl Session {
                     .map_err(|_| format!("line {}: I can't run that command", self.line))?;
                 Ok(Value::Int(status.code().unwrap_or(1) as i64))
             }
+            Expr::Connect { host, port } => {
+                let host = self.eval_text(host, env, "connect")?;
+                let port = self.eval_int(port, env)?;
+                if !(0..=65535).contains(&port) {
+                    return Ok(Value::Int(-1));
+                }
+                let host = String::from_utf8_lossy(&host).into_owned();
+                // Match a baked program: only a numeric dotted address is a
+                // real host; every other name means localhost.
+                let host = match host.parse::<std::net::Ipv4Addr>() {
+                    Ok(address) => address.to_string(),
+                    Err(_) => "127.0.0.1".to_string(),
+                };
+                match TcpStream::connect((host.as_str(), port as u16)) {
+                    Ok(stream) => Ok(Value::Int(self.add_connection(Connection::Stream(stream)))),
+                    Err(_) => Ok(Value::Int(-1)),
+                }
+            }
+            Expr::Listen(port) => {
+                let port = self.eval_int(port, env)?;
+                if !(0..=65535).contains(&port) {
+                    return Ok(Value::Int(-1));
+                }
+                match TcpListener::bind(("0.0.0.0", port as u16)) {
+                    Ok(listener) => Ok(Value::Int(self.add_connection(Connection::Listener(listener)))),
+                    Err(_) => Ok(Value::Int(-1)),
+                }
+            }
+            Expr::Accept(listener) => {
+                let listener = self.eval_int(listener, env)?;
+                let accepted = match self.connections.get(&listener) {
+                    Some(Connection::Listener(listener)) => listener.accept().ok(),
+                    _ => None,
+                };
+                match accepted {
+                    Some((stream, _)) => {
+                        Ok(Value::Int(self.add_connection(Connection::Stream(stream))))
+                    }
+                    None => Ok(Value::Int(-1)),
+                }
+            }
+            Expr::ReadFrom { socket, line } => {
+                let socket = self.eval_int(socket, env)?;
+                let mut out = Vec::new();
+                if let Some(Connection::Stream(stream)) = self.connections.get(&socket) {
+                    let mut reader = stream;
+                    if *line {
+                        let mut byte = [0u8; 1];
+                        loop {
+                            match reader.read(&mut byte) {
+                                Ok(0) => break,
+                                Ok(_) if byte[0] == b'\n' => break,
+                                Ok(_) => out.push(byte[0]),
+                                Err(_) => break,
+                            }
+                        }
+                    } else {
+                        let _ = reader.read_to_end(&mut out);
+                    }
+                    if *line && out.last() == Some(&b'\r') {
+                        out.pop();
+                    }
+                }
+                Ok(Value::Str(out))
+            }
+            Expr::ReadKey => Ok(Value::Str(read_stdin_byte()?)),
             Expr::Unary(op, inner) => {
                 let value = self.eval(inner, env)?;
                 match (op, value) {
@@ -1444,6 +1562,15 @@ fn read_stdin_all() -> Result<Vec<u8>, String> {
         .read_to_end(&mut out)
         .map_err(|e| format!("can't read standard input: {e}"))?;
     Ok(out)
+}
+
+fn read_stdin_byte() -> Result<Vec<u8>, String> {
+    let mut byte = [0u8; 1];
+    match io::stdin().read(&mut byte) {
+        Ok(0) => Ok(Vec::new()),
+        Ok(_) => Ok(vec![byte[0]]),
+        Err(e) => Err(format!("can't read standard input: {e}")),
+    }
 }
 
 fn write_value_to<W: Write>(out: &mut W, value: &Value) -> io::Result<()> {

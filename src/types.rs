@@ -446,6 +446,14 @@ fn infer_stmts(
                 infer_text_path(from, "rename", scope, sigs, *line)?;
                 infer_text_path(to, "rename", scope, sigs, *line)?;
             }
+            Stmt::Send { text, socket, line } => {
+                infer_text_path(text, "send", scope, sigs, *line)?;
+                infer_number(socket, "send", "a connection number", scope, sigs, *line)?;
+            }
+            Stmt::Close { socket, line } => {
+                infer_number(socket, "close", "a connection number", scope, sigs, *line)?;
+            }
+            Stmt::RawTerminal { .. } => {}
             Stmt::If {
                 cond,
                 then,
@@ -631,6 +639,26 @@ fn infer_text_path(
             return Err(at(
                 line,
                 format!("'{what}' needs a path as text, but this is {t}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn infer_number(
+    e: &Expr,
+    what: &str,
+    expected: &str,
+    scope: &Scope,
+    sigs: &Sigs,
+    line: usize,
+) -> Result<(), String> {
+    let t = type_of(e, scope, sigs).map_err(|m| at(line, m))?;
+    if let Some(t) = t {
+        if t != Ty::Int {
+            return Err(at(
+                line,
+                format!("'{what}' needs {expected}, but this is {t}"),
             ));
         }
     }
@@ -928,6 +956,57 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             }
             Ok(Some(Ty::Int))
         }
+        Expr::Connect { host, port } => {
+            let t = type_of(host, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Str {
+                    return Err(format!("'connect' needs a host as text, but this is {t}"));
+                }
+            }
+            let t = type_of(port, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Int {
+                    return Err(format!(
+                        "'connect' needs a port as a number, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Int))
+        }
+        Expr::Listen(port) => {
+            let t = type_of(port, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Int {
+                    return Err(format!(
+                        "'listen' needs a port as a number, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Int))
+        }
+        Expr::Accept(listener) => {
+            let t = type_of(listener, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Int {
+                    return Err(format!(
+                        "'accept' needs a listener as a number, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Int))
+        }
+        Expr::ReadFrom { socket, .. } => {
+            let t = type_of(socket, scope, sigs)?;
+            if let Some(t) = t {
+                if t != Ty::Int {
+                    return Err(format!(
+                        "'read ... from' needs a connection as a number, but this is {t}"
+                    ));
+                }
+            }
+            Ok(Some(Ty::Str))
+        }
+        Expr::ReadKey => Ok(Some(Ty::Str)),
         Expr::Item(index, array) => {
             let it = type_of(index, scope, sigs)?;
             if let Some(t) = it {

@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.1.3
+# The Rusk Language — Specification v1.1.4
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
 emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.1.3, Linux on AArch64 and x86-64**. The compiler also builds and
+Status: **v1.1.4, Linux on AArch64 and x86-64**. The compiler also builds and
 runs on Windows x86-64, but every program it emits targets Linux. Everything
 here is implemented and tested; anything not here does not exist yet.
 
@@ -185,6 +185,20 @@ remove directory "bakery"      # empty directories only
 
 say run command "echo hi"      # run /bin/sh -c, print, then give back 0
 
+let server be listen at 8080   # a listener number, or -1
+let client be connect to "127.0.0.1" at 8080
+let peer be accept from server # a connection number, or -1
+send "hello\n" to client       # write every byte
+say read line from peer        # one line, without its newline
+say read all from peer         # everything to end of stream
+close peer                     # close a connection or listener
+close client
+close server
+
+turn on raw terminal           # clear ECHO and ICANON on standard input
+let key be read key            # one byte as text, or empty at end of input
+turn off raw terminal          # restore the saved settings
+
 warn "the oven is hot"         # like `say`, but on standard error
 stop with 2                    # end now with exit status 2
 ```
@@ -234,6 +248,38 @@ Rules:
 - `run command TEXT` starts `/bin/sh -c TEXT` as a child process. Standard
   input, output, and error are shared, and the expression gives back the exit
   status as a number. A failed fork or missing shell gives back `127`.
+- `connect to HOST at PORT` opens an IPv4 TCP stream. A dotted numeric host is
+  parsed as four octets; any other host text, including `localhost` and the
+  empty string, means `127.0.0.1`. There is no DNS lookup. The expression gives
+  back the connection number, or `-1` when the call fails.
+- `listen at PORT` creates an IPv4 TCP listener on `0.0.0.0` and sets
+  `SO_REUSEADDR`. It gives back the listener number, or `-1` when the socket,
+  bind, or listen call fails. Port 0 asks the kernel for an ephemeral port, but
+  the language has no way to read the chosen port back.
+- `accept from LISTENER` waits for one connection and gives back its number, or
+  `-1` when the call fails. A listener from `listen` and a connection from
+  `connect` or `accept` are ordinary file descriptors; the kernel chooses the
+  lowest free number, usually 3 or above.
+- `send TEXT to SOCKET` writes every byte of the text. A failed write or a bad
+  descriptor is ignored rather than reported, so check the descriptor before
+  sending when that matters.
+- `read line from SOCKET` reads bytes up to a newline or end of stream and drops
+  the newline (and a carriage return before it). `read all from SOCKET` reads
+  the rest of the stream, including newlines. Both give back fresh text; a bad
+  descriptor gives empty text. Reading waits until data arrives or the peer
+  closes.
+- `close SOCKET` closes a connection or a listener. Closing an already closed
+  descriptor is harmless.
+- `turn on raw terminal` asks the kernel for the current settings of standard
+  input, clears `ECHO` and `ICANON`, and sets `VMIN` to 1 and `VTIME` to 0. It
+  remembers the old settings. A pipe or other non-terminal input is left alone,
+  so the statement always succeeds. Turning raw mode on twice is harmless.
+- `turn off raw terminal` restores the saved settings when raw mode was actually
+  entered. The runtime also restores them on normal exit, on `stop with`, and on
+  a runtime error.
+- `read key` reads one byte from standard input and gives back it as text, or
+  empty text at end of input. It does not decode escape sequences; an arrow key
+  arrives as several separate bytes.
 - Every path rule above uses the same 4 KiB scratch area as files, so a path
   longer than 4095 bytes stops with `burnt: that file path is too long`.
 
@@ -826,7 +872,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.3 — an English-like language
+Rusk 1.1.4 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1062,12 +1108,16 @@ value; the ownership pass is what prevents it from being moved or changed.
   `add VALUE to LIST`, which uses spare capacity or copies the whole list to
   fresh heap space and frees the old block, and shrink with
   `remove last from LIST` or `remove item N from LIST`. Capacity never shrinks.
-- System I/O covers text files, the three standard streams, directories, and
-  shell commands. There are no sockets, threads, signals, baked-program terminal
-  primitives, or random-access file positions, and a path is limited to 4095
-  bytes.
-- The native TUI uses Linux `termios` and ANSI escapes. It is for the `rusk`
-  tool only; baked programs have no terminal primitives yet. On Windows the
+- System I/O covers text files, the three standard streams, directories, shell
+  commands, IPv4 TCP sockets, and raw terminal input. Networking is TCP only:
+  there is no IPv6, UDP, DNS, TLS, non-blocking mode, timeout, or half-close.
+  Sockets share the process descriptor table and are blocking, `send` ignores a
+  failed write, and `read ... from` gives empty text on a bad descriptor. A path
+  is limited to 4095 bytes. There are still no threads, signals, or
+  random-access file positions.
+- The native TUI uses Linux `termios` and ANSI escapes. Baked programs can enter
+  raw mode on standard input and read bytes, but the language has no
+  window-size query, key decoder, color API, or cursor movement. On Windows the
   full-screen session falls back to the line-oriented REPL.
 - Only Linux is supported as an output platform. The two backends are AArch64
   and x86-64; there is no macOS, Windows, or 32-bit output. The compiler host
@@ -1083,15 +1133,15 @@ value; the ownership pass is what prevents it from being moved or changed.
 v1.1 implements everything the v1.0 roadmap listed: function-typed parameters,
 function values in lists, functions that give back functions, a
 register-allocating x86-64 encoder, a relocation-aware data layout, and a
-self-hosting interpreter. v1.1.3 adds the systems core: directory and process
+self-hosting interpreter. v1.1.3 added the systems core: directory and process
 operations, the whole command line as a list, a growable heap, and 128
-parameters. What remains:
+parameters. v1.1.4 adds IPv4 TCP sockets and raw terminal input. What remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression
   interpreter written in Rusk and compiled by Rusk.
 - a global x86-64 register allocator that keeps values in registers across
   branches and calls.
-- broader systems primitives: IPv4 TCP sockets and baked-program terminal
-  raw-mode input are next, followed by threads and a package registry.
+- broader systems primitives: threads, signals, and a package registry. IPv6,
+  UDP, DNS, and TLS are also outside the current socket surface.
 - reusing memory for joined text instead of only list and input buffers.

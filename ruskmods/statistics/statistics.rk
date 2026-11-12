@@ -1,0 +1,148 @@
+# statistics.rk — summary numbers written in Rusk.
+#
+# Import it with `import "statistics/statistics"`. Every function takes a view
+# of a list of numbers, so the caller keeps ownership and the list is not moved.
+# All arithmetic is whole-number arithmetic; averages truncate toward zero.
+
+# The total of the list. An empty list gives 0.
+to statistics_sum with xs as a view of a list of numbers:
+    let total be 0
+    for each x in xs:
+        set total to total + x
+    give back total
+
+# The arithmetic mean, truncated toward zero. An empty list gives 0.
+to statistics_average with xs as a view of a list of numbers:
+    let count be length of xs
+    if count is 0:
+        give back 0
+    give back (statistics_sum with xs) / count
+
+# A shorter name for the same idea.
+to statistics_mean with xs as a view of a list of numbers:
+    give back statistics_average with xs
+
+# The smallest number. An empty list gives 0.
+to statistics_min with xs as a view of a list of numbers:
+    let count be length of xs
+    if count is 0:
+        give back 0
+    let best be item 1 of xs
+    for each x in xs:
+        if x is less than best:
+            set best to x
+    give back best
+
+# The largest number. An empty list gives 0.
+to statistics_max with xs as a view of a list of numbers:
+    let count be length of xs
+    if count is 0:
+        give back 0
+    let best be item 1 of xs
+    for each x in xs:
+        if x is more than best:
+            set best to x
+    give back best
+
+# Largest minus smallest. An empty list gives 0.
+to statistics_range with xs as a view of a list of numbers:
+    let count be length of xs
+    if count is 0:
+        give back 0
+    give back (statistics_max with xs) - (statistics_min with xs)
+
+# A new list with the same numbers in ascending order (insertion sort).
+to statistics_sorted with xs as a view of a list of numbers:
+    let out be an empty list of numbers
+    for each x in xs:
+        let at be 1
+        while at is at most length of out and (item at of out) is less than x:
+            set at to at + 1
+        add 0 to out
+        let i be length of out
+        while i is more than at:
+            set item i of out to item (i - 1) of out
+            set i to i - 1
+        set item at of out to x
+    give back out
+
+# The middle number of an ordered list. For an even count it takes the lower of
+# the two middle numbers, keeping the result whole. An empty list gives 0.
+to statistics_median with xs as a view of a list of numbers:
+    let ordered be statistics_sorted with xs
+    let count be length of ordered
+    if count is 0:
+        give back 0
+    if count / 2 * 2 is count:
+        give back item (count / 2) of ordered
+    give back item ((count + 1) / 2) of ordered
+
+# The most frequent number. Ties go to the smaller number. An empty list gives 0.
+to statistics_mode with xs as a view of a list of numbers:
+    let ordered be statistics_sorted with xs
+    let count be length of ordered
+    if count is 0:
+        give back 0
+    let best be item 1 of ordered
+    let best_count be 0
+    let i be 1
+    while i is at most count:
+        let value be item i of ordered
+        let run be 0
+        while i is at most count and item i of ordered is value:
+            set run to run + 1
+            set i to i + 1
+        if run is more than best_count:
+            set best_count to run
+            set best to value
+    give back best
+
+# The sum of the squared differences from the mean, truncated at each step.
+to statistics_squared_error with xs as a view of a list of numbers:
+    let count be length of xs
+    if count is 0:
+        give back 0
+    let mean be statistics_average with xs
+    let total be 0
+    for each x in xs:
+        let gap be x - mean
+        set total to total + gap * gap
+    give back total
+
+# Population variance: squared error divided by the count. Empty gives 0.
+to statistics_variance with xs as a view of a list of numbers:
+    let count be length of xs
+    if count is 0:
+        give back 0
+    give back (statistics_squared_error with xs) / count
+
+# The integer square root of a positive number, used by the deviation helper.
+to statistics_sqrt with n as a number:
+    if n is at most 0:
+        give back 0
+    let guess be n
+    let next be (guess + n / guess) / 2
+    while next is less than guess:
+        set guess to next
+        set next to (guess + n / guess) / 2
+    give back guess
+
+# Population standard deviation, rounded down to a whole number. Empty gives 0.
+to statistics_deviation with xs as a view of a list of numbers:
+    give back statistics_sqrt with (statistics_variance with xs)
+
+# How many numbers are strictly above `limit`.
+to statistics_count_above with xs as a view of a list of numbers and limit as a number:
+    let total be 0
+    for each x in xs:
+        if x is more than limit:
+            set total to total + 1
+    give back total
+
+# How many numbers are strictly below `limit`.
+to statistics_count_below with xs as a view of a list of numbers and limit as a number:
+    let total be 0
+    for each x in xs:
+        if x is less than limit:
+            set total to total + 1
+    give back total

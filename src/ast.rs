@@ -313,6 +313,22 @@ pub enum Expr {
     AllArguments,
     /// `run command TEXT` — run a shell command, giving back its exit status.
     RunCommand(Box<Expr>),
+    /// `connect to HOST at PORT` — an IPv4 TCP connection number, or -1.
+    Connect {
+        host: Box<Expr>,
+        port: Box<Expr>,
+    },
+    /// `listen at PORT` — a listening socket number, or -1.
+    Listen(Box<Expr>),
+    /// `accept from LISTENER` — a connection number, or -1.
+    Accept(Box<Expr>),
+    /// `read line from SOCKET` or `read all from SOCKET`.
+    ReadFrom {
+        socket: Box<Expr>,
+        line: bool,
+    },
+    /// `read key` — one byte from standard input as text.
+    ReadKey,
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
 }
@@ -407,6 +423,22 @@ pub enum Stmt {
     RenamePath {
         from: Expr,
         to: Expr,
+        line: usize,
+    },
+    /// `send TEXT to SOCKET` — write all of the text to a connection.
+    Send {
+        text: Expr,
+        socket: Expr,
+        line: usize,
+    },
+    /// `close SOCKET` — close a connection or listener.
+    Close {
+        socket: Expr,
+        line: usize,
+    },
+    /// `turn on raw terminal` / `turn off raw terminal`.
+    RawTerminal {
+        on: bool,
         line: usize,
     },
     If {
@@ -529,8 +561,14 @@ fn collect_free_expr(
         | Expr::ListDirectory(inner)
         | Expr::FileExists(inner)
         | Expr::RunCommand(inner)
+        | Expr::Listen(inner)
+        | Expr::Accept(inner)
+        | Expr::ReadFrom { socket: inner, .. }
         | Expr::Unary(_, inner) => collect_free_expr(inner, bound, free, seen),
-        Expr::Letter(a, b) | Expr::Item(a, b) | Expr::Binary(_, a, b) => {
+        Expr::Letter(a, b)
+        | Expr::Item(a, b)
+        | Expr::Binary(_, a, b)
+        | Expr::Connect { host: a, port: b } => {
             collect_free_expr(a, bound, free, seen);
             collect_free_expr(b, bound, free, seen);
         }
@@ -539,7 +577,11 @@ fn collect_free_expr(
             collect_free_expr(from, bound, free, seen);
             collect_free_expr(to, bound, free, seen);
         }
-        Expr::EmptyArray(_) | Expr::ReadLine | Expr::ReadAll | Expr::AllArguments => {}
+        Expr::EmptyArray(_)
+        | Expr::ReadLine
+        | Expr::ReadAll
+        | Expr::AllArguments
+        | Expr::ReadKey => {}
     }
 }
 
@@ -621,6 +663,14 @@ fn collect_free_stmts(
                 collect_free_expr(from, bound, free, seen);
                 collect_free_expr(to, bound, free, seen);
             }
+            Stmt::Send { text, socket, .. } => {
+                collect_free_expr(text, bound, free, seen);
+                collect_free_expr(socket, bound, free, seen);
+            }
+            Stmt::Close { socket, .. } => {
+                collect_free_expr(socket, bound, free, seen);
+            }
+            Stmt::RawTerminal { .. } => {}
             Stmt::If {
                 cond, then, other, ..
             } => {
@@ -680,6 +730,9 @@ impl Stmt {
             | Stmt::RemoveFile { line, .. }
             | Stmt::RemoveDirectory { line, .. }
             | Stmt::RenamePath { line, .. }
+            | Stmt::Send { line, .. }
+            | Stmt::Close { line, .. }
+            | Stmt::RawTerminal { line, .. }
             | Stmt::If { line, .. }
             | Stmt::Repeat { line, .. }
             | Stmt::While { line, .. }

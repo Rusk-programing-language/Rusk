@@ -60,6 +60,15 @@ const AARCH64_CLONE: u64 = 220;
 const AARCH64_EXECVE: u64 = 221;
 const AARCH64_MMAP: u64 = 222;
 const AARCH64_WAIT4: u64 = 260;
+const AARCH64_SOCKET: u64 = 198;
+const AARCH64_CONNECT: u64 = 203;
+const AARCH64_ACCEPT: u64 = 202;
+const AARCH64_SENDTO: u64 = 206;
+const AARCH64_BIND: u64 = 200;
+const AARCH64_LISTEN: u64 = 201;
+const AARCH64_SETSOCKOPT: u64 = 208;
+const AARCH64_IOCTL: u64 = 29;
+const AARCH64_SHUTDOWN: u64 = 210;
 const X86_WRITE: u64 = 1;
 const X86_EXIT: u64 = 60;
 const X86_OPENAT: u64 = 257;
@@ -74,6 +83,15 @@ const X86_CLONE: u64 = 56;
 const X86_EXECVE: u64 = 59;
 const X86_MMAP: u64 = 9;
 const X86_WAIT4: u64 = 61;
+const X86_SOCKET: u64 = 41;
+const X86_CONNECT: u64 = 42;
+const X86_ACCEPT: u64 = 43;
+const X86_SENDTO: u64 = 44;
+const X86_BIND: u64 = 49;
+const X86_LISTEN: u64 = 50;
+const X86_SETSOCKOPT: u64 = 54;
+const X86_IOCTL: u64 = 16;
+const X86_SHUTDOWN: u64 = 48;
 
 enum Fixup {
     Label {
@@ -470,6 +488,15 @@ impl Asm {
                 AARCH64_EXECVE => X86_EXECVE,
                 AARCH64_MMAP => X86_MMAP,
                 AARCH64_WAIT4 => X86_WAIT4,
+                AARCH64_SOCKET => X86_SOCKET,
+                AARCH64_CONNECT => X86_CONNECT,
+                AARCH64_ACCEPT => X86_ACCEPT,
+                AARCH64_SENDTO => X86_SENDTO,
+                AARCH64_BIND => X86_BIND,
+                AARCH64_LISTEN => X86_LISTEN,
+                AARCH64_SETSOCKOPT => X86_SETSOCKOPT,
+                AARCH64_IOCTL => X86_IOCTL,
+                AARCH64_SHUTDOWN => X86_SHUTDOWN,
                 other => other,
             }
         } else {
@@ -620,6 +647,24 @@ impl Asm {
         self.u8(0x48);
         self.u8(0x29);
         self.u8(0xC8); // sub rax, rcx
+        self.store_vreg(rd, RAX);
+    }
+
+    pub fn and_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.load_vreg(RAX, rn);
+        self.load_vreg(RCX, rm);
+        self.u8(0x48);
+        self.u8(0x21);
+        self.u8(0xC8); // and rax, rcx
+        self.store_vreg(rd, RAX);
+    }
+
+    pub fn orr_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
+        self.load_vreg(RAX, rn);
+        self.load_vreg(RCX, rm);
+        self.u8(0x48);
+        self.u8(0x09);
+        self.u8(0xC8); // or rax, rcx
         self.store_vreg(rd, RAX);
     }
 

@@ -1,0 +1,137 @@
+# math.rk — arithmetic helpers written in Rusk.
+#
+# Import it with `import "math/math"`. Rusk keeps one global namespace, so every
+# public name starts with `math_`. The older `ruskmods/math.rk` keeps the basic
+# helpers (`math_square`, `math_min`, ...); this module adds number theory,
+# rounding, and range helpers without repeating those names.
+
+# The greatest common divisor of two numbers, always positive.
+to math_gcd with a as a number and b as a number:
+    let x be a
+    let y be b
+    if x is less than 0:
+        set x to 0 - x
+    if y is less than 0:
+        set y to 0 - y
+    while y is not 0:
+        let rest be x - (x / y) * y
+        set x to y
+        set y to rest
+    give back x
+
+# The least common multiple of two numbers. Zero when either is zero.
+to math_lcm with a as a number and b as a number:
+    if a is 0 or b is 0:
+        give back 0
+    let product be a * b
+    if product is less than 0:
+        set product to 0 - product
+    give back product / math_gcd with a and b
+
+# Keep a number inside a range. A reversed range still picks the nearer bound.
+to math_clamp with n as a number and low as a number and high as a number:
+    let floor be low
+    let ceiling be high
+    if floor is more than ceiling:
+        set floor to high
+        set ceiling to low
+    if n is less than floor:
+        give back floor
+    if n is more than ceiling:
+        give back ceiling
+    give back n
+
+# -1, 0, or 1, matching the number's sign.
+to math_sign with n as a number:
+    if n is less than 0:
+        give back 0 - 1
+    if n is more than 0:
+        give back 1
+    give back 0
+
+# 1 * 2 * ... * n. Zero or less gives 1, the empty product.
+to math_factorial with n as a number:
+    let result be 1
+    let i be 2
+    while i is at most n:
+        set result to result * i
+        set i to i + 1
+    give back result
+
+# True when n is greater than one and has no divisors besides 1 and itself.
+to math_is_prime with n as a number:
+    if n is less than 2:
+        give back false
+    if n is 2 or n is 3:
+        give back true
+    if n / 2 * 2 is n:
+        give back false
+    let i be 3
+    while i * i is at most n:
+        if n / i * i is n:
+            give back false
+        set i to i + 2
+    give back true
+
+# The first prime at or above n. Numbers below two start at two.
+to math_next_prime with n as a number:
+    let candidate be n
+    if candidate is less than 2:
+        set candidate to 2
+    while not math_is_prime with candidate:
+        set candidate to candidate + 1
+    give back candidate
+
+# The sum of the decimal digits. The sign is ignored.
+to math_digit_sum with n as a number:
+    let value be n
+    if value is less than 0:
+        set value to 0 - value
+    let total be 0
+    while value is more than 0:
+        set total to total + value - (value / 10) * 10
+        set value to value / 10
+    give back total
+
+# The distance between two numbers, never negative.
+to math_distance with a as a number and b as a number:
+    let gap be a - b
+    if gap is less than 0:
+        set gap to 0 - gap
+    give back gap
+
+# n rounded down to a multiple of step. A step of zero gives n back.
+to math_round_down with n as a number and step as a number:
+    if step is 0:
+        give back n
+    let size be step
+    if size is less than 0:
+        set size to 0 - size
+    let below be n - (n / size) * size
+    if n is less than 0 and below is not 0:
+        give back n - size - below
+    give back n - below
+
+# n rounded up to a multiple of step. A step of zero gives n back.
+to math_round_up with n as a number and step as a number:
+    if step is 0:
+        give back n
+    let size be step
+    if size is less than 0:
+        set size to 0 - size
+    let below be n - (n / size) * size
+    if below is 0:
+        give back n
+    give back n + size - below
+
+# The integer square root: the largest whole number whose square is at most n.
+# Negative numbers give 0.
+to math_sqrt with n as a number:
+    if n is at most 0:
+        give back 0
+    let guess be n
+    let next be (guess + n / guess) / 2
+    while next is less than guess:
+        set guess to next
+        set next to (guess + n / guess) / 2
+    give back guess

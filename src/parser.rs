@@ -416,6 +416,41 @@ impl Parser {
             return Ok(Stmt::RenamePath { from, to, line });
         }
 
+        if self.is_word("send") {
+            self.bump();
+            let text = self.expr(true)?;
+            self.need_word("to", "after the text in 'send',")?;
+            let socket = self.primary()?;
+            self.end_of_line()?;
+            return Ok(Stmt::Send { text, socket, line });
+        }
+
+        if self.is_word("close") {
+            self.bump();
+            let socket = self.primary()?;
+            self.end_of_line()?;
+            return Ok(Stmt::Close { socket, line });
+        }
+
+        if self.is_word("turn") {
+            self.bump();
+            let on = if self.eat_word("on") {
+                true
+            } else if self.eat_word("off") {
+                false
+            } else {
+                return Err(format!(
+                    "line {}: after 'turn' I expected 'on' or 'off', but found {}",
+                    self.line(),
+                    self.peek().describe()
+                ));
+            };
+            self.need_word("raw", "after 'turn on' or 'turn off',")?;
+            self.need_word("terminal", "after 'raw',")?;
+            self.end_of_line()?;
+            return Ok(Stmt::RawTerminal { on, line });
+        }
+
         if self.is_word("break") {
             self.bump();
             self.end_of_line()?;
@@ -1095,21 +1130,61 @@ impl Parser {
                 if word == "read" {
                     self.bump(); // "read"
                     if self.eat_word("line") {
+                        if self.eat_word("from") {
+                            let socket = self.expr(false)?;
+                            return Ok(Expr::ReadFrom {
+                                socket: Box::new(socket),
+                                line: true,
+                            });
+                        }
                         return Ok(Expr::ReadLine);
                     }
                     if self.eat_word("all") {
+                        if self.eat_word("from") {
+                            let socket = self.expr(false)?;
+                            return Ok(Expr::ReadFrom {
+                                socket: Box::new(socket),
+                                line: false,
+                            });
+                        }
                         self.need_word("input", "after 'read all',")?;
                         return Ok(Expr::ReadAll);
+                    }
+                    if self.eat_word("key") {
+                        return Ok(Expr::ReadKey);
                     }
                     if self.eat_word("file") {
                         let path = self.primary()?;
                         return Ok(Expr::ReadFile(Box::new(path)));
                     }
                     return Err(format!(
-                        "line {}: after 'read' I expected 'line', 'all input', or 'file', but found {}",
+                        "line {}: after 'read' I expected 'line', 'all input', 'key', or 'file', but found {}",
                         self.line(),
                         self.peek().describe()
                     ));
+                }
+                if word == "connect" {
+                    self.bump(); // "connect"
+                    self.need_word("to", "after 'connect',")?;
+                    let host = self.expr(false)?;
+                    self.need_word("at", "after the host in 'connect',")?;
+                    let port = self.expr(false)?;
+                    return Ok(Expr::Connect {
+                        host: Box::new(host),
+                        port: Box::new(port),
+                    });
+                }
+                if word == "listen" {
+                    self.bump(); // "listen"
+                    self.need_word("at", "after 'listen',")?;
+                    let port = self.expr(false)?;
+                    return Ok(Expr::Listen(Box::new(port)));
+                }
+                if word == "accept" {
+                    self.bump(); // "accept"
+                    self.need_word("from", "after 'accept',")?;
+                    let listener = self.expr(false)?;
+                    return Ok(Expr::Accept(Box::new(listener)));
                 }
                 if word == "list" && matches!(self.peek_at(1), Tok::Ident(s) if s == "directory") {
                     self.bump(); // "list"

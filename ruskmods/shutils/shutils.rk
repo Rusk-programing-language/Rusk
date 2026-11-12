@@ -1,0 +1,110 @@
+# shutils.rk — small shell helpers written in Rusk.
+#
+# Import it with `import "shutils/shutils"`. Rusk's `run command` starts
+# `/bin/sh -c` and shares standard input, output, and error, so these helpers
+# return exit statuses rather than captured text. They quote paths for you; never
+# paste untrusted text into a command without `shutils_quote`.
+
+# Wrap text in single quotes for `/bin/sh`, escaping embedded quotes.
+to shutils_quote with s as text:
+    let out be "'"
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "'":
+            set out to out + "'\\''"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out + "'"
+
+# Run a command and give back its exit status.
+to shutils_run with command_text as text:
+    give back run command command_text
+
+# Run a command with its output discarded and give back its exit status.
+to shutils_run_silent with command_text as text:
+    give back run command (command_text + " >/dev/null 2>&1")
+
+# True when the command exits with status 0.
+to shutils_succeeds with command_text as text:
+    give back (shutils_run_silent with command_text) is 0
+
+# True when an executable with this name is on `PATH`.
+to shutils_command_exists with name as text:
+    give back shutils_succeeds with ("command -v " + (shutils_quote with name))
+
+# Make a directory and any missing parents.
+to shutils_make_dirs with path as text:
+    give back shutils_run_silent with ("mkdir -p " + (shutils_quote with path))
+
+# Copy a file or a whole directory tree.
+to shutils_copy with from as text and to as text:
+    give back shutils_run_silent with ("cp -R " + (shutils_quote with from) + " " + (shutils_quote with to))
+
+# Move or rename a file or directory.
+to shutils_move with from as text and to as text:
+    give back shutils_run_silent with ("mv " + (shutils_quote with from) + " " + (shutils_quote with to))
+
+# Remove a file or a directory tree. Missing paths are ignored.
+to shutils_remove with path as text:
+    give back shutils_run_silent with ("rm -rf " + (shutils_quote with path))
+
+# Split text on spaces, tabs, and newlines. Runs of separators collapse, so no
+# empty words are produced. This is simple word splitting, not shell quoting.
+to shutils_words with text as text:
+    let out be an empty list of text
+    let n be length of text
+    let i be 1
+    let start be 0
+    while i is at most n:
+        let ch be letter i of text
+        let space be ch is " " or ch is "\t" or ch is "\n" or ch is "\r"
+        if space:
+            if start is not 0:
+                add (part start to (i - 1) of text) to out
+                set start to 0
+        otherwise if start is 0:
+            set start to i
+        set i to i + 1
+    if start is not 0:
+        add (part start to n of text) to out
+    give back out
+
+# Join words with one space between them.
+to shutils_join_words with words as a view of a list of text:
+    let out be ""
+    let first be true
+    for each word in words:
+        if not first:
+            set out to out + " "
+        set out to out + word
+        set first to false
+    give back out
+
+# The first word of text, or empty text.
+to shutils_first_word with text as text:
+    let words be shutils_words with text
+    if length of words is 0:
+        give back ""
+    give back item 1 of words
+
+# The last word of text, or empty text.
+to shutils_last_word with text as text:
+    let words be shutils_words with text
+    let count be length of words
+    if count is 0:
+        give back ""
+    give back item count of words
+
+# True when `word` appears as a whole word in text.
+to shutils_has_word with text as text and word as text:
+    for each candidate in (shutils_words with (copy of text)):
+        if candidate is word:
+            give back true
+    give back false
+
+# True when an exit status means success.
+to shutils_ok with status as a number:
+    give back status is 0

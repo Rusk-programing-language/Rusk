@@ -1,0 +1,28 @@
+# rusklib.rk — one import for the bundled Rusk library.
+#
+#     import "rusklib/rusklib"
+#
+# pulls in every module under `ruskmods/` plus the higher-level file helpers in
+# `rusklib/files.rk`. Each module keeps its own prefix, so the shared namespace
+# stays readable. If a program only needs one area, import that file directly:
+#
+#     import "date/date"
+#     import "rusklib/files"
+#
+# The imports below are relative to this file, so the bundle works from a
+# checkout as well as from an installed copy that keeps the same layout.
+
+import "../ruskmods/text"
+import "../ruskmods/math"
+import "../ruskmods/math/math"
+import "../ruskmods/date/date"
+import "../ruskmods/time/time"
+import "../ruskmods/random/random"
+import "../ruskmods/statistics/statistics"
+import "../ruskmods/json/json"
+import "../ruskmods/toml/toml"
+import "../ruskmods/sys/sys"
+import "../ruskmods/os/os"
+import "../ruskmods/path/path"
+import "../ruskmods/shutils/shutils"
+import "files"

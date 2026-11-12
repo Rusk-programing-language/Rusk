@@ -1,0 +1,42 @@
+# random.rk — deterministic pseudo-random numbers written in Rusk.
+#
+# Rusk has no clock or entropy source in a baked program, so this module uses a
+# seed you supply. The same seed always gives the same sequence. Import it with
+# `import "random/random"`.
+
+# The next seed in a 64-bit linear congruential sequence. Overflow wraps.
+to random_next with seed as a number:
+    give back seed * 6364136223846793005 + 1442695040888963407
+
+# A number from 0 through limit - 1. A limit of zero or less gives 0.
+to random_below with seed as a number and limit as a number:
+    if limit is at most 0:
+        give back 0
+    let value be random_next with seed
+    if value is less than 0:
+        set value to 0 - value
+    give back value - (value / limit) * limit
+
+# A number from low through high, including both ends.
+to random_between with seed as a number and low as a number and high as a number:
+    if high is less than low:
+        give back low
+    give back low + random_below with seed and (high - low + 1)
+
+# True `percent` times out of a hundred.
+to random_chance with seed as a number and percent as a number:
+    if percent is at most 0:
+        give back false
+    if percent is at least 100:
+        give back true
+    give back (random_below with seed and 100) is less than percent
+
+# A position from 1 through count. A count of zero or less gives 0.
+to random_position with seed as a number and count as a number:
+    if count is at most 0:
+        give back 0
+    give back random_below with seed and count + 1
+
+# One of two seeds, so a program can keep stepping without a mutable global.
+to random_other_seed with seed as a number:
+    give back random_next with random_next with seed

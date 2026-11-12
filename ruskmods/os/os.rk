@@ -1,0 +1,133 @@
+# os.rk — file-content helpers written in Rusk.
+#
+# Import it with `import "os/os"`. These are ordinary text operations on top of
+# `read file`, `write ... to file`, `file exists`, and `make directory`. They do
+# not shell out. Use `path/path` for shaping paths and `rusklib/files` for
+# copying trees and archives.
+
+# Join two pieces with one `/`.
+to os_join with left as text and right as text:
+    if length of left is 0:
+        give back right
+    if length of right is 0:
+        give back left
+    if letter (length of left) of left is "/":
+        give back left + right
+    give back left + "/" + right
+
+# The whole file, or `fallback` when the path does not exist.
+to os_read_or with path as text and fallback as text:
+    if file exists (copy of path):
+        give back read file path
+    give back fallback
+
+# Put text at the end of a file, creating it when needed.
+to os_append with path as text and text as text:
+    let old be ""
+    if file exists (copy of path):
+        set old to read file (copy of path)
+    write (old + text) to file path
+
+# Split text into lines. `\n` ends a line, a `\r` before it is dropped, and a
+# final newline does not make an extra empty line. Empty text gives no lines.
+to os_lines with text as text:
+    let out be an empty list of text
+    let n be length of text
+    let i be 1
+    let start be 1
+    while i is at most n:
+        if letter i of text is "\n":
+            let stop be i - 1
+            if stop is at least start and (letter stop of text) is "\r":
+                set stop to stop - 1
+            if stop is less than start:
+                add "" to out
+            otherwise:
+                add (part start to stop of text) to out
+            set start to i + 1
+        set i to i + 1
+    if start is at most n:
+        add (part start to n of text) to out
+    give back out
+
+# Join lines with a newline after each one.
+to os_join_lines with lines as a view of a list of text:
+    let out be ""
+    for each line in lines:
+        set out to out + line + "\n"
+    give back out
+
+# Write a list of lines to a file, with a newline after each line.
+to os_write_lines with path as text and lines as a view of a list of text:
+    let body be os_join_lines with lines
+    write body to file path
+
+# How many lines the file holds. A missing file counts as zero.
+to os_line_count with path as text:
+    if not file exists (copy of path):
+        give back 0
+    let body be read file path
+    give back length of (os_lines with body)
+
+# The first line, or empty text for a missing or empty file.
+to os_first_line with path as text:
+    if not file exists (copy of path):
+        give back ""
+    let body be read file path
+    let lines be os_lines with body
+    if length of lines is 0:
+        give back ""
+    give back item 1 of lines
+
+# The last line, or empty text for a missing or empty file.
+to os_last_line with path as text:
+    if not file exists (copy of path):
+        give back ""
+    let body be read file path
+    let lines be os_lines with body
+    let count be length of lines
+    if count is 0:
+        give back ""
+    give back item count of lines
+
+# The file size in bytes, read from the file's contents. A missing file counts
+# as zero. This reads the whole file, so it is meant for ordinary text files.
+to os_file_size with path as text:
+    if not file exists (copy of path):
+        give back 0
+    let body be read file path
+    give back length of body
+
+# True when the path exists and holds no bytes.
+to os_is_empty with path as text:
+    if not file exists (copy of path):
+        give back true
+    let body be read file path
+    give back length of body is 0
+
+# Remove a file only when it is there. Missing files are ignored.
+to os_remove_if_present with path as text:
+    if file exists (copy of path):
+        remove file path
+
+# Make one directory when it is not already there.
+to os_make_directory with path as text:
+    if not file exists (copy of path):
+        make directory path
+
+# A path below the home directory. A missing `HOME` gives the name alone.
+to os_home_path with name as text:
+    let home be environment "HOME"
+    give back os_join with home and name
+
+# A path below the temporary directory (`TMPDIR`, or `/tmp`).
+to os_temp_path with name as text:
+    let temp be environment "TMPDIR"
+    if length of temp is 0:
+        set temp to "/tmp"
+    give back os_join with temp and name
+
+# Copy a file by reading it and writing it again. The destination is replaced.
+to os_copy_file with from as text and to as text:
+    let body be read file from
+    write body to file to

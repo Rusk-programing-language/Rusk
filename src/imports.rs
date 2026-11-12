@@ -390,6 +390,16 @@ impl Rewriter<'_> {
                 to: self.expr(to, locals),
                 line,
             },
+            Stmt::Send { text, socket, line } => Stmt::Send {
+                text: self.expr(text, locals),
+                socket: self.expr(socket, locals),
+                line,
+            },
+            Stmt::Close { socket, line } => Stmt::Close {
+                socket: self.expr(socket, locals),
+                line,
+            },
+            Stmt::RawTerminal { on, line } => Stmt::RawTerminal { on, line },
             Stmt::If {
                 cond,
                 then,
@@ -475,7 +485,12 @@ impl Rewriter<'_> {
 
     fn expr(&mut self, expr: Expr, locals: &HashSet<String>) -> Expr {
         match expr {
-            Expr::Int(_) | Expr::Str(_) | Expr::Bool(_) | Expr::ReadLine | Expr::ReadAll => expr,
+            Expr::Int(_)
+            | Expr::Str(_)
+            | Expr::Bool(_)
+            | Expr::ReadLine
+            | Expr::ReadAll
+            | Expr::ReadKey => expr,
             Expr::Var(name) => Expr::Var(self.reference(&name, locals)),
             Expr::Call(name, args) => Expr::Call(
                 self.reference(&name, locals),
@@ -527,6 +542,19 @@ impl Rewriter<'_> {
             Expr::FileExists(path) => Expr::FileExists(Box::new(self.expr(*path, locals))),
             Expr::AllArguments => Expr::AllArguments,
             Expr::RunCommand(command) => Expr::RunCommand(Box::new(self.expr(*command, locals))),
+            Expr::Connect { host, port } => Expr::Connect {
+                host: Box::new(self.expr(*host, locals)),
+                port: Box::new(self.expr(*port, locals)),
+            },
+            Expr::Listen(port) => Expr::Listen(Box::new(self.expr(*port, locals))),
+            Expr::Accept(listener) => Expr::Accept(Box::new(self.expr(*listener, locals))),
+            Expr::ReadFrom {
+                socket,
+                line: is_line,
+            } => Expr::ReadFrom {
+                socket: Box::new(self.expr(*socket, locals)),
+                line: is_line,
+            },
             Expr::Unary(op, inner) => Expr::Unary(op, Box::new(self.expr(*inner, locals))),
             Expr::Binary(op, left, right) => Expr::Binary(
                 op,

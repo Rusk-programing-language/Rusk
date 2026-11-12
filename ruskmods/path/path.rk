@@ -1,0 +1,165 @@
+# path.rk — text-only path helpers written in Rusk.
+#
+# Import it with `import "path/path"`. These functions work on the shape of a
+# path string. They never touch the filesystem, so they are safe to call with
+# paths that do not exist. The separator is always `/`, matching Rusk's Linux
+# output.
+
+# True when the path starts at the root.
+to path_is_absolute with path as text:
+    if length of path is 0:
+        give back false
+    give back letter 1 of path is "/"
+
+# True when the last letter is a separator. The root `/` counts as trailing.
+to path_has_trailing_slash with path as text:
+    let n be length of path
+    if n is 0:
+        give back false
+    give back letter n of path is "/"
+
+# Strip separators from the end, keeping a lone root `/`. An empty path stays
+# empty.
+to path_trim_end with path as text:
+    let n be length of path
+    while n is more than 1 and letter n of path is "/":
+        set n to n - 1
+    if n is 0:
+        give back ""
+    give back part 1 to n of path
+
+# Join two path pieces with exactly one separator. An empty left side gives the
+# right side back; an absolute right side replaces the left side.
+to path_join with left as text and right as text:
+    if length of right is 0:
+        give back left
+    if path_is_absolute with (copy of right):
+        give back right
+    if length of left is 0:
+        give back right
+    if letter (length of left) of left is "/":
+        give back left + right
+    give back left + "/" + right
+
+# The final name in a path: `/a/b/c.txt` gives `c.txt`. A trailing separator is
+# ignored. The root gives "/".
+to path_base with path as text:
+    let clean be path_trim_end with path
+    let n be length of clean
+    if n is 0:
+        give back ""
+    if clean is "/":
+        give back "/"
+    let at be n
+    while at is at least 1:
+        if letter at of clean is "/":
+            if at is n:
+                give back ""
+            give back part (at + 1) to n of clean
+        set at to at - 1
+    give back clean
+
+# Everything before the final name: `/a/b/c.txt` gives `/a/b`. A bare name gives
+# ".", and the root gives "/".
+to path_dir with path as text:
+    let clean be path_trim_end with path
+    let n be length of clean
+    if n is 0:
+        give back "."
+    if clean is "/":
+        give back "/"
+    let at be n
+    while at is at least 1:
+        if letter at of clean is "/":
+            if at is 1:
+                give back "/"
+            give back part 1 to (at - 1) of clean
+        set at to at - 1
+    give back "."
+
+# The extension without its dot: `notes.tar.gz` gives `gz`; no dot gives "".
+# A dot at the start of a name is treated as part of the name, not an extension.
+to path_extension with path as text:
+    let name be path_base with (copy of path)
+    let n be length of name
+    let at be n
+    while at is at least 1:
+        if letter at of name is ".":
+            if at is 1:
+                give back ""
+            if at is n:
+                give back ""
+            give back part (at + 1) to n of name
+        set at to at - 1
+    give back ""
+
+# The final name without its extension: `/a/notes.tar.gz` gives `notes.tar`.
+to path_stem with path as text:
+    let name be path_base with (copy of path)
+    let ext be path_extension with (copy of path)
+    if length of ext is 0:
+        give back name
+    let cut be (length of name) - (length of ext) - 1
+    if cut is less than 1:
+        give back name
+    give back part 1 to cut of name
+
+# The whole path without its final extension: `/a/notes.tar.gz` gives
+# `/a/notes.tar`. A path with no extension is returned unchanged.
+to path_without_extension with path as text:
+    let ext be path_extension with (copy of path)
+    if length of ext is 0:
+        give back path
+    let n be length of path
+    let cut be n - (length of ext) - 1
+    if cut is less than 1:
+        give back path
+    give back part 1 to cut of path
+
+# Split a path into names, dropping empty pieces. `/a//b/` gives `["a", "b"]`.
+to path_components with path as text:
+    let out be an empty list of text
+    let n be length of path
+    let i be 1
+    let start be 1
+    while i is at most n:
+        if letter i of path is "/":
+            if i is more than start:
+                add (part start to (i - 1) of path) to out
+            set start to i + 1
+        set i to i + 1
+    if start is at most n:
+        add (part start to n of path) to out
+    give back out
+
+# Rewrite a path without empty pieces or `.` pieces. `..` removes the previous
+# ordinary name when it can; otherwise it is kept. A relative path that
+# vanishes becomes ".".
+to path_normalize with path as text:
+    let absolute be path_is_absolute with (copy of path)
+    let parts be path_components with path
+    let kept be an empty list of text
+    for each part_name in parts:
+        if part_name is ".":
+            continue
+        if part_name is "..":
+            if length of kept is more than 0 and (item (length of kept) of kept) is not "..":
+                remove last from kept
+            otherwise if not absolute:
+                add ".." to kept
+        otherwise:
+            add part_name to kept
+    let out be ""
+    for each part_name in kept:
+        if length of out is 0:
+            if absolute:
+                set out to "/" + part_name
+            otherwise:
+                set out to part_name
+        otherwise:
+            set out to out + "/" + part_name
+    if length of out is 0:
+        if absolute:
+            give back "/"
+        give back "."
+    give back out

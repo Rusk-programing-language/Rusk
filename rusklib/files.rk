@@ -1,0 +1,108 @@
+# files.rk — high-level file helpers for Rusk.
+#
+# Part of `rusklib`. Import it directly with `import "rusklib/files"`, or import
+# `rusklib/rusklib` to get every bundled module. File copies use the language's
+# own read/write primitives; tree copies and archives use standard POSIX tools
+# through `run command`, so their helpers give back an exit status.
+
+# Quote text for `/bin/sh`.
+to files_quote with s as text:
+    let out be "'"
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "'":
+            set out to out + "'\\''"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out + "'"
+
+# True when the path exists.
+to files_exists with path as text:
+    give back file exists path
+
+# True when the path is a directory.
+to files_is_directory with path as text:
+    let status be run command ("test -d " + (files_quote with path) + " >/dev/null 2>&1")
+    give back status is 0
+
+# True when the path is a regular file.
+to files_is_file with path as text:
+    let status be run command ("test -f " + (files_quote with path) + " >/dev/null 2>&1")
+    give back status is 0
+
+# Make a directory and any missing parents. Gives back the shell status.
+to files_make_dirs with path as text:
+    give back run command ("mkdir -p " + (files_quote with path))
+
+# The whole file as text. Stops the program when the file cannot be read.
+to files_read with path as text:
+    give back read file path
+
+# Replace a file's contents. Stops the program when the write fails.
+to files_write with path as text and text as text:
+    write text to file path
+
+# Add text to the end of a file, creating it when needed.
+to files_append with path as text and text as text:
+    let old be ""
+    if file exists (copy of path):
+        set old to read file (copy of path)
+    write (old + text) to file path
+
+# Copy one file with the language's read/write primitives. The destination is
+# replaced. Use `files_copy` when the source may be a directory.
+to files_copy_file with from as text and to as text:
+    let body be read file from
+    write body to file to
+
+# Copy a file or a whole directory tree. For a file this uses read/write; for a
+# directory it uses `cp -R` and gives back that command's exit status. A file
+# copy stops the program on a write failure.
+to files_copy with from as text and to as text:
+    if files_is_directory with (copy of from):
+        give back run command ("cp -R " + (files_quote with from) + " " + (files_quote with to))
+    let body be read file from
+    write body to file to
+    give back 0
+
+# Move or rename a file or directory. Gives back the shell status.
+to files_move with from as text and to as text:
+    give back run command ("mv " + (files_quote with from) + " " + (files_quote with to))
+
+# Remove a file or a directory tree. Missing paths are ignored. Gives back the
+# shell status.
+to files_delete with path as text:
+    give back run command ("rm -rf " + (files_quote with path))
+
+# The entry names inside a directory, as a list of text.
+to files_list with path as text:
+    give back list directory path
+
+# The file size in bytes. A missing file counts as zero.
+to files_size with path as text:
+    if not file exists (copy of path):
+        give back 0
+    let body be read file path
+    give back length of body
+
+# True when the path exists and holds no bytes.
+to files_is_empty with path as text:
+    if not file exists (copy of path):
+        give back true
+    let body be read file path
+    give back length of body is 0
+
+# Create a gzip-compressed tarball from a file or directory. The archive holds
+# the source's own name, not the whole path. Gives back the shell status.
+to files_archive_create with source as text and archive as text:
+    let command_text be "tar -czf " + (files_quote with archive) + " -C \"$(dirname " + (files_quote with (copy of source)) + ")\" \"$(basename " + (files_quote with source) + ")\""
+    give back run command command_text
+
+# Unpack a gzip-compressed tarball into a directory, creating the directory
+# first. Gives back the shell status.
+to files_archive_extract with archive as text and destination as text:
+    let command_text be "mkdir -p " + (files_quote with (copy of destination)) + " && tar -xzf " + (files_quote with archive) + " -C " + (files_quote with destination)
+    give back run command command_text

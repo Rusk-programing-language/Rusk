@@ -1,0 +1,82 @@
+# date.rk — calendar helpers written in Rusk.
+#
+# Import it with `import "date/date"`, or from a file next to `ruskmods/`.
+# Every public name starts with `date_` because Rusk keeps one global namespace.
+
+# True when a year has 366 days.
+to date_is_leap with year as a number:
+    if year / 4 * 4 is not year:
+        give back false
+    if year / 100 * 100 is not year:
+        give back true
+    give back year / 400 * 400 is year
+
+# The number of days in a month. February knows about leap years.
+to date_days_in_month with year as a number and month as a number:
+    if month is 2:
+        if date_is_leap with year:
+            give back 29
+        give back 28
+    if month is 4 or month is 6 or month is 9 or month is 11:
+        give back 30
+    give back 31
+
+# True when the three numbers name a real calendar day.
+to date_is_valid with year as a number and month as a number and day as a number:
+    if year is less than 1:
+        give back false
+    if month is less than 1 or month is more than 12:
+        give back false
+    if day is less than 1:
+        give back false
+    give back day is at most date_days_in_month with year and month
+
+# One or two digits, zero padded. Only 0 through 99 are meaningful.
+to date_pad2 with n as a number:
+    let digits be "0123456789"
+    let tens be n / 10
+    let ones be n - tens * 10
+    give back letter (tens + 1) of digits + letter (ones + 1) of digits
+
+# Four digits, zero padded. Only 0 through 9999 are meaningful.
+to date_pad4 with n as a number:
+    let digits be "0123456789"
+    let thousands be n / 1000
+    let hundreds be n / 100 - thousands * 10
+    let tens be n / 10 - (n / 100) * 10
+    let ones be n - (n / 10) * 10
+    give back letter (thousands + 1) of digits + letter (hundreds + 1) of digits + letter (tens + 1) of digits + letter (ones + 1) of digits
+
+# `YYYY-MM-DD`.
+to date_format_iso with year as a number and month as a number and day as a number:
+    give back (date_pad4 with year) + "-" + (date_pad2 with month) + "-" + (date_pad2 with day)
+
+# `DD/MM/YYYY`.
+to date_format_day_first with year as a number and month as a number and day as a number:
+    give back (date_pad2 with day) + "/" + (date_pad2 with month) + "/" + (date_pad4 with year)
+
+# The day number within the year: 1 January is 1.
+to date_day_of_year with year as a number and month as a number and day as a number:
+    let total be day
+    let i be 1
+    while i is less than month:
+        set total to total + date_days_in_month with year and i
+        set i to i + 1
+    give back total
+
+# The weekday number, Monday = 1 through Sunday = 7, for a Gregorian date.
+# The formula is Zeller's congruence, adjusted so the week starts on Monday.
+to date_weekday with year as a number and month as a number and day as a number:
+    let y be year
+    let m be month
+    if m is less than 3:
+        set m to m + 12
+        set y to y - 1
+    let k be y - (y / 100) * 100
+    let j be y / 100
+    let h be (day + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) - ((day + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 + 5 * j) / 7) * 7
+    # h is 0 = Saturday, 1 = Sunday, 2 = Monday, ...
+    let weekday be h - 1
+    if weekday is less than 1:
+        set weekday to weekday + 7
+    give back weekday

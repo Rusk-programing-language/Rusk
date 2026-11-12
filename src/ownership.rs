@@ -232,6 +232,14 @@ impl<'a> Checker<'a> {
                 Self::line_at(*line, self.expr(from, scope, Use::Read))?;
                 Self::line_at(*line, self.expr(to, scope, Use::Read))?;
             }
+            Stmt::Send { text, socket, line } => {
+                Self::line_at(*line, self.expr(text, scope, Use::Read))?;
+                Self::line_at(*line, self.expr(socket, scope, Use::Read))?;
+            }
+            Stmt::Close { socket, line } => {
+                Self::line_at(*line, self.expr(socket, scope, Use::Read))?;
+            }
+            Stmt::RawTerminal { .. } => {}
             Stmt::If {
                 cond,
                 then,
@@ -420,11 +428,17 @@ impl<'a> Checker<'a> {
             Expr::Argument(index) => self.expr(index, scope, Use::Read)?,
             Expr::ArgCount => {}
             Expr::Environment(name) => self.expr(name, scope, Use::Read)?,
-            Expr::ReadLine | Expr::ReadAll => {}
+            Expr::ReadLine | Expr::ReadAll | Expr::ReadKey => {}
             Expr::ReadFile(path) => self.expr(path, scope, Use::Read)?,
             Expr::ListDirectory(path) | Expr::FileExists(path) | Expr::RunCommand(path) => {
                 self.expr(path, scope, Use::Read)?
             }
+            Expr::Connect { host, port } => {
+                self.expr(host, scope, Use::Read)?;
+                self.expr(port, scope, Use::Read)?;
+            }
+            Expr::Listen(port) | Expr::Accept(port) => self.expr(port, scope, Use::Read)?,
+            Expr::ReadFrom { socket, .. } => self.expr(socket, scope, Use::Read)?,
             Expr::AllArguments => {}
             Expr::Call(name, args) => {
                 // A borrowed parameter is a read-only view of its argument, so

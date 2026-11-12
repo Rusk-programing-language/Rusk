@@ -53,6 +53,17 @@ const RUN_ARGV_OFFSET: u64 = 0x5010;
 const RUN_STATUS_OFFSET: u64 = 0x5030;
 /// Directory entries are read into this fixed buffer, one batch at a time.
 const DENTS_OFFSET: u64 = 0x6000;
+/// A reusable IPv4 `sockaddr_in` for connect, bind, and listen.
+const SOCKADDR_OFFSET: u64 = 0x8000;
+const SOCKADDR_LEN: u64 = 16;
+/// The terminal settings saved when raw mode starts, plus a working copy.
+const TERMIOS_SAVED_OFFSET: u64 = 0x8040;
+const TERMIOS_WORK_OFFSET: u64 = 0x8080;
+const TERMIOS_BYTES: u64 = 64;
+/// 1 while the terminal is in raw mode, so leaving it is idempotent.
+const RAW_FLAG_OFFSET: u64 = 0x80C0;
+/// The `int 1` that `SO_REUSEADDR` points at.
+const SOCK_ONE_OFFSET: u64 = 0x80C8;
 /// `SYS_read`
 const SYS_READ: u64 = 63;
 /// `SYS_openat`
@@ -77,6 +88,27 @@ const SYS_EXECVE: u64 = 221;
 const SYS_MMAP: u64 = 222;
 /// `SYS_wait4`
 const SYS_WAIT4: u64 = 260;
+/// `SYS_socket`
+const SYS_SOCKET: u64 = 198;
+/// `SYS_connect`
+const SYS_CONNECT: u64 = 203;
+/// `SYS_bind`
+const SYS_BIND: u64 = 200;
+/// `SYS_listen`
+const SYS_LISTEN: u64 = 201;
+/// `SYS_accept`
+const SYS_ACCEPT: u64 = 202;
+/// `SYS_setsockopt`
+const SYS_SETSOCKOPT: u64 = 208;
+/// `SYS_ioctl`
+const SYS_IOCTL: u64 = 29;
+/// `TCGETS` and `TCSETS` are the same on every Linux architecture we emit.
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
+const AF_INET: u64 = 2;
+const SOCK_STREAM: u64 = 1;
+const SOL_SOCKET: u64 = 1;
+const SO_REUSEADDR: u64 = 2;
 /// `AT_FDCWD`, as a two's-complement value.
 const AT_FDCWD: u64 = (-100i64) as u64;
 /// Directory entries fit in a modest buffer; getdents64 is called until it
@@ -153,6 +185,7 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
         cg.stmt(stmt)?;
     }
     // exit(0)
+    cg.asm.bl_label("raw_terminal_off");
     cg.asm.mov_imm64(X8, SYS_EXIT);
     cg.asm.mov_imm64(X0, 0);
     cg.asm.svc();
@@ -202,6 +235,15 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     cg.emit_file_exists();
     cg.emit_all_arguments();
     cg.emit_run_command();
+    cg.emit_build_sockaddr();
+    cg.emit_connect_tcp();
+    cg.emit_listen_tcp();
+    cg.emit_accept_tcp();
+    cg.emit_send_text();
+    cg.emit_close_socket();
+    cg.emit_raw_terminal_on();
+    cg.emit_raw_terminal_off();
+    cg.emit_read_key();
     cg.emit_text_copy();
     cg.emit_array_copy_scalar();
     cg.emit_array_copy_text();
@@ -342,6 +384,7 @@ impl Codegen {
             .max(PATH2_OFFSET + PATH_CAPACITY)
             .max(RUN_STATUS_OFFSET + 8)
             .max(DENTS_OFFSET + DENTS_CAPACITY)
+            .max(SOCK_ONE_OFFSET + 8)
             .max(crate::x86_64::VREG_OFFSET + crate::x86_64::VREG_OFFSET_SLACK)
     }
 
@@ -460,6 +503,9 @@ impl Codegen {
                         format!("'stop with' needs an exit code as a number, but this is {ty}"),
                     ));
                 }
+                self.asm.push_reg(X0);
+                self.asm.bl_label("raw_terminal_off");
+                self.asm.pop_reg(X0);
                 self.asm.mov_imm64(X8, SYS_EXIT);
                 self.asm.svc();
                 Ok(())
@@ -476,6 +522,18 @@ impl Codegen {
             }
             Stmt::RenamePath { from, to, line } => {
                 self.rename_path(from, to).map_err(|m| at(*line, m))
+            }
+            Stmt::Send { text, socket, line } => {
+                self.send_text(text, socket).map_err(|m| at(*line, m))
+            }
+            Stmt::Close { socket, line } => self.close_socket(socket).map_err(|m| at(*line, m)),
+            Stmt::RawTerminal { on, .. } => {
+                if *on {
+                    self.asm.bl_label("raw_terminal_on");
+                } else {
+                    self.asm.bl_label("raw_terminal_off");
+                }
+                Ok(())
             }
             Stmt::If {
                 cond,
@@ -735,6 +793,37 @@ impl Codegen {
         self.asm.mov_reg_reg(X1, X0);
         self.asm.pop_reg(X0);
         self.asm.bl_label("rename_path");
+        Ok(())
+    }
+
+    fn send_text(&mut self, text: &Expr, socket: &Expr) -> Result<(), String> {
+        let text_ty = self.expr(text)?;
+        if text_ty != Ty::Str {
+            return Err(format!(
+                "'send' needs the text as text, but this is {text_ty}"
+            ));
+        }
+        self.asm.push_reg(X0);
+        let socket_ty = self.expr(socket)?;
+        if socket_ty != Ty::Int {
+            return Err(format!(
+                "'send' needs a connection number, but this is {socket_ty}"
+            ));
+        }
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.pop_reg(X0);
+        self.asm.bl_label("send_text");
+        Ok(())
+    }
+
+    fn close_socket(&mut self, socket: &Expr) -> Result<(), String> {
+        let ty = self.expr(socket)?;
+        if ty != Ty::Int {
+            return Err(format!(
+                "'close' needs a connection number, but this is {ty}"
+            ));
+        }
+        self.asm.bl_label("close_socket");
         Ok(())
     }
 
@@ -1549,6 +1638,60 @@ impl Codegen {
                 }
                 self.asm.bl_label("run_command");
                 Ok(Ty::Int)
+            }
+            Expr::Connect { host, port } => {
+                let host_ty = self.expr(host)?;
+                if host_ty != Ty::Str {
+                    return Err(format!(
+                        "'connect' needs a host as text, but this is {host_ty}"
+                    ));
+                }
+                self.asm.push_reg(X0);
+                let port_ty = self.expr(port)?;
+                if port_ty != Ty::Int {
+                    return Err(format!(
+                        "'connect' needs a port as a number, but this is {port_ty}"
+                    ));
+                }
+                self.asm.mov_reg_reg(X1, X0);
+                self.asm.pop_reg(X0);
+                self.asm.bl_label("connect_tcp");
+                Ok(Ty::Int)
+            }
+            Expr::Listen(port) => {
+                let ty = self.expr(port)?;
+                if ty != Ty::Int {
+                    return Err(format!(
+                        "'listen' needs a port as a number, but this is {ty}"
+                    ));
+                }
+                self.asm.bl_label("listen_tcp");
+                Ok(Ty::Int)
+            }
+            Expr::Accept(listener) => {
+                let ty = self.expr(listener)?;
+                if ty != Ty::Int {
+                    return Err(format!(
+                        "'accept' needs a listener as a number, but this is {ty}"
+                    ));
+                }
+                self.asm.bl_label("accept_tcp");
+                Ok(Ty::Int)
+            }
+            Expr::ReadFrom { socket, line } => {
+                let ty = self.expr(socket)?;
+                if ty != Ty::Int {
+                    return Err(format!(
+                        "'read ... from' needs a connection as a number, but this is {ty}"
+                    ));
+                }
+                self.asm.mov_imm64(X1, u64::from(*line));
+                self.asm.bl_label("read_stream");
+                Ok(Ty::Str)
+            }
+            Expr::ReadKey => {
+                self.asm.bl_label("read_key");
+                Ok(Ty::Str)
             }
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
@@ -2745,6 +2888,23 @@ impl Codegen {
         a.b_label("read_stream_loop");
 
         a.label("read_stream_done");
+        // In line mode, drop a carriage return before the newline too.
+        a.cmp_reg_reg(X20, XZR);
+        a.bcond_label(CC_EQ, "read_stream_trim_done");
+        a.ldr(X23, X22, 8);
+        a.cmp_reg_reg(X23, XZR);
+        a.bcond_label(CC_EQ, "read_stream_trim_done");
+        a.sub_imm(X10, X23, 1);
+        a.add_imm(X11, X22, 16);
+        a.add_reg_reg(X11, X11, X10);
+        a.ldrb(X11, X11, 0);
+        a.movz_reg(X12, 13);
+        a.cmp_reg_reg(X11, X12);
+        a.bcond_label(CC_NE, "read_stream_trim_done");
+        a.sub_imm(X23, X23, 1);
+        a.str(X23, X22, 8);
+        a.label("read_stream_trim_done");
+
         a.ldr(X23, X22, 8); // length
         a.add_imm(X0, X23, 8);
         a.bl_label("heap_alloc");
@@ -3250,6 +3410,466 @@ impl Codegen {
         a.ret();
     }
 
+    /// `build_sockaddr`: X0 = host text, X1 = port. Writes an IPv4
+    /// `sockaddr_in` into `SOCKADDR_OFFSET` and returns its address in X0.
+    /// Numeric dotted addresses are parsed; anything else becomes localhost.
+    fn emit_build_sockaddr(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("build_sockaddr");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        a.str(X30, SP, 40);
+
+        a.mov_reg_reg(X19, X0); // host text
+        a.mov_reg_reg(X20, X1); // port
+        a.mov_data_addr(X21, SOCKADDR_OFFSET);
+        a.movz_reg(X2, AF_INET as u16);
+        a.strb(X2, X21, 0);
+        a.strb(XZR, X21, 1);
+
+        // Start with 0.0.0.0 so a short dotted address leaves zero octets.
+        a.str(XZR, X21, 8);
+        a.strb(XZR, X21, 4);
+        a.strb(XZR, X21, 5);
+        a.strb(XZR, X21, 6);
+        a.strb(XZR, X21, 7);
+
+        // sin_port is network order: high byte first.
+        a.mov_imm64(X2, 256);
+        a.udiv_reg_reg(X3, X20, X2);
+        a.mov_imm64(X4, 255);
+        a.and_reg_reg(X3, X3, X4);
+        a.strb(X3, X21, 2);
+        a.and_reg_reg(X3, X20, X4);
+        a.strb(X3, X21, 3);
+
+        a.ldr(X9, X19, 0); // length
+        a.add_imm(X22, X19, 8); // source cursor
+        a.add_reg_reg(X23, X22, X9); // end of the host text
+        a.add_imm(X10, X21, 4); // address cursor
+        a.cmp_reg_reg(X9, XZR);
+        a.bcond_label(CC_EQ, "build_sockaddr_localhost");
+
+        // The only name we understand is "localhost"; it starts with 'l'.
+        a.ldrb(X11, X22, 0);
+        a.movz_reg(X12, b'l' as u16);
+        a.cmp_reg_reg(X11, X12);
+        a.bcond_label(CC_EQ, "build_sockaddr_localhost");
+
+        a.movz_reg(X12, 0); // current octet
+        a.label("build_sockaddr_loop");
+        a.cmp_reg_reg(X22, X23);
+        a.bcond_label(CC_GE, "build_sockaddr_last");
+        a.ldrb(X11, X22, 0);
+        a.movz_reg(X14, b'.' as u16);
+        a.cmp_reg_reg(X11, X14);
+        a.bcond_label(CC_EQ, "build_sockaddr_dot");
+        a.movz_reg(X14, b'0' as u16);
+        a.cmp_reg_reg(X11, X14);
+        a.bcond_label(CC_LT, "build_sockaddr_localhost");
+        a.movz_reg(X14, b'9' as u16);
+        a.cmp_reg_reg(X11, X14);
+        a.bcond_label(CC_GT, "build_sockaddr_localhost");
+        a.mov_imm64(X14, 10);
+        a.mul_reg_reg(X12, X12, X14);
+        a.sub_imm(X15, X11, b'0' as u32);
+        a.add_reg_reg(X12, X12, X15);
+        a.add_imm(X22, X22, 1);
+        a.b_label("build_sockaddr_loop");
+
+        a.label("build_sockaddr_dot");
+        a.strb(X12, X10, 0);
+        a.add_imm(X10, X10, 1);
+        a.movz_reg(X12, 0);
+        a.add_imm(X22, X22, 1);
+        a.b_label("build_sockaddr_loop");
+
+        a.label("build_sockaddr_last");
+        a.strb(X12, X10, 0);
+        a.b_label("build_sockaddr_done");
+
+        a.label("build_sockaddr_localhost");
+        a.movz_reg(X12, 127);
+        a.strb(X12, X21, 4);
+        a.strb(XZR, X21, 5);
+        a.strb(XZR, X21, 6);
+        a.movz_reg(X12, 1);
+        a.strb(X12, X21, 7);
+
+        a.label("build_sockaddr_done");
+        a.mov_reg_reg(X0, X21);
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.ldr(X30, SP, 40);
+        a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// `connect_tcp`: X0 = host text, X1 = port. Returns a socket number, or -1.
+    fn emit_connect_tcp(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("connect_tcp");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X30, SP, 24);
+
+        a.mov_reg_reg(X19, X0);
+        a.mov_reg_reg(X20, X1);
+        a.mov_reg_reg(X0, X19);
+        a.mov_reg_reg(X1, X20);
+        a.bl_label("build_sockaddr");
+
+        a.movz_reg(X0, AF_INET as u16);
+        a.movz_reg(X1, SOCK_STREAM as u16);
+        a.movz_reg(X2, 0);
+        a.mov_imm64(X8, SYS_SOCKET);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "connect_tcp_fail");
+        a.mov_reg_reg(X21, X0);
+
+        a.mov_reg_reg(X0, X21);
+        a.mov_data_addr(X1, SOCKADDR_OFFSET);
+        a.movz_reg(X2, SOCKADDR_LEN as u16);
+        a.mov_imm64(X8, SYS_CONNECT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GE, "connect_tcp_ok");
+
+        a.mov_reg_reg(X0, X21);
+        a.mov_imm64(X8, SYS_CLOSE);
+        a.svc();
+        a.b_label("connect_tcp_fail");
+
+        a.label("connect_tcp_ok");
+        a.mov_reg_reg(X0, X21);
+        a.b_label("connect_tcp_done");
+
+        a.label("connect_tcp_fail");
+        a.mov_imm64(X0, (-1i64) as u64);
+
+        a.label("connect_tcp_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X30, SP, 24);
+        a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// `listen_tcp`: X0 = port. Returns a listener number, or -1.
+    fn emit_listen_tcp(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("listen_tcp");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X30, SP, 24);
+
+        a.mov_reg_reg(X20, X0); // port
+        a.mov_data_addr(X21, SOCKADDR_OFFSET);
+        a.movz_reg(X2, AF_INET as u16);
+        a.strb(X2, X21, 0);
+        a.strb(XZR, X21, 1);
+
+        a.mov_imm64(X2, 256);
+        a.udiv_reg_reg(X3, X20, X2);
+        a.mov_imm64(X4, 255);
+        a.and_reg_reg(X3, X3, X4);
+        a.strb(X3, X21, 2);
+        a.and_reg_reg(X3, X20, X4);
+        a.strb(X3, X21, 3);
+        // 0.0.0.0: any local address.
+        a.strb(XZR, X21, 4);
+        a.strb(XZR, X21, 5);
+        a.strb(XZR, X21, 6);
+        a.strb(XZR, X21, 7);
+
+        a.movz_reg(X0, AF_INET as u16);
+        a.movz_reg(X1, SOCK_STREAM as u16);
+        a.movz_reg(X2, 0);
+        a.mov_imm64(X8, SYS_SOCKET);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "listen_tcp_fail");
+        a.mov_reg_reg(X19, X0);
+
+        // SO_REUSEADDR lets a quick restart bind the same port again.
+        a.mov_data_addr(X1, SOCK_ONE_OFFSET);
+        a.movz_reg(X2, 1);
+        a.str(X2, X1, 0);
+        a.mov_reg_reg(X0, X19);
+        a.movz_reg(X1, SOL_SOCKET as u16);
+        a.movz_reg(X2, SO_REUSEADDR as u16);
+        a.mov_data_addr(X3, SOCK_ONE_OFFSET);
+        a.movz_reg(X4, 4);
+        a.mov_imm64(X8, SYS_SETSOCKOPT);
+        a.svc();
+
+        a.mov_reg_reg(X0, X19);
+        a.mov_data_addr(X1, SOCKADDR_OFFSET);
+        a.movz_reg(X2, SOCKADDR_LEN as u16);
+        a.mov_imm64(X8, SYS_BIND);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GE, "listen_tcp_bound");
+
+        a.mov_reg_reg(X0, X19);
+        a.mov_imm64(X8, SYS_CLOSE);
+        a.svc();
+        a.b_label("listen_tcp_fail");
+
+        a.label("listen_tcp_bound");
+        a.mov_reg_reg(X0, X19);
+        a.movz_reg(X1, 16); // backlog
+        a.mov_imm64(X8, SYS_LISTEN);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GE, "listen_tcp_ok");
+
+        a.mov_reg_reg(X0, X19);
+        a.mov_imm64(X8, SYS_CLOSE);
+        a.svc();
+        a.b_label("listen_tcp_fail");
+
+        a.label("listen_tcp_ok");
+        a.mov_reg_reg(X0, X19);
+        a.b_label("listen_tcp_done");
+
+        a.label("listen_tcp_fail");
+        a.mov_imm64(X0, (-1i64) as u64);
+
+        a.label("listen_tcp_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X30, SP, 24);
+        a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// `accept_tcp`: X0 = listener number. Returns a connection number, or -1.
+    fn emit_accept_tcp(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("accept_tcp");
+        a.sub_imm(SP, SP, 16);
+        a.str(X30, SP, 0);
+        a.movz_reg(X1, 0);
+        a.movz_reg(X2, 0);
+        a.mov_imm64(X8, SYS_ACCEPT);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GE, "accept_tcp_done");
+        a.mov_imm64(X0, (-1i64) as u64);
+        a.label("accept_tcp_done");
+        a.ldr(X30, SP, 0);
+        a.add_imm(SP, SP, 16);
+        a.ret();
+    }
+
+    /// `send_text`: X0 = text, X1 = socket. Writes every byte. Bad sockets are
+    /// ignored, just as a failed write is.
+    fn emit_send_text(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("send_text");
+        a.sub_imm(SP, SP, 48);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X30, SP, 32);
+
+        a.mov_reg_reg(X19, X0); // text
+        a.mov_reg_reg(X20, X1); // socket
+        a.ldr(X21, X19, 0); // bytes left
+        a.add_imm(X22, X19, 8); // cursor
+
+        a.label("send_text_loop");
+        a.cmp_reg_reg(X21, XZR);
+        a.bcond_label(CC_EQ, "send_text_done");
+        a.mov_reg_reg(X0, X20);
+        a.mov_reg_reg(X1, X22);
+        a.mov_reg_reg(X2, X21);
+        a.mov_imm64(X8, SYS_WRITE);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LE, "send_text_done");
+        a.add_reg_reg(X22, X22, X0);
+        a.sub_reg_reg(X21, X21, X0);
+        a.b_label("send_text_loop");
+
+        a.label("send_text_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X30, SP, 32);
+        a.add_imm(SP, SP, 48);
+        a.ret();
+    }
+
+    /// `close_socket`: X0 = socket number.
+    fn emit_close_socket(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("close_socket");
+        a.sub_imm(SP, SP, 16);
+        a.str(X30, SP, 0);
+        a.mov_imm64(X8, SYS_CLOSE);
+        a.svc();
+        a.ldr(X30, SP, 0);
+        a.add_imm(SP, SP, 16);
+        a.ret();
+    }
+
+    /// `raw_terminal_on`: put standard input in raw mode once, remembering the
+    /// old settings. Pipes and redirection simply leave it alone.
+    fn emit_raw_terminal_on(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("raw_terminal_on");
+        a.sub_imm(SP, SP, 64);
+        a.str(X19, SP, 0);
+        a.str(X20, SP, 8);
+        a.str(X21, SP, 16);
+        a.str(X22, SP, 24);
+        a.str(X23, SP, 32);
+        a.str(X30, SP, 40);
+
+        a.mov_data_addr(X1, RAW_FLAG_OFFSET);
+        a.ldr(X2, X1, 0);
+        a.cmp_reg_reg(X2, XZR);
+        a.bcond_label(CC_NE, "raw_terminal_on_done");
+
+        a.movz_reg(X0, 0); // stdin
+        a.mov_imm64(X1, TCGETS);
+        a.mov_data_addr(X2, TERMIOS_SAVED_OFFSET);
+        a.mov_imm64(X8, SYS_IOCTL);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "raw_terminal_on_done");
+
+        a.mov_data_addr(X19, TERMIOS_SAVED_OFFSET);
+        a.mov_data_addr(X20, TERMIOS_WORK_OFFSET);
+        a.movz_reg(X21, TERMIOS_BYTES as u16);
+        a.label("raw_terminal_copy");
+        a.ldrb(X22, X19, 0);
+        a.strb(X22, X20, 0);
+        a.add_imm(X19, X19, 1);
+        a.add_imm(X20, X20, 1);
+        a.sub_imm(X21, X21, 1);
+        a.cmp_reg_reg(X21, XZR);
+        a.bcond_label(CC_NE, "raw_terminal_copy");
+
+        // Clear ECHO (0x08) and ICANON (0x02) in c_lflag's low byte.
+        a.mov_data_addr(X20, TERMIOS_WORK_OFFSET);
+        a.ldrb(X22, X20, 12);
+        a.mov_imm64(X23, !0x0Au64);
+        a.and_reg_reg(X22, X22, X23);
+        a.strb(X22, X20, 12);
+        // c_cc[VTIME] = 0, c_cc[VMIN] = 1.
+        a.strb(XZR, X20, 22);
+        a.movz_reg(X22, 1);
+        a.strb(X22, X20, 23);
+
+        a.movz_reg(X0, 0);
+        a.mov_imm64(X1, TCSETS);
+        a.mov_data_addr(X2, TERMIOS_WORK_OFFSET);
+        a.mov_imm64(X8, SYS_IOCTL);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_LT, "raw_terminal_on_done");
+
+        a.mov_data_addr(X1, RAW_FLAG_OFFSET);
+        a.movz_reg(X2, 1);
+        a.str(X2, X1, 0);
+
+        a.label("raw_terminal_on_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X20, SP, 8);
+        a.ldr(X21, SP, 16);
+        a.ldr(X22, SP, 24);
+        a.ldr(X23, SP, 32);
+        a.ldr(X30, SP, 40);
+        a.add_imm(SP, SP, 64);
+        a.ret();
+    }
+
+    /// `raw_terminal_off`: restore the saved terminal settings, if any.
+    fn emit_raw_terminal_off(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("raw_terminal_off");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X30, SP, 8);
+
+        a.mov_data_addr(X1, RAW_FLAG_OFFSET);
+        a.ldr(X2, X1, 0);
+        a.cmp_reg_reg(X2, XZR);
+        a.bcond_label(CC_EQ, "raw_terminal_off_done");
+
+        a.movz_reg(X0, 0);
+        a.mov_imm64(X1, TCSETS);
+        a.mov_data_addr(X2, TERMIOS_SAVED_OFFSET);
+        a.mov_imm64(X8, SYS_IOCTL);
+        a.svc();
+        a.mov_data_addr(X1, RAW_FLAG_OFFSET);
+        a.str(XZR, X1, 0);
+
+        a.label("raw_terminal_off_done");
+        a.ldr(X19, SP, 0);
+        a.ldr(X30, SP, 8);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
+    /// `read_key`: one byte from standard input as text, or empty text at EOF.
+    fn emit_read_key(&mut self) {
+        let a = &mut self.asm;
+
+        a.label("read_key");
+        a.sub_imm(SP, SP, 32);
+        a.str(X19, SP, 0);
+        a.str(X30, SP, 8);
+
+        a.movz_reg(X0, 9);
+        a.bl_label("heap_alloc");
+        a.mov_reg_reg(X19, X0);
+        a.movz_reg(X1, 1);
+        a.str(X1, X19, 0);
+        a.add_imm(X1, X19, 8);
+        a.movz_reg(X0, 0); // stdin
+        a.movz_reg(X2, 1);
+        a.mov_imm64(X8, SYS_READ);
+        a.svc();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_GT, "read_key_done");
+        a.str(XZR, X19, 0);
+
+        a.label("read_key_done");
+        a.mov_reg_reg(X0, X19);
+        a.ldr(X19, SP, 0);
+        a.ldr(X30, SP, 8);
+        a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
     /// `text_copy`: X0 = text, result is a fresh copy of it in X0.
     fn emit_text_copy(&mut self) {
         let a = &mut self.asm;
@@ -3555,6 +4175,11 @@ impl Codegen {
         let a = &mut self.asm;
 
         a.label("runtime_fail");
+        // Restore the terminal before the final message; the message pointer
+        // lives in a callee-saved register across the helper call.
+        a.mov_reg_reg(X19, X0);
+        a.bl_label("raw_terminal_off");
+        a.mov_reg_reg(X0, X19);
         a.ldr(X2, X0, 0);
         a.add_imm(X1, X0, 8);
         a.mov_imm64(X0, 2); // fd = stderr

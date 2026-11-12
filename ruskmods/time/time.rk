@@ -1,0 +1,55 @@
+# time.rk — clock and duration helpers written in Rusk.
+#
+# Import it with `import "time/time"`. Everything works on whole seconds and
+# uses one global namespace, so public names begin with `time_`.
+
+# One or two digits, zero padded. Only 0 through 99 are meaningful.
+to time_pad2 with n as a number:
+    let digits be "0123456789"
+    let tens be n / 10
+    let ones be n - tens * 10
+    give back letter (tens + 1) of digits + letter (ones + 1) of digits
+
+# True when the clock fields name a real time of day.
+to time_is_valid with hour as a number and minute as a number and second as a number:
+    if hour is less than 0 or hour is more than 23:
+        give back false
+    if minute is less than 0 or minute is more than 59:
+        give back false
+    give back second is at least 0 and second is at most 59
+
+# Seconds since midnight.
+to time_seconds_of_day with hour as a number and minute as a number and second as a number:
+    give back hour * 3600 + minute * 60 + second
+
+# `HH:MM:SS` from three fields.
+to time_format with hour as a number and minute as a number and second as a number:
+    give back (time_pad2 with hour) + ":" + (time_pad2 with minute) + ":" + (time_pad2 with second)
+
+# `HH:MM:SS` from seconds since midnight. Values past a day keep counting hours.
+to time_format_seconds with total as a number:
+    let safe be total
+    if safe is less than 0:
+        set safe to 0 - safe
+    let hour be safe / 3600
+    let minute be safe / 60 - hour * 60
+    let second be safe - (safe / 60) * 60
+    if total is less than 0:
+        give back "-" + (time_pad2 with hour) + ":" + (time_pad2 with minute) + ":" + (time_pad2 with second)
+    give back (time_pad2 with hour) + ":" + (time_pad2 with minute) + ":" + (time_pad2 with second)
+
+# A duration such as `2h 05m 09s`.
+to time_format_duration with total as a number:
+    let safe be total
+    if safe is less than 0:
+        set safe to 0 - safe
+    let hour be safe / 3600
+    let minute be safe / 60 - hour * 60
+    let second be safe - (safe / 60) * 60
+    give back (time_pad2 with hour) + "h " + (time_pad2 with minute) + "m " + (time_pad2 with second) + "s"
+
+# Seconds from two times of day. Negative when the second is earlier.
+to time_between with first_hour as a number and first_minute as a number and first_second as a number and second_hour as a number and second_minute as a number and second_second as a number:
+    let first be time_seconds_of_day with first_hour and first_minute and first_second
+    let second be time_seconds_of_day with second_hour and second_minute and second_second
+    give back second - first

@@ -635,6 +635,53 @@ impl Drop for Terminal {
     }
 }
 
+/// Standard input in raw mode, restored when this value is dropped. Pipes and
+/// redirected input have no terminal attributes, so they get `None`.
+#[cfg(unix)]
+pub struct RawMode {
+    fd: c_int,
+    original: Termios,
+}
+
+#[cfg(unix)]
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        let _ = unsafe { tcsetattr(self.fd, TCSANOW, &self.original) };
+    }
+}
+
+/// Put standard input in raw mode without touching the screen. Echo and line
+/// buffering are off, but Ctrl-C still signals as usual.
+#[cfg(unix)]
+pub fn enter_raw_input() -> io::Result<Option<RawMode>> {
+    if !io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    let fd = io::stdin().as_raw_fd();
+    let mut original = std::mem::MaybeUninit::<Termios>::uninit();
+    if unsafe { tcgetattr(fd, original.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let original = unsafe { original.assume_init() };
+    let mut raw = original;
+    raw.c_lflag &= !(ECHO | ICANON);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if unsafe { tcsetattr(fd, TCSANOW, &raw) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Some(RawMode { fd, original }))
+}
+
+/// Windows has no POSIX terminal attributes, so raw mode is a no-op there.
+#[cfg(not(unix))]
+pub struct RawMode;
+
+#[cfg(not(unix))]
+pub fn enter_raw_input() -> io::Result<Option<RawMode>> {
+    Ok(None)
+}
+
 /// Windows has no POSIX terminal, so the full-screen session falls back to the
 /// ordinary line session. The ANSI buffer and key decoder are still available
 /// so the rest of the tool behaves the same way.

@@ -187,6 +187,20 @@ impl Asm {
         }
     }
 
+    pub fn and_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
+        match &mut self.inner {
+            Inner::AArch64(a) => a.and_reg_reg(rd, rn, rm),
+            Inner::X86_64(a) => a.and_reg_reg(rd, rn, rm),
+        }
+    }
+
+    pub fn orr_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
+        match &mut self.inner {
+            Inner::AArch64(a) => a.orr_reg_reg(rd, rn, rm),
+            Inner::X86_64(a) => a.orr_reg_reg(rd, rn, rm),
+        }
+    }
+
     pub fn mul_reg_reg(&mut self, rd: u8, rn: u8, rm: u8) {
         match &mut self.inner {
             Inner::AArch64(a) => a.mul_reg_reg(rd, rn, rm),

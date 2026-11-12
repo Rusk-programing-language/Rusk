@@ -1,0 +1,224 @@
+# json.rk — small JSON writer and reader written in Rusk.
+#
+# Import it with `import "json/json"`. This is deliberately small: it builds
+# JSON text and reads one flat object at a time. It is not a full JSON parser,
+# and it has no separate value type. Encode values to text with the helpers
+# below, then join them with `json_array` or `json_object`.
+
+# Reverse some text, one letter at a time.
+to json_reverse with s as text:
+    let out be ""
+    let i be length of s
+    while i is at least 1:
+        set out to out + (letter i of s)
+        set i to i - 1
+    give back out
+
+# A whole number as decimal text, including a minus sign when negative.
+to json_number with n as a number:
+    if n is 0:
+        give back "0"
+    let value be n
+    let sign be ""
+    if value is less than 0:
+        set sign to "-"
+        set value to 0 - value
+    let digits be ""
+    while value is more than 0:
+        let digit be value - (value / 10) * 10
+        set digits to digits + (letter (digit + 1) of "0123456789")
+        set value to value / 10
+    give back sign + (json_reverse with digits)
+
+# True or false as JSON text.
+to json_bool with flag as a truth value:
+    if flag:
+        give back "true"
+    give back "false"
+
+# Escape the inside of a JSON string. Quotes, backslashes, newlines, tabs, and
+# carriage returns are handled. Other control bytes are left alone.
+to json_escape with s as text:
+    let out be ""
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "\"":
+            set out to out + "\\\""
+        otherwise if ch is "\\":
+            set out to out + "\\\\"
+        otherwise if ch is "\n":
+            set out to out + "\\n"
+        otherwise if ch is "\t":
+            set out to out + "\\t"
+        otherwise if ch is "\r":
+            set out to out + "\\r"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+# A complete JSON string, wrapped in quotes.
+to json_string with s as text:
+    give back "\"" + (json_escape with s) + "\""
+
+# Undo the escapes that `json_escape` writes. Unknown escapes keep the escaped
+# letter and drop the backslash; `\uXXXX` is passed through as `uXXXX`.
+to json_unescape with s as text:
+    let out be ""
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "\\" and i is less than n:
+            set i to i + 1
+            let next be letter i of s
+            if next is "n":
+                set out to out + "\n"
+            otherwise if next is "t":
+                set out to out + "\t"
+            otherwise if next is "r":
+                set out to out + "\r"
+            otherwise:
+                set out to out + next
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+# One `"key":value` pair. The value must already be JSON text.
+to json_field with key as text and value as text:
+    give back (json_string with key) + ":" + value
+
+# Join encoded values into an array.
+to json_array with items as a view of a list of text:
+    let out be "["
+    let first be true
+    for each item in items:
+        if not first:
+            set out to out + ","
+        set out to out + item
+        set first to false
+    give back out + "]"
+
+# Join encoded fields into an object.
+to json_object with fields as a view of a list of text:
+    let out be "{"
+    let first be true
+    for each field in fields:
+        if not first:
+            set out to out + ","
+        set out to out + field
+        set first to false
+    give back out + "}"
+
+# The 1-based position of `needle` in `haystack`, or 0 when it is absent.
+to json_find with haystack as text and needle as text:
+    let n be length of needle
+    if n is 0:
+        give back 1
+    let last be (length of haystack) - n + 1
+    if last is less than 1:
+        give back 0
+    let i be 1
+    while i is at most last:
+        if part i to (i + n - 1) of haystack is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+# True when `text` has balanced braces and brackets and closed strings.
+# This checks structure only; it does not validate numbers or literals.
+to json_valid with text as text:
+    let depth be 0
+    let in_string be false
+    let i be 1
+    let n be length of text
+    while i is at most n:
+        let ch be letter i of text
+        if in_string:
+            if ch is "\\":
+                set i to i + 1
+            otherwise if ch is "\"":
+                set in_string to false
+        otherwise:
+            if ch is "\"":
+                set in_string to true
+            otherwise if ch is "{":
+                set depth to depth + 1
+            otherwise if ch is "[":
+                set depth to depth + 1
+            otherwise if ch is "}":
+                set depth to depth - 1
+                if depth is less than 0:
+                    give back false
+            otherwise if ch is "]":
+                set depth to depth - 1
+                if depth is less than 0:
+                    give back false
+        set i to i + 1
+    give back depth is 0 and not in_string
+
+# Skip spaces, tabs, newlines, and carriage returns from `i`.
+to json_skip_space with text as text and i as a number:
+    let at be i
+    let n be length of text
+    while at is at most n:
+        let ch be letter at of text
+        if ch is " " or ch is "\t" or ch is "\n" or ch is "\r":
+            set at to at + 1
+        otherwise:
+            give back at
+    give back at
+
+# The raw JSON value for the first `"key":` pair, or empty text when the key is
+# absent. A string value is returned already unescaped; other values are raw
+# text with surrounding space removed. This is a flat-object reader.
+to json_extract with text as text and key as text:
+    let needle be json_string with key
+    let size be length of needle
+    let at be json_find with (copy of text) and needle
+    if at is 0:
+        give back ""
+    let i be at + size
+    let n be length of text
+    set i to json_skip_space with (copy of text) and i
+    if i is more than n or letter i of text is not ":":
+        give back ""
+    set i to json_skip_space with (copy of text) and (i + 1)
+    if i is more than n:
+        give back ""
+    if letter i of text is "\"":
+        let start be i + 1
+        let j be start
+        while j is at most n:
+            let ch be letter j of text
+            if ch is "\\":
+                set j to j + 2
+            otherwise if ch is "\"":
+                give back json_unescape with (part start to (j - 1) of text)
+            otherwise:
+                set j to j + 1
+        give back ""
+    let value_start be i
+    while i is at most n:
+        let value_ch be letter i of text
+        if value_ch is "," or value_ch is "}" or value_ch is "]" or value_ch is " " or value_ch is "\t" or value_ch is "\n" or value_ch is "\r":
+            break
+        set i to i + 1
+    if i is value_start:
+        give back ""
+    give back part value_start to (i - 1) of text
+
+# True when the key appears with a colon after it.
+to json_has with text as text and key as text:
+    let needle be json_string with key
+    let size be length of needle
+    let at be json_find with (copy of text) and needle
+    if at is 0:
+        give back false
+    let i be json_skip_space with (copy of text) and (at + size)
+    if i is more than length of text:
+        give back false
+    give back letter i of text is ":"
