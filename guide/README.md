@@ -101,6 +101,32 @@ updates the Windows user `PATH` via PowerShell. New terminals then find `rusk`
 automatically. Use `--no-modify-path` to skip both profile and `PATH` edits, or
 `--bin-dir` to pick the installation directory.
 
+Without Git Bash, paste this into PowerShell. It downloads the Windows release
+with `curl.exe`, unpacks it with `tar.exe`, and adds it to the user `PATH`:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
+# $tag = 'v1.1.4'   # uncomment to pin a release
+$version = $tag.TrimStart('v')
+$asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
+$dest = Join-Path $env:LOCALAPPDATA 'Rusk'
+$tarball = Join-Path $env:TEMP $asset
+
+New-Item -ItemType Directory -Force $dest | Out-Null
+curl.exe -fsSL "https://github.com/Rusk-programing-language/Rusk/releases/download/$tag/$asset" -o $tarball
+tar.exe -xzf $tarball -C $dest --strip-components 1
+Remove-Item $tarball
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (-not $userPath) { $userPath = '' }
+if ($userPath -notlike "*$dest*") {
+    [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ";$dest"), 'User')
+}
+$env:Path = "$env:Path;$dest"
+rusk version
+```
+
 Check the version:
 
 ```console

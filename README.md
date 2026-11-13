@@ -113,6 +113,39 @@ to leave profiles alone, or `--bin-dir` to choose the directory yourself. A
 plain PowerShell or `cmd.exe` session has no `sh`, so use Git Bash, MSYS2, or
 Cygwin for the installer.
 
+If you do not want Git Bash, paste this into a normal PowerShell window on
+Windows 10 or 11. It asks GitHub for the latest release, downloads the Windows
+build with `curl.exe`, unpacks it with `tar.exe`, and adds it to your user
+`PATH`:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
+# To pin a release instead of taking the latest, replace the line above with:
+# $tag = 'v1.1.4'
+$version = $tag.TrimStart('v')
+$asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
+$dest = Join-Path $env:LOCALAPPDATA 'Rusk'
+$tarball = Join-Path $env:TEMP $asset
+
+New-Item -ItemType Directory -Force $dest | Out-Null
+curl.exe -fsSL "https://github.com/Rusk-programing-language/Rusk/releases/download/$tag/$asset" -o $tarball
+tar.exe -xzf $tarball -C $dest --strip-components 1
+Remove-Item $tarball
+
+$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if (-not $userPath) { $userPath = '' }
+if ($userPath -notlike "*$dest*") {
+    [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ";$dest"), 'User')
+}
+$env:Path = "$env:Path;$dest"
+rusk version
+```
+
+(`curl.exe` and `tar.exe` ship with Windows 10 version 1803 and newer. The
+installer script itself still needs a POSIX shell, which is why this PowerShell
+path downloads the release directly.)
+
 ## A taste of the language
 
 ```rusk
@@ -670,14 +703,18 @@ stage, not a claim of this release.
 
 Rusk is aimed at small, self-contained Linux programs: command-line tools,
 calculators, text and file filters, teaching examples, and experiments in
-compiler and language design. A baked program is a single static ELF with no
-runtime, so it is easy to copy to a server, container, or Termux device.
+compiler and language design. v1.1.4 adds IPv4 TCP sockets and raw terminal
+input, so small networked tools and keyboard-driven terminal utilities fit too:
+a chat or echo server, a port probe, a file-transfer helper, a menu, or a
+single-key browser. A baked program is a single static ELF with no runtime, so
+it is easy to copy to a server, container, or Termux device.
 
-It is a young language, and that limits the honest answer. Today it has no
-networking, threads, GUI toolkit, package registry, or Windows/macOS output. It
-is not ready for large applications, services, embedded systems, or libraries
-that other languages call into. Treat it as a compact AOT language for small
-programs, not as a general-purpose production platform yet.
+It is a young language, and that limits the honest answer. Networking is
+blocking TCP only, with no DNS, TLS, UDP, or IPv6, and there are still no
+threads, GUI toolkit, package registry, or Windows/macOS output. It is not ready
+for large applications, services, embedded systems, or libraries that other
+languages call into. Treat it as a compact AOT language for small programs, not
+as a general-purpose production platform yet.
 
 ## How it compares
 
