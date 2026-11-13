@@ -5,7 +5,7 @@ time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies.
 
-This guide is for v1.1.4. For the exact language rules, see
+This guide is for v1.1.5. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -107,7 +107,7 @@ with `curl.exe`, unpacks it with `tar.exe`, and adds it to the user `PATH`:
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
-# $tag = 'v1.1.4'   # uncomment to pin a release
+# $tag = 'v1.1.5'   # uncomment to pin a release
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -131,7 +131,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.4 — code, baked ahead of time
+rusk 1.1.5 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -953,7 +953,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.4 — an English-like language
+Rusk 1.1.5 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"

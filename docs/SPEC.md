@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.1.4
+# The Rusk Language — Specification v1.1.5
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
 emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.1.4, Linux on AArch64 and x86-64**. The compiler also builds and
+Status: **v1.1.5, Linux on AArch64 and x86-64**. The compiler also builds and
 runs on Windows x86-64, but every program it emits targets Linux. Everything
 here is implemented and tested; anything not here does not exist yet.
 
@@ -872,7 +872,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.4 — an English-like language
+Rusk 1.1.5 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1139,7 +1139,7 @@ function values in lists, functions that give back functions, a
 register-allocating x86-64 encoder, a relocation-aware data layout, and a
 self-hosting interpreter. v1.1.3 added the systems core: directory and process
 operations, the whole command line as a list, a growable heap, and 128
-parameters. v1.1.4 adds IPv4 TCP sockets and raw terminal input. What remains:
+parameters. v1.1.5 adds IPv4 TCP sockets and raw terminal input. What remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression

@@ -28,15 +28,17 @@ syscalls.
 
 ## Status
 
-v1.1.4 is the networking-and-terminal release. Programs can open IPv4 TCP
-connections with `connect to HOST at PORT`, listen with `listen at PORT`, accept
-with `accept from LISTENER`, exchange text with `send`, `read line from`, and
-`read all from`, and close descriptors with `close`. They can also put standard
-input into raw mode with `turn on raw terminal`, read one byte at a time with
-`read key`, and restore the terminal with `turn off raw terminal`; normal exit
-and `stop with` restore it automatically. v1.1.3 added the systems core:
-directory operations, `run command`, `all arguments`, a growable `mmap`-backed
-heap with a free list, and the 128-parameter limit.
+v1.1.5 is the networking-and-terminal release, a patch on v1.1.4 that fixes
+large heap growth and directory listing on AArch64 under emulation. Programs
+can open IPv4 TCP connections with `connect to HOST at PORT`, listen with
+`listen at PORT`, accept with `accept from LISTENER`, exchange text with
+`send`, `read line from`, and `read all from`, and close descriptors with
+`close`. They can also put standard input into raw mode with `turn on raw
+terminal`, read one byte at a time with `read key`, and restore the terminal
+with `turn off raw terminal`; normal exit and `stop with` restore it
+automatically. v1.1.3 added the systems core: directory operations,
+`run command`, `all arguments`, a growable `mmap`-backed heap with a free
+list, and the 128-parameter limit.
 
 v1.1 makes functions first-class: **function-typed parameters**, **function
 values in lists**, **functions that give back functions**, and closures that
@@ -95,7 +97,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.1.4
+sh toastset --version 1.1.5
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -122,7 +124,7 @@ build with `curl.exe`, unpacks it with `tar.exe`, and adds it to your user
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
 # To pin a release instead of taking the latest, replace the line above with:
-# $tag = 'v1.1.4'
+# $tag = 'v1.1.5'
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -301,7 +303,7 @@ unreadable file, or a path too long for the runtime scratch area, is reported
 as a Rusk error. `rusk run file.rk one two` passes `one` and `two` through to
 `argument 1` and `argument 2`.
 
-The v1.1.4 systems surface adds IPv4 TCP and raw terminal input:
+The v1.1.5 systems surface adds IPv4 TCP and raw terminal input:
 
 ```rusk
 let server be listen at 8080
@@ -486,7 +488,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.4 — an English-like language
+Rusk 1.1.5 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -634,7 +636,7 @@ Runtime facts worth knowing:
   relocation pass. Data addresses are patched into the finished machine code,
   so growing the text section moves the data instead of colliding with it.
 
-## What v1.1.4 doesn't do yet
+## What v1.1.5 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -670,7 +672,7 @@ Honest list, so the docs don't lie:
   backend. The compiler itself also runs on Windows x86-64, but its output is
   still a Linux ELF, so `rusk run` is unavailable there.
 - GUI toolkits, pthread-style threads, and a package registry are not in this
-  release. They are later layers, not a claim of v1.1.4.
+  release. They are later layers, not a claim of v1.1.5.
 - The x86-64 register allocator works within straight-line blocks and spills at
   every branch and call. It is much closer to AArch64 than the old
   memory-backed encoder, but it is not a global allocator yet.
@@ -704,7 +706,7 @@ stage, not a claim of this release.
 
 Rusk is aimed at small, self-contained Linux programs: command-line tools,
 calculators, text and file filters, teaching examples, and experiments in
-compiler and language design. v1.1.4 adds IPv4 TCP sockets and raw terminal
+compiler and language design. v1.1.5 adds IPv4 TCP sockets and raw terminal
 input, so small networked tools and keyboard-driven terminal utilities fit too:
 a chat or echo server, a port probe, a file-transfer helper, a menu, or a
 single-key browser. A baked program is a single static ELF with no runtime, so
