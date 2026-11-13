@@ -3263,7 +3263,10 @@ impl Codegen {
         a.bl_label("path_copy");
         a.mov_imm64(X0, AT_FDCWD);
         a.mov_data_addr(X1, PATH_OFFSET);
-        a.mov_imm64(X2, 0x1_0000); // O_RDONLY | O_DIRECTORY
+        // Open read-only and let `getdents64` reject non-directories. The
+        // `O_DIRECTORY` bit is not the same value on aarch64 and x86-64, so
+        // asking for it here breaks the cross-emulated case.
+        a.movz_reg(X2, 0); // O_RDONLY
         a.movz_reg(X3, 0);
         a.mov_imm64(X8, SYS_OPENAT);
         a.svc();
