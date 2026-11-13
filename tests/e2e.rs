@@ -1197,6 +1197,19 @@ say down with 1 and 0
 }
 
 #[test]
+fn text_can_grow_past_the_first_heap_chunk() {
+    let src = "\
+let s be \"0123456789abcdef\"
+repeat 18 times:
+    set s to s + s
+say length of s
+";
+    let (stdout, code) = run("big_text", src);
+    assert_eq!(stdout, "4194304\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn running_out_of_heap_stops_with_a_sentence() {
     let src = "\
 let s be \"0123456789abcdef\"

@@ -1051,7 +1051,9 @@ The heap is a chain of `mmap`-backed chunks. Every block carries a 16-byte
 header holding its size and a link to the next free block; `heap_alloc` walks
 that free list before bumping the current chunk, and `heap_free` puts list and
 input buffers back. When a chunk fills, another one is mapped and linked.
-Joined text, list buffers, and input values all come from this heap.
+Joined text, list buffers, and input values all come from this heap. Mapped
+chunks are capped at 1 GiB in total; a program that asks for more stops with
+`burnt: the program ran out of memory`.
 
 A list is a pointer to `[len: u64][capacity: u64][item: i64]...`, allocated
 from the heap. The ownership pass guarantees that only
@@ -1097,7 +1099,9 @@ value; the ownership pass is what prevents it from being moved or changed.
 - Integer overflow wraps silently, matching two's-complement machine behavior.
 - Joined text and list literals come from an `mmap`-backed heap that grows in
   chunks and reuses freed list and input buffers. Ordinary text joins are not
-  reclaimed, so exhausting memory is still reported rather than collected.
+  reclaimed, so exhausting memory is still reported rather than collected. The
+  mapped heap is capped at 1 GiB, so exhaustion is reported before the host
+  itself runs out of memory.
 - Ownership is single-owner. `a view of VALUE` and `as a view of ...` lend a
   value read-only, but views cannot be moved, changed, or stored, and they do
   not outlive the owner's frame. `copy of` is the escape hatch.

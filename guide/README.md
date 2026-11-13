@@ -1056,6 +1056,7 @@ and you can continue typing.
   check` is useful for editor/CI loops.
 - **A list keeps growing memory usage** — the heap grows in `mmap` chunks.
   Freed list and input buffers are reused, but text joining still allocates.
+  Growth stops at 1 GiB with `burnt: the program ran out of memory`.
 - **`run command` says 127** — `/bin/sh` could not be started, or the shell
   exited with 127 itself.
 - **Text positions look odd** — `length of`, `letter`, and `part` count bytes,
@@ -1165,7 +1166,8 @@ Backend limits worth knowing:
   data area follows the final text size, so large programs grow instead of
   colliding.
 - Lists and joined text share a growable heap made of mapped chunks. Freed list
-  and input buffers are reused; other allocations are not reclaimed.
+  and input buffers are reused; other allocations are not reclaimed. The
+  mapped heap stops at 1 GiB and then reports `burnt`.
 - List capacity never shrinks.
 - A list can hold at most one kind, and lists cannot be compared.
 - Function values cannot be compared. Dynamic calls check arity and argument

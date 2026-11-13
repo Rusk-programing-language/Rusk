@@ -595,8 +595,9 @@ Runtime facts worth knowing:
 - The heap is a list of `mmap`-backed chunks. Each block has a 16-byte header
   (`size`, `next free`), allocation walks the free list before bumping the
   current chunk, and freed list or input buffers go back on that list. When a
-  chunk fills, another one is mapped, so memory grows with the program instead
-  of stopping at a fixed limit.
+  chunk fills, another one is mapped, so memory grows with the program. Growth
+  stops at 1 GiB of mapped chunks; a program that asks for more reports
+  `burnt: the program ran out of memory`.
 - Lists are stored as `[len: u64][capacity: u64][item: i64]...` in that heap.
   A list value is a pointer, but the ownership checker allows only
   one live name for it, so `let b be a` moves the list and `copy of a` makes a
@@ -638,8 +639,8 @@ Runtime facts worth knowing:
 Honest list, so the docs don't lie:
 
 - Text is immutable. Joining allocates from the heap and nothing is reclaimed
-  automatically, though the heap now grows in chunks instead of stopping at a
-  fixed 1 MiB ceiling.
+  automatically, though the heap now grows in chunks up to a 1 GiB cap instead
+  of stopping at a fixed 1 MiB ceiling.
 - Ownership is single-owner. A `view` lends a value read-only, but a view
   cannot be changed, moved, stored, or used where an owner is needed; `copy of`
   is still the escape hatch. Views do not extend a value's lifetime beyond the

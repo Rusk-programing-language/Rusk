@@ -35,8 +35,13 @@ const HEAP_PTR_OFFSET: u64 = 0x1000;
 const HEAP_END_OFFSET: u64 = 0x1008;
 const HEAP_FREE_OFFSET: u64 = 0x1010;
 const HEAP_CHUNKS_OFFSET: u64 = 0x1018;
+/// Total bytes of heap chunks mapped so far, capped by `HEAP_MAX`.
+const HEAP_TOTAL_OFFSET: u64 = 0x1020;
 /// The first heap chunk. More chunks are mapped when this one fills up.
 const HEAP_CHUNK_SIZE: u64 = 0x10_0000;
+/// The heap stops growing past this many mapped bytes. The cap keeps a runaway
+/// join from eating the whole machine; it reports `burnt` instead.
+const HEAP_MAX: u64 = 0x4000_0000; // 1 GiB
 /// Where the runtime keeps the current call depth.
 const DEPTH_OFFSET: u64 = 0x1800;
 /// Where the initial stack pointer (argc/argv/envp) is remembered.
@@ -174,6 +179,8 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     cg.asm.mov_data_addr(X1, HEAP_FREE_OFFSET);
     cg.asm.str(XZR, X1, 0);
     cg.asm.mov_data_addr(X1, HEAP_CHUNKS_OFFSET);
+    cg.asm.str(XZR, X1, 0);
+    cg.asm.mov_data_addr(X1, HEAP_TOTAL_OFFSET);
     cg.asm.str(XZR, X1, 0);
     cg.asm.mov_imm64(X0, HEAP_CHUNK_SIZE);
     cg.asm.bl_label("heap_grow");
@@ -2215,8 +2222,8 @@ impl Codegen {
     /// `text_concat`: X0 = left, X1 = right, result in X0.
     ///
     /// Copies both byte blobs into the bump-allocated heap as one
-    /// length-prefixed string. There is no bound check yet; the heap is
-    /// 1 MiB, which is generous for a language this size.
+    /// length-prefixed string. `heap_alloc` grows the heap in chunks and
+    /// reports `burnt` once the mapped heap reaches its cap.
     fn emit_text_concat(&mut self) {
         let a = &mut self.asm;
 
@@ -4026,6 +4033,21 @@ impl Codegen {
         a.udiv_reg_reg(X1, X1, X2);
         a.mul_reg_reg(X1, X1, X2);
         a.mov_reg_reg(X12, X1);
+        // The chunk header takes the first 16 bytes, so the mapping must be
+        // 16 bytes larger than the block it has to hold. Without this the
+        // allocation never fits and `heap_alloc` maps chunks forever.
+        a.add_imm(X12, X12, 16);
+
+        // Refuse to map past the heap cap. The OOM killer would otherwise pick
+        // this process once the host runs out of memory, which is much worse
+        // than a clear `burnt` message. `heap_fail` leaves with status 1.
+        a.mov_data_addr(X13, HEAP_TOTAL_OFFSET);
+        a.ldr(X14, X13, 0);
+        a.add_reg_reg(X14, X14, X12);
+        a.mov_imm64(X15, HEAP_MAX);
+        a.cmp_reg_reg(X14, X15);
+        a.bcond_label(CC_GT, "heap_fail");
+        a.str(X14, X13, 0);
 
         a.movz_reg(X0, 0); // let the kernel choose the address
         a.mov_reg_reg(X1, X12);
