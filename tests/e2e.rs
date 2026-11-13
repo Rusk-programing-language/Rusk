@@ -906,9 +906,7 @@ fn a_program_can_import_several_modules() {
     let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
     let out = dir.join("main");
     rusk::elf::write(&out, &bytes).unwrap();
-    let result = program_command(&out)
-        .output()
-        .expect("imported program should start");
+    let result = output_with_retry(&mut program_command(&out));
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "5\n8\n");
@@ -939,9 +937,7 @@ fn modules_can_be_named_and_selectively_imported() {
     let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
     let out = dir.join("main");
     rusk::elf::write(&out, &bytes).unwrap();
-    let result = program_command(&out)
-        .output()
-        .expect("module program should start");
+    let result = output_with_retry(&mut program_command(&out));
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n42\n10\nhi!\n");
@@ -964,9 +960,7 @@ fn a_namespaced_modules_own_imports_stay_private() {
     let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
     let out = dir.join("main");
     rusk::elf::write(&out, &bytes).unwrap();
-    let result = program_command(&out)
-        .output()
-        .expect("private import program should start");
+    let result = output_with_retry(&mut program_command(&out));
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "7\n");
@@ -992,9 +986,7 @@ fn export_includes_a_file_and_end_stops_it() {
     let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
     let out = dir.join("main");
     rusk::elf::write(&out, &bytes).unwrap();
-    let result = program_command(&out)
-        .output()
-        .expect("exported program should start");
+    let result = output_with_retry(&mut program_command(&out));
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "42\n");
@@ -1016,9 +1008,7 @@ fn export_can_take_selected_functions() {
     let (bytes, _) = rusk::bake_path_with_target(&main, e2e_target()).unwrap();
     let out = dir.join("main");
     rusk::elf::write(&out, &bytes).unwrap();
-    let result = program_command(&out)
-        .output()
-        .expect("selected export program should start");
+    let result = output_with_retry(&mut program_command(&out));
     let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(String::from_utf8_lossy(&result.stdout), "10\n");
@@ -1345,7 +1335,10 @@ say file exists {dir_text}
     );
     let (stdout, stderr, code) = run_with("directories", &src, &[], None, &[]);
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(stdout, "true\n1\none.txt\ntrue\nfalse\nfalse\n");
+    assert_eq!(
+        stdout, "true\n1\none.txt\ntrue\nfalse\nfalse\n",
+        "exit {code}, stderr: {stderr}"
+    );
     assert_eq!(stderr, "");
     assert_eq!(code, 0);
 }
