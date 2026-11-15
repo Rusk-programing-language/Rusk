@@ -3,9 +3,10 @@
 A hands-on guide to **Rusk**, an English-like language that bakes ahead of
 time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
-runtime, no libc, and no dependencies.
+runtime, no libc, and no dependencies. v1.1.6 also adds portable `.tst` toast
+files and an experimental Windows x86-64 `.exe` target.
 
-This guide is for v1.1.5. For the exact language rules, see
+This guide is for v1.1.6. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -107,7 +108,7 @@ with `curl.exe`, unpacks it with `tar.exe`, and adds it to the user `PATH`:
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
-# $tag = 'v1.1.5'   # uncomment to pin a release
+# $tag = 'v1.1.6'   # uncomment to pin a release
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -131,7 +132,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.5 — code, baked ahead of time
+rusk 1.1.6 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -175,12 +176,14 @@ rusk                              run the nearby Ruskfile, or start the session
 rusk repl                         start the interactive session
 rusk tui                          start the full-screen session
 rusk tui demo                     open the terminal module demo
-rusk build <file.rk> [-o <out>] [--target <arch>]
-                                  bake a native executable
-rusk run   [--target <arch>] <file.rk> [args...]
-                                  bake it and run it, passing arguments on
-rusk check <file.rk> [--target <arch>]
-                                  bake without writing an executable
+rusk build <file.rk|file.tst> [-o <out>] [--target <arch>]
+                                  bake a native executable, or wrap a toast image
+rusk toast <file.rk> [-o <out.tst>] [--target <arch>]...
+                                  bake a portable precompiled toast file
+rusk run   [--target <arch>] <file.rk|file.tst> [args...]
+                                  bake (or open a toast) and run it, passing arguments on
+rusk check <file.rk|file.tst> [--target <arch>]
+                                  bake without writing an executable, or verify a toast
 rusk version
 rusk help
 ```
@@ -188,13 +191,15 @@ rusk help
 Notes:
 
 - `build` writes next to the source and strips the `.rk` extension unless
-  `-o` names a destination.
+  `-o` names a destination. Windows output defaults to `.exe`.
 - `run` passes later words through to `argument 1`, `argument 2`, and so on.
 - `check` runs the lexer, parser, imports, type checker, ownership checker, and
-  code generator, but writes nothing. Use it in scripts and editors.
-- `--target aarch64` or `--target x86_64` picks the instruction set. Without
-  it, the compiler chooses its own architecture. `arm64`, `x86-64`, and `amd64`
-  are accepted aliases.
+  code generator, but writes nothing. Use it in scripts and editors. On a
+  `.tst` it checks the container instead.
+- `--target aarch64`, `--target x86_64`, or `--target windows` picks the
+  output. Without it, the compiler chooses its own architecture; Windows is
+  never automatic. `arm64`, `x86-64`, `amd64`, `win64`, and `pe` are accepted
+  aliases.
 - A failed bake writes no output file.
 
 Example with arguments:
@@ -231,6 +236,70 @@ Both outputs are static ELF64 files. The x86-64 file has `e_machine = 62`; the
 AArch64 file has `e_machine = 183`. `rusk run --target ...` works only when the
 host can execute that architecture, for example through `binfmt_misc` or a
 user-mode emulator such as `qemu-x86_64`.
+
+### Toast files
+
+`rusk toast` bakes a program once and writes a `.tst` **toast file** instead of
+an executable. A toast is a whole-program container: it holds the finished
+machine code, read-only data, the size of the zeroed data area, and any Windows
+import names for each target image. It is not source and it is not a linker; it
+cannot be combined with other code.
+
+```console
+$ rusk toast hello.rk
+toasted hello.rk -> hello.tst (34.2 KB, aarch64, x86_64, 0 dependencies)
+$ rusk check hello.tst
+hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.1.6)
+  aarch64: 6.8 KB code, 355 B data, 1088.2 KB zeroed
+  x86_64: 25.8 KB code, 355 B data, 1088.2 KB zeroed
+$ rusk run hello.tst              # runs the host image
+$ rusk build hello.tst -o hello   # wraps the host image into a native executable
+```
+
+A toast defaults to both Linux architectures. Choose images with repeated or
+comma-separated `--target` flags (`--target aarch64,x86_64`), and remember that
+`--target all` means both Linux targets, not every target Rusk knows. A toast
+holds at most one image per target and at most eight images total.
+
+`rusk run`, `rusk build`, and `rusk check` accept a `.tst` anywhere they accept
+a `.rk`. A single-image toast is built for its own target when the host target
+is absent, so `rusk build hello-win.tst` can produce a `.exe` on Linux. To move
+one image out of a multi-image toast, pass its `--target`.
+
+The trailing FNV-1a checksum catches truncation and accidental corruption. It is
+an integrity check, not a signature; it does not prove who built the file. The
+format is documented in [`docs/SPEC.md`](../docs/SPEC.md).
+
+### Experimental Windows output
+
+`--target windows` produces a PE32+ `.exe` for Windows x86-64. It uses the same
+Rusk code generator as Linux, wrapped in a PE image instead of an ELF image:
+
+```console
+$ rusk build hello.rk --target windows
+baked hello.rk -> hello.exe (29.0 KB, native windows-x86_64, 0 dependencies)
+```
+
+The `.exe` imports from `kernel32.dll` and maps a small set of operations onto
+Windows: console output and input through `GetStdHandle` and `WriteFile`/
+`ReadFile`, process exit through `ExitProcess`, heap growth through
+`VirtualAlloc`, and the command line through `GetCommandLineA`.
+
+`rusk run --target windows` is refused, because a Linux host cannot execute a
+PE file. Build the `.exe` and run it on Windows.
+
+This is a first milestone, not parity. On Windows:
+
+- only `argv[0]` is visible; later arguments are not parsed
+- the environment is empty
+- raw terminal mode is a successful no-op
+- file I/O, directory calls, process launch, and sockets print
+  `burnt: this Windows build does not support that feature yet` and exit 1
+- the image is fixed-base with no base relocations, so Windows must load it at
+  its preferred address
+
+Treat it as an experimental way to run small console programs, not as a second
+supported platform yet.
 
 ## 5. Language tour
 
@@ -968,7 +1037,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.5 — an English-like language
+Rusk 1.1.6 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1142,6 +1211,9 @@ cargo test --quiet
 Implemented and checked:
 
 - Static ELF64 output for Linux, on AArch64 or x86-64, with no libc
+- Portable `.tst` toast files holding one image per target
+- Experimental PE32+ `.exe` output for Windows x86-64, with console I/O, exit,
+  a `VirtualAlloc` heap, and a clear message for everything else
 - English expressions, conditions, loops, and functions
 - Constants, text operations, and imports
 - Homogeneous lists, including nested lists, with `item`, `set item`, `add`,
@@ -1177,6 +1249,10 @@ Not implemented yet:
 - Threads, signals, GUI toolkits, and a networked package registry (the
   `installwork/` registry is a local directory tree, not a server)
 - IPv6, UDP, DNS, TLS, socket timeouts, and non-blocking sockets
+- Windows beyond the first console milestone: parsed arguments, the
+  environment, file and directory I/O, process launch, sockets, raw terminal
+  mode, and relocatable images
+- A toast linker; a toast is a whole program, not a relocatable object
 
 Backend limits worth knowing:
 
@@ -1195,5 +1271,6 @@ Backend limits worth knowing:
   input only and does not decode escape sequences.
 - At most 128 parameters per function.
 - The single load segment is RWX.
+- A toast holds at most eight images, one per target, and carries no signature.
 
 For the full details, read [`docs/SPEC.md`](../docs/SPEC.md).

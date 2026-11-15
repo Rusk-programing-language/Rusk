@@ -216,6 +216,176 @@ fn check_reports_the_selected_target() {
 }
 
 #[test]
+fn toast_defaults_to_both_linux_targets() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-toast-default-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("hello.rk");
+    let toast = dir.join("hello.tst");
+    std::fs::write(&file, "say \"hello\"\n").unwrap();
+
+    let out = Command::new(rusk())
+        .arg("toast")
+        .arg(&file)
+        .arg("-o")
+        .arg(&toast)
+        .output()
+        .expect("rusk should start");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    let check = Command::new(rusk())
+        .arg("check")
+        .arg(&toast)
+        .output()
+        .expect("rusk should start");
+    let checked = String::from_utf8_lossy(&check.stdout);
+    let bytes = std::fs::read(&toast).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("aarch64, x86_64"), "{stdout}");
+    assert!(check.status.success(), "{checked}");
+    assert!(checked.contains("aarch64, x86_64"), "{checked}");
+    assert_eq!(&bytes[..8], b"RTOAST1\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn toast_round_trips_and_runs_on_the_host() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-toast-run-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("hello.rk");
+    let toast = dir.join("hello.tst");
+    let built = dir.join("hello-from-toast");
+    std::fs::write(&file, "say \"toasted\"\nsay argument 1\n").unwrap();
+
+    let toast_out = Command::new(rusk())
+        .arg("toast")
+        .arg(&file)
+        .arg("-o")
+        .arg(&toast)
+        .output()
+        .expect("rusk should start");
+    let run_out = Command::new(rusk())
+        .arg("run")
+        .arg(&toast)
+        .arg("alpha")
+        .output()
+        .expect("rusk should start");
+    let build_out = Command::new(rusk())
+        .arg("build")
+        .arg(&toast)
+        .arg("-o")
+        .arg(&built)
+        .output()
+        .expect("rusk should start");
+    let built_out = Command::new(&built)
+        .output()
+        .expect("the wrapped executable should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        toast_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&toast_out.stderr)
+    );
+    assert!(
+        run_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run_out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run_out.stdout), "toasted\nalpha\n");
+    assert!(
+        build_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build_out.stderr)
+    );
+    assert!(built_out.status.success());
+    assert_eq!(String::from_utf8_lossy(&built_out.stdout), "toasted\n\n");
+}
+
+#[test]
+fn a_toast_can_hold_an_experimental_windows_image() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-toast-pe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("hello.rk");
+    let toast = dir.join("hello-win.tst");
+    let exe = dir.join("hello.exe");
+    std::fs::write(&file, "say \"hello from windows\"\n").unwrap();
+
+    let toast_out = Command::new(rusk())
+        .arg("toast")
+        .arg(&file)
+        .arg("-o")
+        .arg(&toast)
+        .args(["--target", "windows"])
+        .output()
+        .expect("rusk should start");
+    let toast_stdout = String::from_utf8_lossy(&toast_out.stdout);
+    assert!(toast_out.status.success(), "{toast_stdout}");
+
+    let build_out = Command::new(rusk())
+        .arg("build")
+        .arg(&toast)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("rusk should start");
+    let build_stdout = String::from_utf8_lossy(&build_out.stdout);
+    let bytes = std::fs::read(&exe).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(build_out.status.success(), "{build_stdout}");
+    assert_eq!(&bytes[0..2], b"MZ");
+    let pe = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
+    assert_eq!(&bytes[pe..pe + 4], b"PE\0\0");
+    assert_eq!(
+        u16::from_le_bytes(bytes[pe + 4..pe + 6].try_into().unwrap()),
+        0x8664
+    );
+    let optional = pe + 24;
+    assert_eq!(
+        u16::from_le_bytes(bytes[optional..optional + 2].try_into().unwrap()),
+        0x20B
+    );
+    assert_eq!(
+        u16::from_le_bytes(bytes[optional + 68..optional + 70].try_into().unwrap()),
+        3
+    );
+    for needle in [
+        b"kernel32.dll".as_slice(),
+        b"GetStdHandle",
+        b"WriteFile",
+        b"ExitProcess",
+    ] {
+        assert!(
+            bytes.windows(needle.len()).any(|window| window == needle),
+            "missing {}",
+            String::from_utf8_lossy(needle)
+        );
+    }
+}
+
+#[test]
+fn run_refuses_a_windows_target_before_baking() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-run-win-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("hello.rk");
+    std::fs::write(&file, "say \"hello\"\n").unwrap();
+
+    let out = Command::new(rusk())
+        .arg("run")
+        .args(["--target", "windows"])
+        .arg(&file)
+        .output()
+        .expect("rusk should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success());
+    assert!(stderr.contains("can't be run directly"), "{stderr}");
+}
+
+#[test]
 fn an_unknown_target_is_rejected() {
     let out = Command::new(rusk())
         .args(["check", "missing.rk", "--target", "sparc"])

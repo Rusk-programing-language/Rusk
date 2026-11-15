@@ -14,16 +14,22 @@ pub use crate::aarch64::{
 use crate::aarch64;
 use crate::x86_64;
 
-/// Which instruction set a bake targets.
+/// Which instruction set and operating system a bake targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     AArch64,
     X86_64,
+    /// Experimental Windows x86-64 output. The code generator and runtime are
+    /// shared with [`Target::X86_64`], but the ABI and the executable wrapper
+    /// are Windows-specific.
+    WindowsX86_64,
 }
 
 impl Target {
     /// The platform running the compiler. Bakes default to the host so that
-    /// `rusk run` can execute what it just produced.
+    /// `rusk run` can execute what it just produced. The compiler itself runs
+    /// on Windows, but its default output stays Linux ELF; ask for
+    /// [`Target::WindowsX86_64`] explicitly to make a `.exe`.
     pub fn host() -> Self {
         if cfg!(target_arch = "x86_64") {
             Target::X86_64
@@ -32,18 +38,29 @@ impl Target {
         }
     }
 
+    /// The targets a portable toast contains unless the user picks others.
+    pub fn linux_all() -> [Target; 2] {
+        [Target::AArch64, Target::X86_64]
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Target::AArch64 => "aarch64",
             Target::X86_64 => "x86_64",
+            Target::WindowsX86_64 => "windows-x86_64",
         }
     }
 
-    /// The ELF `e_machine` value.
+    /// True for the experimental Windows target.
+    pub fn is_windows(self) -> bool {
+        matches!(self, Target::WindowsX86_64)
+    }
+
+    /// The ELF `e_machine` value. Only meaningful for Linux targets.
     pub fn machine(self) -> u16 {
         match self {
-            Target::AArch64 => 183, // EM_AARCH64
-            Target::X86_64 => 62,   // EM_X86_64
+            Target::AArch64 => 183,                       // EM_AARCH64
+            Target::X86_64 | Target::WindowsX86_64 => 62, // EM_X86_64 / AMD64
         }
     }
 
@@ -51,6 +68,7 @@ impl Target {
         match name {
             "aarch64" | "arm64" => Some(Target::AArch64),
             "x86_64" | "x86-64" | "amd64" => Some(Target::X86_64),
+            "windows" | "windows-x86_64" | "win64" | "pe" => Some(Target::WindowsX86_64),
             _ => None,
         }
     }
@@ -78,6 +96,7 @@ impl Asm {
         let inner = match target {
             Target::AArch64 => Inner::AArch64(aarch64::Asm::new()),
             Target::X86_64 => Inner::X86_64(x86_64::Asm::new()),
+            Target::WindowsX86_64 => Inner::X86_64(x86_64::Asm::new_windows()),
         };
         Asm { inner }
     }
@@ -324,6 +343,31 @@ impl Asm {
         match self.inner {
             Inner::AArch64(a) => a.finish(),
             Inner::X86_64(a) => a.finish(),
+        }
+    }
+
+    /// Finish the image with the final zeroed-data size. The Windows layout
+    /// needs the bss size to place its import table after the data area.
+    pub fn finish_with_bss(self, bss: u64) -> (Vec<u8>, Vec<u8>) {
+        match self.inner {
+            Inner::AArch64(a) => a.finish(),
+            Inner::X86_64(a) => a.finish_with_bss(bss),
+        }
+    }
+
+    /// Imported Windows functions referenced by the code, in first-use order.
+    pub fn imports(&self) -> Vec<String> {
+        match &self.inner {
+            Inner::AArch64(_) => Vec::new(),
+            Inner::X86_64(a) => a.import_names(),
+        }
+    }
+
+    /// Emit the Windows entry thunk that builds an initial stack and jumps to
+    /// `start`. It is a no-op on AArch64.
+    pub fn windows_start(&mut self, start: &str) {
+        if let Inner::X86_64(a) = &mut self.inner {
+            a.windows_start(start);
         }
     }
 }

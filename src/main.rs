@@ -12,7 +12,7 @@
 //! rusk version
 //! ```
 
-use rusk::{elf, Target};
+use rusk::{elf, toast, Target};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -48,9 +48,12 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "build" => {
             let (input, output, target) = parse_targets(&args[1..])?;
+            if is_toast(&input) {
+                return build_toast(&input, output, target);
+            }
             let bytes = bake_bytes(&input, target)?;
-            let out = output.unwrap_or_else(|| default_output(&input));
-            elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
+            let out = output.unwrap_or_else(|| default_output_for(&input, target));
+            rusk::write_executable(&out, target, &bytes)?;
             println!(
                 "baked {} -> {} ({}, native {}, 0 dependencies)",
                 input.display(),
@@ -60,12 +63,29 @@ fn run(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
+        "toast" => {
+            let (input, output, targets) = parse_toast(&args[1..])?;
+            let out = output.unwrap_or_else(|| default_toast_output(&input));
+            let toast = rusk::toast_path(&input, &targets)?;
+            let bytes = toast.write(&out)?;
+            println!(
+                "toasted {} -> {} ({}, {}, 0 dependencies)",
+                input.display(),
+                out.display(),
+                size(bytes),
+                rusk::target_list(toast.targets().collect())
+            );
+            Ok(())
+        }
         "run" => {
             let (input, program_args, target) = parse_run_target(&args[1..])?;
             run_baked(&input, &program_args, target)
         }
         "check" => {
             let (input, _, target) = parse_targets(&args[1..])?;
+            if is_toast(&input) {
+                return check_toast(&input);
+            }
             let bytes = bake_bytes(&input, target)?;
             println!(
                 "{} looks good — would bake to {} (native {}, 0 dependencies)",
@@ -98,16 +118,22 @@ USAGE
   rusk repl                         start the interactive session
   rusk tui                          start the full-screen session
   rusk tui demo                     open the terminal module demo
-  rusk build <file.rk> [-o <out>] [--target <arch>]
-                                    bake a native executable
-  rusk run   [--target <arch>] <file.rk> [args...]
-                                    bake it and run it, passing arguments on
-  rusk check <file.rk> [--target <arch>]
-                                    bake without writing an executable
+  rusk build <file.rk|file.tst> [-o <out>] [--target <arch>]
+                                    bake a native executable, or wrap a toast image
+  rusk toast <file.rk> [-o <out.tst>] [--target <arch>]...
+                                    bake a portable precompiled toast file
+  rusk run   [--target <arch>] <file.rk|file.tst> [args...]
+                                    bake (or open a toast) and run it, passing arguments on
+  rusk check <file.rk|file.tst> [--target <arch>]
+                                    bake without writing an executable, or verify a toast
   rusk version
   rusk help
 
 Targets: aarch64 or x86_64 (default: the architecture running the compiler).
+The experimental x86-64 Windows target is spelled 'windows' and is not
+selected by default.
+A toast defaults to both Linux targets and can be limited with --target.
+`--target all` in a toast also selects both Linux targets.
 
 Rusk bakes straight to machine code in a static ELF file.
 No C, no assembler, no linker, no libc — just syscalls.
@@ -133,8 +159,25 @@ fn find_ruskfile() -> Option<PathBuf> {
 }
 
 /// Bake one file, run it, and pass the remaining command-line arguments on.
+/// A `.tst` input uses its already-compiled host image.
 fn run_baked(input: &Path, program_args: &[String], target: Target) -> Result<(), String> {
-    let bytes = bake_bytes(input, target)?;
+    if target.is_windows() {
+        return Err(
+            "Windows executables can't be run directly on this machine. \
+             Use 'rusk build --target windows' and run the .exe on Windows."
+                .to_string(),
+        );
+    }
+    let bytes = if is_toast(input) {
+        let toast = toast::read(input)?;
+        rusk::executable_from_toast(&toast, target)?
+    } else {
+        bake_bytes(input, target)?
+    };
+    run_bytes(&bytes, program_args)
+}
+
+fn run_bytes(bytes: &[u8], program_args: &[String]) -> Result<(), String> {
     if cfg!(windows) {
         return Err(
             "Rusk bakes Linux executables, and Windows can't run ELF files directly. \
@@ -143,7 +186,7 @@ fn run_baked(input: &Path, program_args: &[String], target: Target) -> Result<()
         );
     }
     let out = std::env::temp_dir().join(format!("rusk-run-{}", std::process::id()));
-    elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
+    elf::write(&out, bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
     let status = Command::new(&out)
         .args(program_args)
         .status()
@@ -214,9 +257,125 @@ fn parse_targets(args: &[String]) -> Result<(PathBuf, Option<PathBuf>, Target), 
     Ok((input, output, target))
 }
 
+/// `toast` accepts the usual `-o` and one or more `--target` options. With no
+/// target it stores both Linux architectures, which is the point of a portable
+/// precompiled file.
+fn parse_toast(args: &[String]) -> Result<(PathBuf, Option<PathBuf>, Vec<Target>), String> {
+    let mut input: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut targets: Vec<Target> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                let Some(path) = args.get(i + 1) else {
+                    return Err("'-o' needs a path after it".to_string());
+                };
+                output = Some(PathBuf::from(path));
+                i += 2;
+            }
+            "--target" => {
+                let Some(name) = args.get(i + 1) else {
+                    return Err("'--target' needs an architecture after it".to_string());
+                };
+                for part in name.split(',') {
+                    let part = part.trim();
+                    if part == "all" {
+                        for target in [Target::AArch64, Target::X86_64] {
+                            if !targets.contains(&target) {
+                                targets.push(target);
+                            }
+                        }
+                    } else {
+                        let target = parse_target(part)?;
+                        if !targets.contains(&target) {
+                            targets.push(target);
+                        }
+                    }
+                }
+                i += 2;
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("I don't know the option '{flag}'"));
+            }
+            path => {
+                if input.is_some() {
+                    return Err("I can only toast one file at a time".to_string());
+                }
+                input = Some(PathBuf::from(path));
+                i += 1;
+            }
+        }
+    }
+    if targets.is_empty() {
+        targets = vec![Target::AArch64, Target::X86_64];
+    }
+    let input = input.ok_or_else(|| "I need a .rk file to toast".to_string())?;
+    Ok((input, output, targets))
+}
+
+fn build_toast(input: &Path, output: Option<PathBuf>, target: Target) -> Result<(), String> {
+    let toast = toast::read(input)?;
+    // A single-image toast can pick that image when the host architecture is
+    // not the one it holds, so `rusk build app.tst` still works for a .exe.
+    let target = if toast.image_for(target).is_none() && toast.images.len() == 1 {
+        toast.images[0].target
+    } else {
+        target
+    };
+    let bytes = rusk::executable_from_toast(&toast, target)?;
+    let out = output.unwrap_or_else(|| default_output_for(input, target));
+    rusk::write_executable(&out, target, &bytes)?;
+    println!(
+        "wrapped {} -> {} ({}, native {}, 0 dependencies)",
+        input.display(),
+        out.display(),
+        size(bytes.len()),
+        target.name()
+    );
+    Ok(())
+}
+
+fn check_toast(input: &Path) -> Result<(), String> {
+    let toast = toast::read(input)?;
+    println!(
+        "{} is an intact toast ({}, source {}, built with rusk {})",
+        input.display(),
+        rusk::target_list(toast.targets().collect()),
+        metadata_value(&toast.metadata, "source").unwrap_or("unknown"),
+        metadata_value(&toast.metadata, "compiler").unwrap_or("unknown")
+    );
+    for image in &toast.images {
+        println!(
+            "  {}: {} code, {} data, {} zeroed",
+            image.target.name(),
+            size(image.text.len()),
+            size(image.rodata.len()),
+            size_u64(image.bss)
+        );
+    }
+    Ok(())
+}
+
+fn metadata_value<'a>(metadata: &'a str, key: &str) -> Option<&'a str> {
+    metadata.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name.trim() == key).then(|| value.trim())
+    })
+}
+
+fn is_toast(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tst"))
+}
+
 fn parse_target(name: &str) -> Result<Target, String> {
-    Target::parse(name)
-        .ok_or_else(|| format!("I don't know the target '{name}' — try 'aarch64' or 'x86_64'"))
+    Target::parse(name).ok_or_else(|| {
+        format!(
+            "I don't know the target '{name}' — try 'aarch64', 'x86_64', or 'windows' \
+             (experimental)"
+        )
+    })
 }
 
 fn default_output(input: &Path) -> PathBuf {
@@ -227,6 +386,38 @@ fn default_output(input: &Path) -> PathBuf {
     } else {
         out
     }
+}
+
+/// The default name for a built program. Windows output gets the `.exe` that
+/// Windows itself expects; Linux output keeps the extensionless name.
+fn default_output_for(input: &Path, target: Target) -> PathBuf {
+    if target.is_windows() {
+        let mut out = input.to_path_buf();
+        out.set_extension("exe");
+        if out.as_os_str().is_empty() {
+            PathBuf::from("a.exe")
+        } else {
+            out
+        }
+    } else {
+        default_output(input)
+    }
+}
+
+fn default_toast_output(input: &Path) -> PathBuf {
+    let mut out = input.to_path_buf();
+    out.set_extension("tst");
+    if out.as_os_str().is_empty() {
+        PathBuf::from("a.tst")
+    } else {
+        out
+    }
+}
+
+fn size_u64(bytes: u64) -> String {
+    usize::try_from(bytes)
+        .map(size)
+        .unwrap_or_else(|_| format!("{bytes} B"))
 }
 
 fn bake_bytes(input: &Path, target: Target) -> Result<Vec<u8>, String> {

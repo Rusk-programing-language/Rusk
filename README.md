@@ -28,7 +28,15 @@ syscalls.
 
 ## Status
 
-v1.1.5 is the networking-and-terminal release, a patch on v1.1.4 that fixes
+v1.1.6 is the toast-and-Windows-milestone release. `rusk toast` bakes a
+program once into a portable `.tst` **toast file**, and `rusk run`, `rusk build`
+and `rusk check` understand that file without the source. A toast can hold both
+Linux architectures, **AArch64 and x86-64**, and now also an experimental
+**Windows x86-64** image that `rusk build --target windows` wraps into a PE32+
+`.exe`. The Windows target is a first, honest milestone: console output and
+input, process exit, and a `VirtualAlloc` heap work; most system calls do not.
+
+v1.1.5 was the networking-and-terminal release, a patch on v1.1.4 that fixed
 large heap growth and directory listing on AArch64 under emulation. Programs
 can open IPv4 TCP connections with `connect to HOST at PORT`, listen with
 `listen at PORT`, accept with `accept from LISTENER`, exchange text with
@@ -58,15 +66,17 @@ file's content or chosen functions, and a line containing only `end` or `<e>`
 closes a file so chained sources do not run into each other.
 
 The compiler is a lexer, parser, import expander, type checker, ownership
-checker, target-selecting code generator, two machine-code backends, and an ELF
-writer, with **251 tests**. The end-to-end suite also runs against x86-64 under
-QEMU. It bakes **Linux executables for AArch64 and x86-64**, and the compiler
-itself runs on Linux or on Windows x86-64.
+checker, target-selecting code generator, two machine-code backends, a toast
+container, and ELF or PE32+ writers, with **282 tests**. The end-to-end suite
+also runs against x86-64 under QEMU. It bakes **Linux executables for AArch64
+and x86-64**, **experimental Windows x86-64 executables**, and portable toast
+files, and the compiler itself runs on Linux or on Windows x86-64.
 
 On Windows, `rusk build`, `rusk check`, and both REPL modes work. `rusk run`
-reports that the baked ELF cannot execute natively; build the program and run
-it under WSL or on a Linux machine, use `--target aarch64`/`x86_64` for
-cross-baking, or use a Linux host for the whole loop.
+reports that the baked Linux ELF cannot execute natively; build the program and
+run it under WSL or on a Linux machine, use `--target aarch64`/`x86_64` for
+cross-baking, or use `--target windows` to produce a `.exe`. The Windows output
+is experimental and documented below.
 
 The first self-hosting step also lives in the tree: `selfhost/interpreter.rk`
 is an integer-expression interpreter written in Rusk and compiled by Rusk. See
@@ -84,6 +94,8 @@ cargo run -- tui demo                     # try the terminal module demo
 cargo run -- build examples/loop.rk      # write ./examples/loop
 cargo run -- build examples/hello.rk --target x86_64  # cross-bake
 cargo run -- check examples/numbers.rk   # bake without writing anything
+cargo run -- toast examples/hello.rk     # write a portable hello.tst
+cargo run -- build examples/hello.rk --target windows  # write hello.exe (experimental)
 ```
 
 Or install the `rusk` binary from `target/release/` somewhere on your `PATH`.
@@ -97,7 +109,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.1.5
+sh toastset --version 1.1.6
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -124,7 +136,7 @@ build with `curl.exe`, unpacks it with `tar.exe`, and adds it to your user
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
 # To pin a release instead of taking the latest, replace the line above with:
-# $tag = 'v1.1.5'
+# $tag = 'v1.1.6'
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -147,6 +159,50 @@ rusk version
 (`curl.exe` and `tar.exe` ship with Windows 10 version 1803 and newer. The
 installer script itself still needs a POSIX shell, which is why this PowerShell
 path downloads the release directly.)
+
+## Toast files and experimental Windows output
+
+`rusk toast` bakes a program once and stores the finished images in a `.tst`
+container, called a **toast file**. It is not source and not a linker: it holds
+the machine code, read-only data, zeroed-data size, and Windows import names
+for each target. A toast defaults to both Linux architectures:
+
+```console
+$ rusk toast hello.rk
+toasted hello.rk -> hello.tst (34.2 KB, aarch64, x86_64, 0 dependencies)
+$ rusk check hello.tst
+hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.1.6)
+  aarch64: 6.8 KB code, 355 B data, 1088.2 KB zeroed
+  x86_64: 25.8 KB code, 355 B data, 1088.2 KB zeroed
+$ rusk run hello.tst             # runs the host image
+$ rusk build hello.tst -o hello  # wraps the host image back into a native executable
+```
+
+Use `--target aarch64`, `--target x86_64`, `--target windows`, or repeat
+`--target` to choose the images. `--target all` means both Linux targets. A
+`.tst` is ordinary data, not an executable, and its FNV-1a checksum catches
+truncation and accidental damage; it is an integrity check, not a signature.
+
+The experimental Windows target writes a PE32+ `.exe` with imports from
+`kernel32.dll`:
+
+```console
+$ rusk build hello.rk --target windows
+baked hello.rk -> hello.exe (29.0 KB, native windows-x86_64, 0 dependencies)
+```
+
+`rusk run --target windows` is refused because a Linux host cannot execute a PE
+file. The `.exe` is a first milestone, not parity: it reads and writes the
+console, exits with a status, and backs the heap with `VirtualAlloc`. It does
+not parse command-line arguments beyond `argv[0]`, the environment is empty,
+raw terminal mode is a no-op, and file I/O, directory calls, process launch,
+and sockets print `burnt: this Windows build does not support that feature yet`
+and exit 1. The image is fixed-base with no base relocations. Treat it as an
+experimental way to run small console programs, not as a second supported
+platform yet.
+
+The toast layout is documented in [docs/SPEC.md](docs/SPEC.md): magic
+`RTOAST1\n`, version 1, per-image records, and the trailing checksum.
 
 ## A taste of the language
 
@@ -303,7 +359,7 @@ unreadable file, or a path too long for the runtime scratch area, is reported
 as a Rusk error. `rusk run file.rk one two` passes `one` and `two` through to
 `argument 1` and `argument 2`.
 
-The v1.1.5 systems surface adds IPv4 TCP and raw terminal input:
+The systems surface adds IPv4 TCP and raw terminal input:
 
 ```rusk
 let server be listen at 8080
@@ -498,7 +554,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.5 — an English-like language
+Rusk 1.1.6 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -685,7 +741,7 @@ Runtime facts worth knowing:
   relocation pass. Data addresses are patched into the finished machine code,
   so growing the text section moves the data instead of colliding with it.
 
-## What v1.1.5 doesn't do yet
+## What v1.1.6 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -717,11 +773,15 @@ Honest list, so the docs don't lie:
   package manifests or a standard module registry.
 - Text positions count bytes, not Unicode characters.
 - At most 128 parameters per function. There is no overloading.
-- Linux only, on AArch64 or x86-64. There is no macOS, Windows, or 32-bit
-  backend. The compiler itself also runs on Windows x86-64, but its output is
-  still a Linux ELF, so `rusk run` is unavailable there.
+- Linux is the supported platform, on AArch64 or x86-64. Windows x86-64 output
+  is experimental and console-only: no macOS, no 32-bit, and no Windows GUI or
+  service backend. The compiler itself runs on Windows x86-64 but cannot
+  execute the Linux ELF it bakes; use `--target windows` for a `.exe`.
+- Toast files are whole-program containers, not relocatable objects or a linker.
+  They cannot be combined, patched, or linked with other code, and they carry
+  no signature. A toast holds at most 8 target images.
 - GUI toolkits, pthread-style threads, and a package registry are not in this
-  release. They are later layers, not a claim of v1.1.5.
+  release. They are later layers, not a claim of v1.1.6.
 - The x86-64 register allocator works within straight-line blocks and spills at
   every branch and call. It is much closer to AArch64 than the old
   memory-backed encoder, but it is not a global allocator yet.
@@ -755,11 +815,11 @@ stage, not a claim of this release.
 
 Rusk is aimed at small, self-contained Linux programs: command-line tools,
 calculators, text and file filters, teaching examples, and experiments in
-compiler and language design. v1.1.5 adds IPv4 TCP sockets and raw terminal
-input, so small networked tools and keyboard-driven terminal utilities fit too:
-a chat or echo server, a port probe, a file-transfer helper, a menu, or a
-single-key browser. A baked program is a single static ELF with no runtime, so
-it is easy to copy to a server, container, or Termux device.
+compiler and language design. v1.1.6 adds portable toast files and an
+experimental Windows x86-64 `.exe` target, so Linux console tools can be baked
+once and shipped as a `.tst`, and small Windows console programs are now
+possible. A baked program is still at heart a single static ELF with no
+runtime, so it is easy to copy to a server, container, or Termux device.
 
 It is a young language, and that limits the honest answer. Networking is
 blocking TCP only, with no DNS, TLS, UDP, or IPv6, and there are still no

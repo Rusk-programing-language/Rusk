@@ -1,12 +1,13 @@
-# The Rusk Language — Specification v1.1.5
+# The Rusk Language — Specification v1.1.6
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
 emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.1.5, Linux on AArch64 and x86-64**. The compiler also builds and
-runs on Windows x86-64, but every program it emits targets Linux. Everything
-here is implemented and tested; anything not here does not exist yet.
+Status: **v1.1.6, Linux on AArch64 and x86-64, plus experimental Windows
+x86-64 output**. The compiler also builds and runs on Windows x86-64. Toast
+files (`.tst`) can hold finished images for several targets. Everything here is
+implemented and tested; anything not here does not exist yet.
 
 ---
 
@@ -887,7 +888,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.5 — an English-like language
+Rusk 1.1.6 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1012,19 +1013,32 @@ status and prints no message.
 
 ## 15. Compilation model
 
-`rusk build file.rk [-o OUT] [--target aarch64|x86_64]` writes an executable
-next to the source with the extension removed (`-o` overrides the destination).
-`rusk check` accepts the same target flag. With no `--target`, Rusk bakes for
-the architecture running the compiler, so `rusk run` can execute the result.
-`rusk run` also accepts `--target`, but then the host must be able to execute
-that architecture, for example through `binfmt_misc` or QEMU.
+`rusk build file.rk [-o OUT] [--target aarch64|x86_64|windows]` writes an
+executable next to the source with the extension removed (`-o` overrides the
+destination). A Windows build gets a `.exe` name by default. `rusk check`
+accepts the same target flag. With no `--target`, Rusk bakes for the
+architecture running the compiler, so `rusk run` can execute the result.
+`--target windows` selects the experimental PE32+ output and is never the
+default. `rusk run` also accepts `--target`, but then the host must be able to
+execute that architecture, for example through `binfmt_misc` or QEMU; a Windows
+image is refused before anything is written.
+
+`rusk toast file.rk [-o OUT.tst] [--target ...]` bakes once and writes a
+portable `.tst` container. With no `--target` it stores both Linux
+architectures; `--target` may be repeated or comma-separated, and `--target
+all` means both Linux targets. `rusk run file.tst`, `rusk build file.tst`, and
+`rusk check file.tst` read the container instead of the source. A
+single-image toast is built for its only target when the host target is
+absent; a multi-image toast needs an explicit `--target` unless the host image
+is present.
 
 Release builds are published both as glibc-linked and statically linked musl
 binaries for AArch64 and x86-64, so the compiler also runs on Termux, Alpine,
 and other systems without a glibc loader. A Windows x86-64 build
-(`rusk.exe`) is published too; it compiles the same Linux ELF output.
+(`rusk.exe`) is published too; it compiles both Linux ELF output and
+experimental Windows PE output.
 
-The output is a static ELF64 executable for the selected target:
+A Linux output is a static ELF64 executable for the selected target:
 
 - machine: `EM_AARCH64` (183) or `EM_X86_64` (62), Linux syscall ABI;
 - one `PT_LOAD` segment mapping the whole image read/write/execute;
@@ -1035,7 +1049,79 @@ The output is a static ELF64 executable for the selected target:
   the kernel, with its address patched into the code after layout;
 - no interpreter, no dynamic section, no load-time relocations, no libc.
 
-Because there is no libc, output and file I/O are direct Linux syscalls.
+### Toast files (`.tst`)
+
+A toast is a whole-program container, not a relocatable object format and not a
+linker. It stores the finished machine code, read-only data, zeroed-data size,
+and Windows import names for each image. All integers are little endian.
+
+```text
+magic            8 bytes   "RTOAST1\n"
+version          u16       1
+flags            u16       0
+image count      u32       1..8
+metadata length  u32
+reserved         u32       0
+metadata         UTF-8 lines, "key: value\n"
+images           repeated image records
+checksum         u64       FNV-1a over every preceding byte
+```
+
+An image record is:
+
+```text
+target          u8        1 = aarch64, 2 = x86_64, 3 = windows-x86_64
+flags           u8        0
+reserved        u16       0
+text length     u32
+rodata length   u32
+bss size        u64
+imports length  u32
+reserved        u32       0
+text            bytes
+rodata          bytes
+imports         UTF-8 names separated by '\n' (empty for Linux)
+```
+
+The checksum is an integrity check, not a signature. It catches truncation and
+accidental corruption; it does not prove who built the file. The reader
+validates the magic, version, header fields, section bounds, duplicate targets,
+UTF-8 metadata and import names, trailing bytes, and the checksum. It also
+applies sane upper bounds: at most 8 images, at most 256 MiB per text or
+read-only section, and at most 16 GiB of zeroed data.
+
+### Experimental Windows output
+
+`--target windows` (aliases `windows-x86_64`, `win64`, `pe`) wraps the
+x86-64 code generator's output in a PE32+ image for Windows x86-64. There are
+four sections (`.text`, `.rdata`, `.bss`, `.idata`), a fixed image base of
+`0x1_4000_0000`, 4 KiB section alignment, and an import table for
+`kernel32.dll`. Base relocations are stripped, so Windows must load the image
+at its preferred base. The image is not position-independent.
+
+The runtime maps a small set of system calls onto `kernel32.dll`:
+
+| Rusk operation | Windows call |
+|---|---|
+| write to standard output or error | `GetStdHandle`, `WriteFile` |
+| read from standard input | `GetStdHandle`, `ReadFile` |
+| exit | `ExitProcess` |
+| heap growth | `VirtualAlloc` |
+| raw terminal mode | a successful no-op |
+| command line for `argv[0]` | `GetCommandLineA` |
+
+Every other system call — file I/O, directory calls, process launch, sockets —
+branches to a stub that prints
+`burnt: this Windows build does not support that feature yet` and exits with
+status 1. A Windows program sees zero arguments beyond `argv[0]`, an empty
+environment, and a no-op raw terminal mode. These are deliberate limits of the
+first Windows milestone, not bugs in the language.
+
+Because the Windows image is a PE file, `rusk run --target windows` refuses to
+start it on a Linux host. Build the `.exe` and run it on Windows. There is no
+Windows-host execution path in this release, and no Wine-based test in CI.
+
+Because there is no libc, Linux output and file I/O are direct Linux syscalls.
 AArch64 uses `x8` for the number: `write` is `64`, `exit` is `93`, `read` is
 `63`, `openat` is `56`, and `close` is `57`; directories and processes use
 `mkdirat` `34`, `unlinkat` `35`, `renameat` `38`, `getdents64` `61`,
@@ -1138,13 +1224,19 @@ value; the ownership pass is what prevents it from being moved or changed.
   raw mode on standard input and read bytes, but the language has no
   window-size query, key decoder, color API, or cursor movement. On Windows the
   full-screen session falls back to the line-oriented REPL.
-- Only Linux is supported as an output platform. The two backends are AArch64
-  and x86-64; there is no macOS, Windows, or 32-bit output. The compiler host
+- Linux is the supported output platform, on AArch64 and x86-64. Windows
+  x86-64 output is experimental and console-only: it maps console I/O, exit,
+  the heap, and the command-line pointer, but not file I/O, directories,
+  process launch, sockets, environment variables, arguments beyond `argv[0]`,
+  or raw terminal mode. There is no macOS or 32-bit output. The compiler host
   can be Linux or Windows x86-64; on Windows, `rusk build` and `rusk check`
   work, but `rusk run` cannot start the Linux ELF natively. The x86-64 backend
   allocates registers within straight-line blocks and spills at branches and
   calls, so it is close to the AArch64 output but is not a global register
   allocator yet.
+- Toast files hold whole finished programs. They cannot be linked, combined,
+  or patched, they contain no relocations or symbols, and they are unsigned.
+  A toast holds at most 8 images and one image per target.
 - At most 128 parameters per function. There is no function overloading.
 
 ## 16. Roadmap
@@ -1154,7 +1246,8 @@ function values in lists, functions that give back functions, a
 register-allocating x86-64 encoder, a relocation-aware data layout, and a
 self-hosting interpreter. v1.1.3 added the systems core: directory and process
 operations, the whole command line as a list, a growable heap, and 128
-parameters. v1.1.5 adds IPv4 TCP sockets and raw terminal input. What remains:
+parameters. v1.1.5 added IPv4 TCP sockets and raw terminal input. v1.1.6 adds
+toast files and an experimental Windows x86-64 output. What remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression
@@ -1164,3 +1257,7 @@ parameters. v1.1.5 adds IPv4 TCP sockets and raw terminal input. What remains:
 - broader systems primitives: threads, signals, and a package registry. IPv6,
   UDP, DNS, and TLS are also outside the current socket surface.
 - reusing memory for joined text instead of only list and input buffers.
+- Windows parity beyond the first console milestone: parsed arguments, the
+  environment, file and directory I/O, process launch, sockets, raw terminal
+  mode, and relocatable images. Toast files are not a linker and do not
+  combine images.

@@ -148,6 +148,8 @@ pub struct Baked {
     pub rodata: Vec<u8>,
     pub bss: u64,
     pub target: Target,
+    /// Imported Windows functions. Empty for Linux images.
+    pub imports: Vec<String>,
 }
 
 pub fn compile(program: &Program) -> Result<Baked, String> {
@@ -160,6 +162,9 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     let mut cg = Codegen::new(funcs, target);
     cg.heap_error = cg.intern(HEAP_ERROR);
 
+    if target.is_windows() {
+        cg.asm.windows_start("_start");
+    }
     cg.asm.label("_start");
     // Remember where the kernel put argc, argv, and envp before using the stack.
     // `str` cannot name SP, so copy it through a scratch register first.
@@ -260,17 +265,32 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     cg.emit_heap_fail();
     cg.emit_runtime_fail();
 
+    if target.is_windows() {
+        // Any syscall the Windows runtime does not map lands here. The label
+        // is emitted unconditionally so every unsupported call has a target.
+        cg.asm.label("windows_unsupported");
+        cg.emit_write_literal(
+            "burnt: this Windows build does not support that feature yet\n",
+            2,
+        );
+        cg.asm.mov_imm64(X8, SYS_EXIT);
+        cg.asm.movz_reg(X0, 1);
+        cg.asm.svc();
+    }
+
     if cg.next_global * 8 > HEAP_PTR_OFFSET {
         return Err("this program has too many top-level things to keep track of".to_string());
     }
 
     let bss = cg.bss_size();
-    let (text, rodata) = cg.asm.finish();
+    let imports = cg.asm.imports();
+    let (text, rodata) = cg.asm.finish_with_bss(bss);
     Ok(Baked {
         text,
         rodata,
         bss,
         target,
+        imports,
     })
 }
 
