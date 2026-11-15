@@ -1,0 +1,258 @@
+# table.rk — rows and columns with aligned cells and an optional frame.
+#
+# A table is data, not a class: a header row and a list of rows, where each row
+# is a list of text cells. The same shape a CSV file has.
+#
+#     wheat_table with ["name", "version"] and [["math", "1.2.0"], ["text", "2.1.0"]] and "simple"
+#     ┌──────┬─────────┐
+#     │ name │ version │
+#     ├──────┼─────────┤
+#     │ math │ 1.2.0   │
+#     │ text │ 2.1.0   │
+#     └──────┴─────────┘
+#
+# Column widths come from the widest cell in each column, measured in display
+# cells. Short rows are padded with empty cells. Styles:
+#
+#     grid     every cell is boxed, with a divider between rows
+#     simple   a box around the whole table and under the header
+#     plain    no borders, header underlined with dashes
+#     none     no borders and no underline
+#
+# Header cells are centred; body cells are left-aligned unless the caller
+# passes a list of alignments (`left`, `center`, `right`).
+
+import "text"
+import "measure"
+import "box"
+
+# The border pieces a table style needs, as
+# `[top_left, top_mid, top_right, mid_left, mid_mid, mid_right,
+#   bottom_left, bottom_mid, bottom_right, horizontal, vertical]`.
+to wheat_table_parts with kind as view of text:
+    if kind is "heavy":
+        give back ["┏", "┳", "┓", "┣", "╋", "┫", "┗", "┻", "┛", "━", "┃"]
+    if kind is "double":
+        give back ["╔", "╦", "╗", "╠", "╬", "╣", "╚", "╩", "╝", "═", "║"]
+    if kind is "rounded":
+        give back ["╭", "┬", "╮", "├", "┼", "┤", "╰", "┴", "╯", "─", "│"]
+    if kind is "ascii":
+        give back ["+", "+", "+", "+", "+", "+", "+", "+", "+", "-", "|"]
+    if kind is "plain" or kind is "none":
+        give back ["", "", "", "", "", "", "", "", "", "", ""]
+    give back ["┌", "┬", "┐", "├", "┼", "┤", "└", "┴", "┘", "─", "│"]
+
+# True when a style draws no frame.
+to wheat_table_is_plain with kind as view of text:
+    give back kind is "plain" or kind is "none"
+
+# A rule made of `left`, `fill`, `middle`, `right`: the top, middle, or bottom
+# edge of a bordered table. Each column occupies its width plus one space of
+# padding on each side.
+to wheat_table_border with widths as view of a list of numbers and left as view of text and middle as view of text and right as view of text and fill as view of text:
+    let out be copy of left
+    let i be 1
+    while i is at most length of widths:
+        set out to out + (text_repeat with fill and ((item i of widths) + 2))
+        if i is less than length of widths:
+            set out to out + middle
+        set i to i + 1
+    give back out + right
+
+# One row of a bordered table: cells padded to their column widths and framed
+# by the vertical border.
+to wheat_table_bordered_row with cells as view of a list of text and widths as view of a list of numbers and aligns as view of a list of text and kind as view of text:
+    let parts be wheat_table_parts with kind
+    let out be item 11 of parts
+    let i be 1
+    while i is at most length of widths:
+        let cell be ""
+        if i is at most length of cells:
+            set cell to item i of cells
+        let align be "left"
+        if i is at most length of aligns:
+            set align to item i of aligns
+        let fitted be wheat_table_align_cell with cell and (item i of widths) and align
+        set out to out + " " + fitted + " " + (item 11 of parts)
+        set i to i + 1
+    give back out
+
+# Crop a cell to `width` cells, then pad it according to one alignment word.
+to wheat_table_align_cell with cell as view of text and width as a number and align as view of text:
+    let fitted be wheat_text_crop with cell and width
+    if align is "right":
+        give back wheat_text_pad_left with fitted and width
+    if align is "center" or align is "centre":
+        give back wheat_text_pad_center with fitted and width
+    give back wheat_text_pad_right with fitted and width
+
+# One row of a borderless table: cells padded and separated by two spaces.
+to wheat_table_plain_row with cells as view of a list of text and widths as view of a list of numbers and aligns as view of a list of text:
+    let out be ""
+    let i be 1
+    while i is at most length of widths:
+        let cell be ""
+        if i is at most length of cells:
+            set cell to item i of cells
+        let align be "left"
+        if i is at most length of aligns:
+            set align to item i of aligns
+        if i is more than 1:
+            set out to out + "  "
+        set out to out + (wheat_table_align_cell with cell and (item i of widths) and align)
+        set i to i + 1
+    give back out
+
+# A header row followed by rows, as one owned value that `measure` can read.
+to wheat_table_with_header with headers as view of a list of text and rows as view of a list of list of text:
+    let all be an empty list of list of text
+    let header_row be an empty list of text
+    for each header in headers:
+        add (copy of header) to header_row
+    add header_row to all
+    for each row in rows:
+        let copy_row be an empty list of text
+        for each cell in row:
+            add (copy of cell) to copy_row
+        add copy_row to all
+    give back all
+
+# The widths of every column, including the header row.
+to wheat_table_widths with headers as view of a list of text and rows as view of a list of list of text:
+    give back wheat_measure_columns with (wheat_table_with_header with headers and rows)
+
+# Fill a list of alignments out to `count` entries, defaulting to `fallback`.
+to wheat_table_aligns with aligns as view of a list of text and count as a number and fallback as view of text:
+    let out be an empty list of text
+    let i be 1
+    while i is at most count:
+        if i is at most length of aligns:
+            add (copy of (item i of aligns)) to out
+        otherwise:
+            add (copy of fallback) to out
+        set i to i + 1
+    give back out
+
+# A table with centred headers and left-aligned cells.
+to wheat_table with headers as view of a list of text and rows as view of a list of list of text and kind as view of text:
+    let aligns be an empty list of text
+    give back wheat_table_aligned with headers and rows and aligns and kind
+
+# A table with explicit cell alignment. `aligns` is a list of `left`, `center`,
+# or `right`, one per column; missing entries are left-aligned.
+to wheat_table_aligned with headers as view of a list of text and rows as view of a list of list of text and aligns as view of a list of text and kind as view of text:
+    let widths be wheat_table_widths with headers and rows
+    if length of widths is 0:
+        give back ""
+    let header_aligns be wheat_table_aligns with aligns and (length of widths) and "center"
+    let cell_aligns be wheat_table_aligns with aligns and (length of widths) and "left"
+    let header_row be an empty list of text
+    for each header in headers:
+        add (copy of header) to header_row
+    let out be ""
+
+    if wheat_table_is_plain with kind:
+        set out to wheat_table_plain_row with header_row and widths and header_aligns
+        if kind is "plain":
+            let underline be ""
+            let u be 1
+            while u is at most length of widths:
+                if u is more than 1:
+                    set underline to underline + "  "
+                set underline to underline + (text_repeat with "-" and (item u of widths))
+                set u to u + 1
+            set out to out + "\n" + underline
+        for each row in rows:
+            set out to out + "\n" + (wheat_table_plain_row with row and widths and cell_aligns)
+        give back out
+
+    let parts be wheat_table_parts with kind
+    let horizontal be item 10 of parts
+    set out to wheat_table_border with widths and (item 1 of parts) and (item 2 of parts) and (item 3 of parts) and horizontal
+    set out to out + "\n" + (wheat_table_bordered_row with header_row and widths and header_aligns and kind)
+    set out to out + "\n" + (wheat_table_border with widths and (item 4 of parts) and (item 5 of parts) and (item 6 of parts) and horizontal)
+    let r be 1
+    for each row in rows:
+        set out to out + "\n" + (wheat_table_bordered_row with row and widths and cell_aligns and kind)
+        if kind is "grid" and r is less than length of rows:
+            set out to out + "\n" + (wheat_table_border with widths and (item 4 of parts) and (item 5 of parts) and (item 6 of parts) and horizontal)
+        set r to r + 1
+    give back out + "\n" + (wheat_table_border with widths and (item 7 of parts) and (item 8 of parts) and (item 9 of parts) and horizontal)
+
+# A table whose columns are sized to fit `width` cells. Columns wider than
+# their share are narrowed and their cells cropped.
+to wheat_table_fitted with headers as view of a list of text and rows as view of a list of list of text and width as a number and kind as view of text:
+    let widths be wheat_table_widths with headers and rows
+    let framed be 2 + length of widths * 3
+    let available be width - framed
+    if available is less than length of widths:
+        set available to length of widths
+    let fitted be wheat_measure_fit_columns with widths and available
+    let all be wheat_table_with_header with headers and rows
+    let out_table be ""
+    let parts be wheat_table_parts with kind
+    if wheat_table_is_plain with kind:
+        let plain_header be item 1 of all
+        set out_table to wheat_table_plain_row with plain_header and fitted and (wheat_table_aligns with (an empty list of text) and (length of fitted) and "left")
+        let p be 2
+        while p is at most length of all:
+            set out_table to out_table + "\n" + (wheat_table_plain_row with (item p of all) and fitted and (wheat_table_aligns with (an empty list of text) and (length of fitted) and "left"))
+            set p to p + 1
+        give back out_table
+    let horizontal be item 10 of parts
+    let framed_header be item 1 of all
+    set out_table to wheat_table_border with fitted and (item 1 of parts) and (item 2 of parts) and (item 3 of parts) and horizontal
+    set out_table to out_table + "\n" + (wheat_table_bordered_row with framed_header and fitted and (wheat_table_aligns with (an empty list of text) and (length of fitted) and "center") and kind)
+    set out_table to out_table + "\n" + (wheat_table_border with fitted and (item 4 of parts) and (item 5 of parts) and (item 6 of parts) and horizontal)
+    let q be 2
+    while q is at most length of all:
+        set out_table to out_table + "\n" + (wheat_table_bordered_row with (item q of all) and fitted and (wheat_table_aligns with (an empty list of text) and (length of fitted) and "left") and kind)
+        if kind is "grid" and q is less than length of all:
+            set out_table to out_table + "\n" + (wheat_table_border with fitted and (item 4 of parts) and (item 5 of parts) and (item 6 of parts) and horizontal)
+        set q to q + 1
+    give back out_table + "\n" + (wheat_table_border with fitted and (item 7 of parts) and (item 8 of parts) and (item 9 of parts) and horizontal)
+
+# A table with no header, just rows. Useful for inventories.
+to wheat_table_body with rows as view of a list of list of text and kind as view of text:
+    let headers be an empty list of text
+    let count be 0
+    for each row in rows:
+        if length of row is more than count:
+            set count to length of row
+    let i be 1
+    while i is at most count:
+        add "" to headers
+        set i to i + 1
+    if wheat_table_is_plain with kind:
+        let widths be wheat_table_widths with headers and rows
+        let aligns be wheat_table_aligns with (an empty list of text) and (length of widths) and "left"
+        let plain_out be ""
+        let first be true
+        for each row in rows:
+            if not first:
+                set plain_out to plain_out + "\n"
+            set plain_out to plain_out + (wheat_table_plain_row with row and widths and aligns)
+            set first to false
+        give back plain_out
+    let result be wheat_table_aligned with headers and rows and (an empty list of text) and kind
+    let lines be wheat_text_lines with result
+    if length of lines is less than 3:
+        give back result
+    let out be ""
+    let line_index be 1
+    while line_index is at most length of lines:
+        if line_index is not 2 and line_index is not 3:
+            if out is not "":
+                set out to out + "\n"
+            set out to out + (item line_index of lines)
+        set line_index to line_index + 1
+    give back out
+
+# The same table in every style.
+to wheat_table_demo:
+    let headers be ["name", "version", "size"]
+    let rows be [["math", "1.2.0", "18 KB"], ["text", "2.1.0", "12 KB"]]
+    let out be ""
+    for each kind in ["grid", "simple", "rounded", "plain"]:
+        set out to out + (wheat_table with headers and rows and kind) + "\n\n"
+    give back out

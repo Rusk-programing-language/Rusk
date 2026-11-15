@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/rusk-logo.svg" alt="Rusk logo" width="160" height="160">
+  <img src="assets/rusk-logo.svg" alt="Rusk logo" width="160">
 </p>
 
 <h1 align="center">Rusk</h1>
@@ -76,7 +76,7 @@ is an integer-expression interpreter written in Rusk and compiled by Rusk. See
 
 ```console
 cargo build --release
-cargo run --                              # start the interactive session
+cargo run --                              # run a nearby Ruskfile, else the session
 cargo run -- run examples/hello.rk       # bake and run
 cargo run -- run examples/closures.rk    # function values and views
 cargo run -- tui                          # start the full-screen session
@@ -332,7 +332,7 @@ A file can pull in several modules; each file is included at most once:
 
 ```rusk
 import "lib/greetings"          # plain inclusion, global names
-import "../ruskmods/math"       # math_square, ...
+import "math"                   # math_square, ...
 
 import "lib/units" as units     # units.convert, units.ratio, ...
 from "lib/text" import trim     # trim, without a prefix
@@ -348,21 +348,30 @@ say units.convert with 3
 say pad_left with "x"
 ```
 
-The checkout ships small Rusk libraries under `ruskmods/`: `text`, `math`,
-`date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`,
-and `shutils`. The `rusklib/` folder adds higher-level file and archive
-helpers, plus a bundle that imports everything:
+A bare module name is resolved next to the importing file, then in `ruskmods/`
+and `rusklib/` beside it and in each parent directory. That means `import "math"`
+works from a program at the checkout root and from one in `examples/`, and
+`import "wheat/table"` finds `rusklib/wheat/table.rk`.
+
+The checkout ships small Rusk libraries under `ruskmods/`: `math`, `date`,
+`time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`, and
+`shutils`. `ruskmods/installwork/` is an installer framework with a registry,
+version specs, a dependency resolver, archives, an install prefix, and a CLI.
+The `rusklib/` folder adds higher-level file and archive helpers, the `wheat`
+terminal UI library, and a bundle that imports everything:
 
 ```rusk
 import "rusklib/rusklib"
 say date_format_iso with 2026 and 11 and 12
 say files_exists with "notes.txt"
+say wheat_box_around with "hello" and 0 and "rounded"
 ```
 
-Every public name carries its module's prefix (`date_`, `files_`, and so on)
-because a plain import shares one global namespace. Import one module directly
-when a program does not need the bundle. See
-[`ruskmods/README.md`](ruskmods/README.md) for the function list.
+Every public name carries its module's prefix (`date_`, `files_`, `wheat_`,
+and so on) because a plain import shares one global namespace. Import one
+module directly when a program does not need the bundle. See
+[`ruskmods/README.md`](ruskmods/README.md) and
+[`rusklib/README.md`](rusklib/README.md) for the function lists.
 
 A line containing only `end`, `end.`, `<e>`, `</e>`, or `end of file` stops the
 file there, so chained or concatenated files do not run into each other. That
@@ -480,7 +489,8 @@ the [guide](guide/README.md).
 
 ## The prompt
 
-Run `rusk` with no arguments (or `rusk repl`) to work interactively:
+`rusk` with no arguments runs a nearby `Ruskfile` if it finds one, and otherwise
+starts the interactive session. `rusk repl` always starts the session:
 
 ```console
 $ rusk
@@ -529,6 +539,45 @@ terminal on the way out — including when a program uses `stop with`.
 `rusk tui demo` opens the smaller terminal-module demo instead. There is no
 `crossterm` or `ratatui`; over a pipe both commands fall back to plain text
 instead of escapes.
+
+## Projects and the Ruskfile
+
+A `Ruskfile` is a project manifest **and** a task runner in ordinary Rusk
+source. There is no TOML file and no second language to learn:
+
+```rusk
+# Ruskfile
+let package_name be "demo"
+let package_version be "1.2.0"
+let package_entry be "src/main.rk"
+let package_description be "A tiny demo"
+let package_license be "MIT"
+let package_requires be ["math >=1.0.0", "text ^2.1.0"]
+
+to build:
+    say run command "rusk build src/main.rk -o bin/demo"
+
+to test:
+    say run command "rusk run tests/main.rk"
+
+build
+```
+
+The `let package_...` lines are metadata read by the installer; everything else
+is an ordinary program. Running `rusk` with no arguments searches the current
+directory and its parents for `Ruskfile` (then `ruskfile`) and runs the first
+one it finds. The `installwork` framework in `ruskmods/installwork/` reads the
+manifest, resolves requirements, and installs a package tree into a prefix.
+Its CLI also lists tasks and writes a starter project:
+
+```console
+installwork tasks
+installwork init demo
+installwork plan demo
+installwork install demo
+```
+
+The registry is a local directory tree of package versions; there is no server.
 
 ## How it works
 
@@ -714,7 +763,7 @@ it is easy to copy to a server, container, or Termux device.
 
 It is a young language, and that limits the honest answer. Networking is
 blocking TCP only, with no DNS, TLS, UDP, or IPv6, and there are still no
-threads, GUI toolkit, package registry, or Windows/macOS output. It is not ready
+threads, GUI toolkit, networked package registry, or Windows/macOS output. It is not ready
 for large applications, services, embedded systems, or libraries that other
 languages call into. Treat it as a compact AOT language for small programs, not
 as a general-purpose production platform yet.
@@ -757,33 +806,120 @@ The official Rusk mark lives in
 [`assets/rusk-logo.svg`](assets/rusk-logo.svg). Its full source:
 
 ```svg
-<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background -->
-  <rect width="512" height="512" rx="64" fill="#000000"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 260" width="300" height="260">
+  <defs>
+    <!-- Crust gradient -->
+    <linearGradient id="crustGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D2691E" />
+      <stop offset="50%" stop-color="#A0522D" />
+      <stop offset="100%" stop-color="#703518" />
+    </linearGradient>
 
-  <!-- Rusk Monogram -->
-  <path
-    fill="#FFFFFF"
-    d="
-      M144 96
-      H272
-      C352 96 400 144 400 212
-      C400 263 370 301 316 316
-      L400 416
-      H326
-      L252 326
-      H208
-      V416
-      H144
-      Z
+    <!-- Golden baked interior gradient -->
+    <linearGradient id="crumbGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#F5C27D" />
+      <stop offset="60%" stop-color="#E5A253" />
+      <stop offset="100%" stop-color="#C88136" />
+    </linearGradient>
 
-      M208 152
-      V272
-      H266
-      C308 272 336 248 336 212
-      C336 176 308 152 266 152
-      Z"
-  />
+    <!-- Soft drop shadow -->
+    <filter id="dropShadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="4" dy="8" stdDeviation="6" flood-color="#3E2723" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- Main Rusk Group -->
+  <g filter="url(#dropShadow)" transform="translate(15, 10)">
+    <!-- 3D Side Thickness / Crust -->
+    <path d="M 65 55 
+             C 65 25, 215 25, 215 55 
+             C 228 65, 228 85, 212 95 
+             L 215 195 
+             C 215 208, 205 215, 192 215 
+             L 88 215 
+             C 75 215, 65 208, 65 195 
+             L 68 95 
+             C 52 85, 52 65, 65 55 Z" 
+          fill="url(#crustGrad)" />
+
+    <!-- Front Toasted Face -->
+    <path d="M 60 60 
+             C 60 32, 205 32, 205 60 
+             C 218 70, 218 88, 202 98 
+             L 205 198 
+             C 205 210, 195 218, 182 218 
+             L 83 218 
+             C 70 218, 60 210, 60 198 
+             L 63 98 
+             C 47 88, 47 70, 60 60 Z" 
+          fill="url(#crumbGrad)" 
+          stroke="#8B4513" 
+          stroke-width="3.5" 
+          stroke-linejoin="round" />
+
+    <!-- Subtle inner toast browning -->
+    <path d="M 68 65 
+             C 68 42, 197 42, 197 65 
+             C 207 73, 207 86, 194 94 
+             L 197 192 
+             C 197 202, 190 209, 179 209 
+             L 86 209 
+             C 75 209, 68 202, 68 192 
+             L 71 94 
+             C 58 86, 58 73, 68 65 Z" 
+          fill="none" 
+          stroke="#D4883B" 
+          stroke-width="4" 
+          opacity="0.5" />
+
+    <!-- Porous Air Pockets / Crumb Texture -->
+    <g fill="#9C571D" opacity="0.55">
+      <!-- Top dome pores -->
+      <ellipse cx="110" cy="58" rx="4" ry="2.5" transform="rotate(-15 110 58)" />
+      <circle cx="135" cy="50" r="2.2" />
+      <ellipse cx="160" cy="60" rx="5" ry="3" transform="rotate(20 160 60)" />
+      <circle cx="88" cy="72" r="3" />
+      <ellipse cx="182" cy="76" rx="3.5" ry="2" transform="rotate(-10 182 76)" />
+      <circle cx="132" cy="74" r="4" />
+      
+      <!-- Middle pores -->
+      <ellipse cx="95" cy="105" rx="5.5" ry="3" transform="rotate(12 95 105)" />
+      <circle cx="122" cy="96" r="2.5" />
+      <ellipse cx="152" cy="102" rx="4" ry="2.8" transform="rotate(-25 152 102)" />
+      <circle cx="176" cy="112" r="3.2" />
+      <ellipse cx="114" cy="128" rx="6" ry="3.5" transform="rotate(-8 114 128)" />
+      <circle cx="145" cy="132" r="2.8" />
+      <ellipse cx="86" cy="142" rx="3.5" ry="2" />
+      <ellipse cx="172" cy="146" rx="4.5" ry="2.5" transform="rotate(18 172 146)" />
+
+      <!-- Bottom pores -->
+      <circle cx="102" cy="168" r="3.5" />
+      <ellipse cx="134" cy="162" rx="5" ry="2.8" transform="rotate(10 134 162)" />
+      <circle cx="164" cy="174" r="2.5" />
+      <ellipse cx="88" cy="190" rx="4" ry="2.2" transform="rotate(-15 88 190)" />
+      <circle cx="120" cy="192" r="3" />
+      <ellipse cx="150" cy="194" rx="5.5" ry="3" transform="rotate(5 150 194)" />
+      <circle cx="180" cy="188" r="2.8" />
+    </g>
+
+    <!-- Lighter highlights inside larger pores for depth -->
+    <g fill="#FCE2B8" opacity="0.6">
+      <circle cx="131" cy="73" r="1.5" />
+      <circle cx="94" cy="104" r="2" />
+      <circle cx="113" cy="127" r="2.2" />
+      <circle cx="133" cy="161" r="1.8" />
+      <circle cx="149" cy="193" r="2" />
+    </g>
+
+    <!-- Loose Crunchy Crumbs Around Base -->
+    <g fill="#C88136" stroke="#8B4513" stroke-width="1">
+      <polygon points="45,212 50,209 52,214 47,216" />
+      <circle cx="38" cy="218" r="2" />
+      <polygon points="215,210 221,208 220,214 214,215" />
+      <circle cx="226" cy="217" r="2.5" />
+      <circle cx="212" cy="221" r="1.5" />
+    </g>
+  </g>
 </svg>
 ```
 

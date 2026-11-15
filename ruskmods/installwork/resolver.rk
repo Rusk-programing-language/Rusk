@@ -1,0 +1,172 @@
+# resolver.rk — choose versions and put an installation plan in dependency order.
+#
+# Requirements arrive as `name spec` text. The resolver walks them breadth
+# first, picks the newest matching version from the registry, and appends that
+# package's own requirements. A result list always begins with `"ok"` or
+# `"error"`:
+#
+#     ["ok", "text 2.1.0", "math 1.2.0"]
+#     ["error", "no package named 'missing'"]
+#
+# `installwork_resolver_order` then sorts the `name version` selections so
+# dependencies come before the packages that need them. Cycles are placed at the
+# end rather than looping forever; `installwork_resolver_cycle` reports them.
+
+import "text"
+import "version"
+import "requirement"
+import "registry"
+
+# Find `value` in a list of text. Gives 0 when absent.
+to installwork_resolver_index with items as a view of a list of text and value as a view of text:
+    let i be 1
+    while i is at most length of items:
+        if (item i of items) is value:
+            give back i
+        set i to i + 1
+    give back 0
+
+# True when `value` is in the list.
+to installwork_resolver_has with items as a view of a list of text and value as a view of text:
+    give back (installwork_resolver_index with items and value) is not 0
+
+# The package name at the front of a `name version` selection.
+to installwork_resolver_selection_name with selection as a view of text:
+    let cut be installwork_text_index_of with selection and " "
+    if cut is 0:
+        give back copy of selection
+    give back part 1 to (cut - 1) of selection
+
+# The version at the end of a `name version` selection.
+to installwork_resolver_selection_version with selection as a view of text:
+    let cut be installwork_text_index_of with selection and " "
+    if cut is 0:
+        give back ""
+    give back part (cut + 1) to (length of selection) of selection
+
+# A one-item error result.
+to installwork_resolver_error with message as a view of text:
+    let out be ["error"]
+    add (copy of message) to out
+    give back out
+
+# Resolve a list of requirements against a registry.
+to installwork_resolver_resolve with root as a view of text and requirements as a view of a list of text:
+    let selections be an empty list of text
+    let names be an empty list of text
+    let queue be an empty list of text
+    for each requirement in requirements:
+        add (copy of requirement) to queue
+
+    while length of queue is more than 0:
+        let requirement be item 1 of queue
+        remove item 1 from queue
+        let name be installwork_requirement_name with requirement
+        let spec be installwork_requirement_spec with requirement
+        if not (installwork_requirement_valid with requirement):
+            give back installwork_resolver_error with ("I can't read the requirement '" + requirement + "'")
+        let already be installwork_resolver_index with names and name
+        if already is not 0:
+            let chosen be installwork_resolver_selection_version with (item already of selections)
+            if not (installwork_version_satisfies with chosen and spec):
+                give back installwork_resolver_error with ("the plan needs " + name + " " + spec + " but already chose " + chosen)
+        otherwise:
+            let best be installwork_registry_best with root and name and spec
+            if best is "":
+                give back installwork_resolver_error with ("no package named '" + name + "' matches " + spec)
+            add (copy of name) to names
+            add ((copy of name) + " " + best) to selections
+            for each dependency in (installwork_registry_requires with root and name and best):
+                add dependency to queue
+
+    let out be ["ok"]
+    for each selection in selections:
+        add selection to out
+    give back out
+
+# True when `selection` can be installed now: every selected dependency already
+# appears in `installed`.
+to installwork_resolver_ready with root as a view of text and selection as a view of text and selected as a view of a list of text and installed as a view of a list of text:
+    let name be installwork_resolver_selection_name with selection
+    let version be installwork_resolver_selection_version with selection
+    for each requirement in (installwork_registry_requires with root and name and version):
+        let dep be installwork_requirement_name with requirement
+        if (installwork_resolver_has with selected and dep) and not (installwork_resolver_has with installed and dep):
+            give back false
+    give back true
+
+# Order selections so dependencies come first. Unknown dependencies are treated
+# as already satisfied. A cycle is appended in its current order.
+to installwork_resolver_order with root as a view of text and selections as a view of a list of text:
+    let selected be an empty list of text
+    for each selection in selections:
+        add (installwork_resolver_selection_name with selection) to selected
+    let remaining be an empty list of text
+    for each selection in selections:
+        add (copy of selection) to remaining
+    let result be an empty list of text
+    let installed be an empty list of text
+
+    while length of remaining is more than 0:
+        let progress be false
+        let i be 1
+        while i is at most length of remaining:
+            let candidate be item i of remaining
+            if installwork_resolver_ready with root and candidate and selected and installed:
+                let candidate_name be installwork_resolver_selection_name with candidate
+                add candidate to result
+                add candidate_name to installed
+                remove item i from remaining
+                set progress to true
+                break
+            set i to i + 1
+        if not progress:
+            for each leftover in remaining:
+                add leftover to result
+            set remaining to an empty list of text
+    give back result
+
+# The names in a list of `name version` selections, as a list of names.
+to installwork_resolver_name_list with selections as a view of a list of text:
+    let out be an empty list of text
+    for each selection in selections:
+        add (installwork_resolver_selection_name with selection) to out
+    give back out
+
+# The selected version of `name`, or empty text.
+to installwork_resolver_selected_version with selections as a view of a list of text and name as a view of text:
+    for each selection in selections:
+        if (installwork_resolver_selection_name with selection) is name:
+            give back installwork_resolver_selection_version with selection
+    give back ""
+
+# True when `current` reaches `target` through selected dependencies.
+to installwork_resolver_reaches with root as a view of text and selections as a view of a list of text and current as a view of text and target as a view of text and seen as a view of a list of text:
+    let version be installwork_resolver_selected_version with selections and current
+    if version is "":
+        give back false
+    for each requirement in (installwork_registry_requires with root and current and version):
+        let dep be installwork_requirement_name with requirement
+        if dep is target:
+            give back true
+        if not (installwork_resolver_has with seen and dep):
+            let next_seen be copy of seen
+            add (copy of dep) to next_seen
+            if installwork_resolver_reaches with root and selections and dep and target and next_seen:
+                give back true
+    give back false
+
+# True when the plan contains a dependency cycle.
+to installwork_resolver_cycle with root as a view of text and selections as a view of a list of text:
+    for each selection in selections:
+        let name be installwork_resolver_selection_name with selection
+        if installwork_resolver_reaches with root and selections and name and name and [copy of name]:
+            give back true
+    give back false
+
+# A readable plan: one `name version` per line, dependencies first.
+to installwork_resolver_text with root as a view of text and selections as a view of a list of text:
+    let ordered be installwork_resolver_order with root and selections
+    if length of ordered is 0:
+        give back "(nothing to install)\n"
+    give back installwork_text_join with ordered and "\n"

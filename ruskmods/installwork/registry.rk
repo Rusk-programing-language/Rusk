@@ -1,0 +1,135 @@
+# registry.rk — a local, directory-based package registry.
+#
+# Layout:
+#
+#     ROOT/
+#       math/
+#         1.0.0/
+#           Ruskfile
+#         1.2.0/
+#           Ruskfile
+#       text/
+#         2.1.0/
+#           Ruskfile
+#
+# Every version directory is a package tree. The Ruskfile inside supplies the
+# package name, version, entry point, and dependencies. There is no central
+# index file to keep in sync; the directories are the index.
+
+import "text"
+import "version"
+import "ruskfile"
+
+# True when a directory contains a Ruskfile (either spelling).
+to installwork_registry_has_ruskfile with dir as a view of text:
+    if file exists (installwork_path_join with dir and "Ruskfile"):
+        give back true
+    give back file exists (installwork_path_join with dir and "ruskfile")
+
+# The directory for one package version.
+to installwork_registry_dir with root as a view of text and name as a view of text and version as a view of text:
+    give back installwork_path_join with (installwork_path_join with root and name) and version
+
+# True when that package version exists.
+to installwork_registry_exists with root as a view of text and name as a view of text and version as a view of text:
+    give back installwork_registry_has_ruskfile with (installwork_registry_dir with root and name and version)
+
+# Package names in the registry, sorted.
+to installwork_registry_packages with root as a view of text:
+    let out be an empty list of text
+    if not (file exists root):
+        give back out
+    for each entry in (list directory root):
+        if length of (installwork_registry_versions with root and entry) is more than 0:
+            add entry to out
+    give back installwork_registry_sort_names with out
+
+# Sort names alphabetically with a small insertion sort.
+to installwork_registry_sort_names with names as a list of text:
+    let n be length of names
+    for each i from 2 to n:
+        let j be i
+        while j is more than 1:
+            let left be item (j - 1) of names
+            let right be item j of names
+            if right is less than left:
+                set item (j - 1) of names to right
+                set item j of names to left
+                set j to j - 1
+            otherwise:
+                break
+    give back names
+
+# All versions of a package, oldest first.
+to installwork_registry_versions with root as a view of text and name as a view of text:
+    let out be an empty list of text
+    let dir be installwork_path_join with root and name
+    if not (file exists dir):
+        give back out
+    for each entry in (list directory dir):
+        let candidate be installwork_path_join with dir and entry
+        if (installwork_version_valid with entry) and (installwork_registry_has_ruskfile with candidate):
+            add entry to out
+    give back installwork_registry_sort_versions with out
+
+# Sort version strings from oldest to newest.
+to installwork_registry_sort_versions with versions as a list of text:
+    let n be length of versions
+    for each i from 2 to n:
+        let j be i
+        while j is more than 1:
+            let left be item (j - 1) of versions
+            let right be item j of versions
+            if (installwork_version_compare with right and left) is -1:
+                set item (j - 1) of versions to right
+                set item j of versions to left
+                set j to j - 1
+            otherwise:
+                break
+    give back versions
+
+# The newest version, or empty text.
+to installwork_registry_latest with root as a view of text and name as a view of text:
+    let versions be installwork_registry_versions with root and name
+    if length of versions is 0:
+        give back ""
+    give back item (length of versions) of versions
+
+# The newest version matching `spec`, or empty text.
+to installwork_registry_best with root as a view of text and name as a view of text and spec as a view of text:
+    let best be ""
+    for each candidate in (installwork_registry_versions with root and name):
+        if installwork_version_satisfies with candidate and spec:
+            if best is "" or (installwork_version_compare with candidate and best) is 1:
+                set best to candidate
+    give back best
+
+# The Ruskfile text for one package version.
+to installwork_registry_read with root as a view of text and name as a view of text and version as a view of text:
+    let dir be installwork_registry_dir with root and name and version
+    let capital be installwork_path_join with dir and "Ruskfile"
+    if file exists capital:
+        give back read file capital
+    give back read file (installwork_path_join with dir and "ruskfile")
+
+# Requirements declared by one package version.
+to installwork_registry_requires with root as a view of text and name as a view of text and version as a view of text:
+    give back installwork_ruskfile_requires with (installwork_registry_read with root and name and version)
+
+# Package names containing `query`, sorted.
+to installwork_registry_search with root as a view of text and query as a view of text:
+    let out be an empty list of text
+    for each name in (installwork_registry_packages with root):
+        if query is "" or (installwork_text_contains with name and query):
+            add name to out
+    give back out
+
+# A human-readable index of every package and version.
+to installwork_registry_index with root as a view of text:
+    let out be ""
+    for each name in (installwork_registry_packages with root):
+        let versions be installwork_registry_versions with root and name
+        set out to out + name + ": " + (installwork_text_join with versions and ", ") + "\n"
+    if out is "":
+        give back "(the registry is empty)\n"
+    give back out

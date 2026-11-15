@@ -1,0 +1,510 @@
+# text.rk — text helpers, measurement, wrapping, and markup.
+#
+# This file began as the small `text_*` helper module and now also carries the
+# text layer of wheat. The old names are kept so existing programs keep
+# working:
+#
+#     text_is_empty, text_first, text_last, text_repeat, text_reverse,
+#     text_shout, text_initials, text_contains
+#
+# Rusk strings are byte strings with 1-based indexes. `length of` counts bytes,
+# not display cells. That is fine for ASCII. wheat's own drawing glyphs are
+# three-byte UTF-8 characters, so `wheat_text_width` subtracts the extra two
+# bytes for each glyph it knows about. Other non-ASCII text is measured by its
+# UTF-8 byte length; the README says so plainly rather than pretending to be a
+# Unicode width engine.
+
+# Is this text empty?
+to text_is_empty with s as view of text:
+    give back length of s is 0
+
+# The first letter. Empty text is a runtime error, just like `letter 1 of ""`.
+to text_first with s as view of text:
+    give back letter 1 of s
+
+# The last letter. Empty text is a runtime error.
+to text_last with s as view of text:
+    give back letter (length of s) of s
+
+# Write `s` next to itself `n` times. A count of zero or less gives "".
+to text_repeat with s as view of text and n as a number:
+    let out be ""
+    let i be 0
+    while i is less than n:
+        set out to out + s
+        set i to i + 1
+    give back out
+
+# Turn text around, one letter at a time.
+to text_reverse with s as view of text:
+    let out be ""
+    let i be length of s
+    while i is at least 1:
+        set out to out + letter i of s
+        set i to i - 1
+    give back out
+
+# Add an exclamation mark.
+to text_shout with s as view of text:
+    give back s + "!"
+
+# The first letters of a given name and a family name.
+to text_initials with given as view of text and family as view of text:
+    give back letter 1 of given + letter 1 of family
+
+# Does `haystack` contain `needle`? The empty needle is always found.
+to text_contains with haystack as view of text and needle as view of text:
+    give back wheat_text_contains with haystack and needle
+
+# Spaces around `s` removed.
+to wheat_text_trim with s as view of text:
+    let n be length of s
+    let start be 1
+    while start is at most n:
+        let ch be letter start of s
+        if ch is " " or ch is "\t" or ch is "\n" or ch is "\r":
+            set start to start + 1
+        otherwise:
+            break
+    let finish be n
+    while finish is at least start:
+        let tail be letter finish of s
+        if tail is " " or tail is "\t" or tail is "\n" or tail is "\r":
+            set finish to finish - 1
+        otherwise:
+            break
+    if finish is less than start:
+        give back ""
+    give back part start to finish of s
+
+# True when `s` starts with `prefix`.
+to wheat_text_starts_with with s as view of text and prefix as view of text:
+    let n be length of prefix
+    if n is 0:
+        give back true
+    if length of s is less than n:
+        give back false
+    give back (part 1 to n of s) is prefix
+
+# True when `s` ends with `suffix`.
+to wheat_text_ends_with with s as view of text and suffix as view of text:
+    let n be length of suffix
+    if n is 0:
+        give back true
+    let m be length of s
+    if m is less than n:
+        give back false
+    give back (part (m - n + 1) to m of s) is suffix
+
+# The 1-based index of `needle`, or 0 when it is absent.
+to wheat_text_index_of with s as view of text and needle as view of text:
+    let n be length of s
+    let m be length of needle
+    if m is 0:
+        give back 1
+    if m is more than n:
+        give back 0
+    let i be 1
+    while i is at most (n - m + 1):
+        if (part i to (i + m - 1) of s) is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+# Index of `needle` at or after `start`, or 0.
+to wheat_text_index_from with s as view of text and needle as view of text and start as a number:
+    if start is less than 1:
+        give back 0
+    let n be length of s
+    let m be length of needle
+    if m is 0:
+        if start is at most (n + 1):
+            give back start
+        give back 0
+    if start is more than n:
+        give back 0
+    let i be start
+    while i is at most (n - m + 1):
+        if (part i to (i + m - 1) of s) is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+# True when `needle` appears in `haystack`.
+to wheat_text_contains with haystack as view of text and needle as view of text:
+    give back (wheat_text_index_of with haystack and needle) is not 0
+
+# How many times `needle` occurs in `s`. The empty needle counts 0.
+to wheat_text_count with s as view of text and needle as view of text:
+    let m be length of needle
+    if m is 0:
+        give back 0
+    let total be 0
+    let at be wheat_text_index_of with s and needle
+    while at is not 0:
+        set total to total + 1
+        set at to wheat_text_index_from with s and needle and (at + m)
+    give back total
+
+# Split on a literal separator. An empty separator gives one piece holding `s`.
+to wheat_text_split with s as view of text and separator as view of text:
+    let out be an empty list of text
+    let m be length of separator
+    if m is 0:
+        add (copy of s) to out
+        give back out
+    let start be 1
+    let n be length of s
+    let at be wheat_text_index_of with s and separator
+    while at is not 0:
+        add (part start to (at - 1) of s) to out
+        set start to at + m
+        set at to wheat_text_index_from with s and separator and start
+    add (part start to n of s) to out
+    give back out
+
+# Words separated by spaces, tabs, or newlines.
+to wheat_text_words with s as view of text:
+    let out be an empty list of text
+    let n be length of s
+    let start be 1
+    while start is at most n:
+        let ch be letter start of s
+        if ch is " " or ch is "\t" or ch is "\n" or ch is "\r":
+            set start to start + 1
+        otherwise:
+            let finish be start
+            while finish is at most n:
+                let inner be letter finish of s
+                if inner is " " or inner is "\t" or inner is "\n" or inner is "\r":
+                    break
+                set finish to finish + 1
+            add (part start to (finish - 1) of s) to out
+            set start to finish
+    give back out
+
+# Lines, with a trailing newline not producing an extra empty line.
+to wheat_text_lines with s as view of text:
+    let out be an empty list of text
+    let n be length of s
+    if n is 0:
+        add "" to out
+        give back out
+    let start be 1
+    let i be 1
+    while i is at most n:
+        if (letter i of s) is "\n":
+            add (part start to (i - 1) of s) to out
+            set start to i + 1
+        set i to i + 1
+    if start is at most n:
+        add (part start to n of s) to out
+    give back out
+
+# Join pieces with a separator.
+to wheat_text_join with items as view of a list of text and separator as view of text:
+    let out be ""
+    let i be 1
+    while i is at most length of items:
+        if i is more than 1:
+            set out to out + separator
+        set out to out + (item i of items)
+        set i to i + 1
+    give back out
+
+# Replace every occurrence of `from` with `to`.
+to wheat_text_replace with s as view of text and from as view of text and to as view of text:
+    let out be ""
+    let n be length of s
+    let m be length of from
+    if m is 0:
+        give back copy of s
+    let start be 1
+    let at be wheat_text_index_of with s and from
+    while at is not 0:
+        set out to out + (part start to (at - 1) of s) + to
+        set start to at + m
+        set at to wheat_text_index_from with s and from and start
+    set out to out + (part start to n of s)
+    give back out
+
+# ASCII upper case. Other bytes are left alone.
+to wheat_text_upper with s as view of text:
+    let out be ""
+    let i be 1
+    while i is at most length of s:
+        let ch be letter i of s
+        if ch is at least "a" and ch is at most "z":
+            set out to out + wheat_text_upper_char with ch
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+to wheat_text_upper_char with ch as view of text:
+    let lowers be ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
+    let uppers be ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+    let i be 1
+    while i is at most length of lowers:
+        if (item i of lowers) is ch:
+            give back item i of uppers
+        set i to i + 1
+    give back copy of ch
+
+# ASCII lower case.
+to wheat_text_lower with s as view of text:
+    let out be ""
+    let i be 1
+    while i is at most length of s:
+        let ch be letter i of s
+        if ch is at least "A" and ch is at most "Z":
+            set out to out + wheat_text_lower_char with ch
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+to wheat_text_lower_char with ch as view of text:
+    let uppers be ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+    let lowers be ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z"]
+    let i be 1
+    while i is at most length of uppers:
+        if (item i of uppers) is ch:
+            give back item i of lowers
+        set i to i + 1
+    give back copy of ch
+
+# A decimal digit as a number, or -1.
+to wheat_text_digit with ch as view of text:
+    if ch is "0":
+        give back 0
+    if ch is "1":
+        give back 1
+    if ch is "2":
+        give back 2
+    if ch is "3":
+        give back 3
+    if ch is "4":
+        give back 4
+    if ch is "5":
+        give back 5
+    if ch is "6":
+        give back 6
+    if ch is "7":
+        give back 7
+    if ch is "8":
+        give back 8
+    if ch is "9":
+        give back 9
+    give back -1
+
+# A non-negative whole number as text.
+to wheat_text_from_number with n as a number:
+    if n is 0:
+        give back "0"
+    let digits be ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    let value be n
+    let negative be n is less than 0
+    if negative:
+        set value to 0 - value
+    let out be ""
+    while value is more than 0:
+        let digit be value - (value / 10) * 10
+        set out to (item (digit + 1) of digits) + out
+        set value to value / 10
+    if negative:
+        set out to "-" + out
+    give back out
+
+# Parse a non-negative whole number. Anything else gives -1.
+to wheat_text_to_number with s as view of text:
+    let t be wheat_text_trim with s
+    let n be length of t
+    if n is 0:
+        give back -1
+    let value be 0
+    let i be 1
+    while i is at most n:
+        let digit be wheat_text_digit with (letter i of t)
+        if digit is less than 0:
+            give back -1
+        set value to value * 10 + digit
+        set i to i + 1
+    give back value
+
+# Remove ANSI SGR sequences from text. A stray ESC with no final byte before
+# the end of the string is dropped along with the rest of the line.
+to wheat_text_strip_ansi with s as view of text:
+    let out be ""
+    let n be length of s
+    let i be 1
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "":
+            set i to i + 1
+            while i is at most n:
+                let final be letter i of s
+                if final is at least "@" and final is at most "~":
+                    set i to i + 1
+                    break
+                set i to i + 1
+        otherwise:
+            set out to out + ch
+            set i to i + 1
+    give back out
+
+# Every glyph wheat draws with, used to turn UTF-8 byte counts into cells.
+# They are all three-byte characters with a display width of one.
+to wheat_text_glyphs:
+    give back ["─", "│", "┌", "┐", "└", "┘", "├", "┤", "┬", "┴", "┼", "╭", "╮", "╰", "╯", "━", "┃", "┏", "┓", "┗", "┛", "╔", "╗", "╚", "╝", "║", "═", "╠", "╣", "╦", "╩", "╬", "█", "▉", "▊", "▋", "▌", "▍", "▎", "▏", "░", "▒", "▓", "▔", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "▶", "◀", "▲", "▼", "•", "…", "→", "←", "↑", "↓", "✓", "✗", "●", "○", "◆", "◇", "·"]
+
+# Display width of text, ignoring ANSI codes and correcting for wheat's own
+# three-byte glyphs. UTF-8 glyphs outside that set count as their byte length.
+to wheat_text_width with s as view of text:
+    let plain be wheat_text_strip_ansi with s
+    let width be length of plain
+    for each glyph in (wheat_text_glyphs):
+        set width to width - 2 * (wheat_text_count with plain and glyph)
+    if width is less than 0:
+        give back 0
+    give back width
+
+# True when the text has no ANSI escape byte.
+to wheat_text_is_plain with s as view of text:
+    give back (wheat_text_index_of with s and "") is 0
+
+# Pad on the right to `width` display cells. Longer text is unchanged.
+to wheat_text_pad_right with s as view of text and width as a number:
+    let gap be width - (wheat_text_width with s)
+    if gap is at most 0:
+        give back copy of s
+    give back s + (text_repeat with " " and gap)
+
+# Pad on the left.
+to wheat_text_pad_left with s as view of text and width as a number:
+    let gap be width - (wheat_text_width with s)
+    if gap is at most 0:
+        give back copy of s
+    give back (text_repeat with " " and gap) + s
+
+# Centre in `width` cells. An odd gap puts the extra space on the right.
+to wheat_text_pad_center with s as view of text and width as a number:
+    let gap be width - (wheat_text_width with s)
+    if gap is at most 0:
+        give back copy of s
+    let left be gap / 2
+    let right be gap - left
+    give back (text_repeat with " " and left) + s + (text_repeat with " " and right)
+
+# Cut text to at most `width` cells. This walks back a byte at a time, so a
+# split UTF-8 lead byte is removed before the loop stops.
+to wheat_text_crop with s as view of text and width as a number:
+    if width is at most 0:
+        give back ""
+    if (wheat_text_width with s) is at most width:
+        give back copy of s
+    let end be length of s
+    while end is more than 0:
+        let candidate be part 1 to end of s
+        if (wheat_text_width with candidate) is at most width:
+            give back candidate
+        set end to end - 1
+    give back ""
+
+# Cut text to `width` cells and add an ellipsis when something was removed.
+to wheat_text_ellipsis with s as view of text and width as a number:
+    if width is at most 0:
+        give back ""
+    if (wheat_text_width with s) is at most width:
+        give back copy of s
+    if width is 1:
+        give back "…"
+    give back (wheat_text_crop with s and (width - 1)) + "…"
+
+# Crop every line of `s` to `width` cells.
+to wheat_text_crop_lines with s as view of text and width as a number:
+    let out be an empty list of text
+    for each line in (wheat_text_lines with s):
+        add (wheat_text_crop with line and width) to out
+    give back wheat_text_join with out and "\n"
+
+# Wrap one paragraph to `width` cells, breaking on spaces. A word longer than
+# the width is cut rather than allowed to overflow.
+to wheat_text_wrap with s as view of text and width as a number:
+    let out be an empty list of text
+    for each paragraph in (wheat_text_lines with s):
+        if (wheat_text_width with paragraph) is at most width:
+            add (copy of paragraph) to out
+        otherwise:
+            let line be ""
+            for each word in (wheat_text_words with paragraph):
+                if line is "":
+                    if (wheat_text_width with word) is at most width:
+                        set line to word
+                    otherwise:
+                        add (wheat_text_crop with word and width) to out
+                otherwise:
+                    let candidate be line + " " + word
+                    if (wheat_text_width with candidate) is at most width:
+                        set line to candidate
+                    otherwise:
+                        add line to out
+                        set line to word
+            if line is not "":
+                add line to out
+    if length of out is 0:
+        add "" to out
+    give back wheat_text_join with out and "\n"
+
+# Strip ANSI codes and Rich-ish `[style]...[/]` tags.
+to wheat_text_plain with s as view of text:
+    let out be ""
+    for each piece in (wheat_text_markup with s):
+        set out to out + (item 1 of piece)
+    give back wheat_text_strip_ansi with out
+
+# Split markup into `[text, style]` segments.
+#
+#     wheat_text_markup with "[bold red]hi[/] there"
+#     -> [["hi", "bold red"], [" there", ""]]
+#
+# `[[` writes a literal `[`. A tag without a closing `]` is literal text. `[/]`
+# and `[/name]` both return to the base style.
+to wheat_text_markup with s as view of text:
+    let out be an empty list of list of text
+    let n be length of s
+    let style be ""
+    let buffer be ""
+    let i be 1
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "[" and i is less than n and (letter (i + 1) of s) is "[":
+            set buffer to buffer + "["
+            set i to i + 2
+        otherwise if ch is "[":
+            let close be wheat_text_index_from with s and "]" and (i + 1)
+            if close is 0:
+                set buffer to buffer + ch
+                set i to i + 1
+            otherwise:
+                if buffer is not "":
+                    add [copy of buffer, copy of style] to out
+                let tag be part (i + 1) to (close - 1) of s
+                if wheat_text_starts_with with tag and "/":
+                    set style to ""
+                otherwise:
+                    set style to tag
+                set buffer to ""
+                set i to close + 1
+        otherwise:
+            set buffer to buffer + ch
+            set i to i + 1
+    if buffer is not "":
+        add [copy of buffer, copy of style] to out
+    give back out
+
+# A bar of `ch` repeated `n` times. Useful for rules.
+to wheat_text_rule with ch as view of text and n as a number:
+    if n is at most 0:
+        give back ""
+    give back text_repeat with ch and n

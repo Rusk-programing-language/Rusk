@@ -171,7 +171,7 @@ the `.rk` file.
 ## 4. The command-line tools
 
 ```text
-rusk                              start the interactive session
+rusk                              run the nearby Ruskfile, or start the session
 rusk repl                         start the interactive session
 rusk tui                          start the full-screen session
 rusk tui demo                     open the terminal module demo
@@ -839,16 +839,23 @@ full-screen session, `stop with` restores the terminal first.
 
 ## 9. Imports
 
-`import` includes another file once. Paths are resolved next to the importing
-file first, then inside a `ruskmods/` folder next to it. Cycles are detected.
+`import` includes another file once. A relative path is resolved next to the
+importing file, then in `ruskmods/` and `rusklib/` beside it, then in those same
+places in each parent directory, then in the current directory. Cycles are
+detected.
 
 ```rusk
 import "lib/greetings"
-import "../ruskmods/math"
+import "math"                 # finds ruskmods/math.rk
+import "wheat/table"          # finds rusklib/wheat/table.rk
 
 say greeting with "world"
 say math_square with 12
 ```
+
+A bare name (no slash) may also name a module directory, so `import "wheat"`
+finds `rusklib/wheat/wheat.rk`. This is why a program in `examples/` can write
+`import "math"` and still reach the checkout's modules.
 
 A plain import is textual inclusion into one global namespace. Modules that
 want separation use a name:
@@ -916,16 +923,19 @@ say double with 21        # 42
 ```
 
 The checkout also ships libraries written in Rusk. `ruskmods/` holds focused
-modules (`text`, `math`, `date`, `time`, `random`, `statistics`, `json`,
-`toml`, `sys`, `os`, `path`, `shutils`); `rusklib/` adds file, archive, and
-bundle helpers:
+modules (`math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`,
+`os`, `path`, `shutils`) and the `installwork/` installer framework.
+`rusklib/` adds file and archive helpers, the `wheat/` terminal UI library, and
+one bundle:
 
 ```rusk
-import "date/date"
+import "date"
 import "rusklib/files"
+import "wheat/wheat"
 
 say date_format_iso with 2026 and 11 and 12
 say files_exists with "notes.txt"
+say wheat_box_around with "hello" and 0 and "rounded"
 ```
 
 For everything at once:
@@ -936,16 +946,21 @@ import "rusklib/rusklib"
 say time_format with 9 and 5 and 3
 say path_join with "/tmp" and "notes.txt"
 say files_size with "notes.txt"
+say wheat_bar with 3 and 10 and 10
 ```
 
-Each module keeps a prefix (`date_`, `path_`, `files_`, ...) because a plain
-import shares one global namespace. See
-[`ruskmods/README.md`](../ruskmods/README.md) and
-[`rusklib/README.md`](../rusklib/README.md) for the full lists.
+Each module keeps a prefix (`date_`, `path_`, `files_`, `wheat_`, ...) because a
+plain import shares one global namespace. See
+[`ruskmods/README.md`](../ruskmods/README.md),
+[`rusklib/README.md`](../rusklib/README.md), and
+[`rusklib/wheat/README.md`](../rusklib/wheat/README.md) for the full lists.
 
 ## 10. The interactive session
 
-Run `rusk` with no arguments (or `rusk repl`) to start a line-oriented session:
+`rusk` with no arguments looks for a `Ruskfile` (or `ruskfile`) in the current
+directory and its parents and runs the first one it finds. If there is no
+`Ruskfile`, it starts a line-oriented session. `rusk repl` always starts the
+session:
 
 ```console
 $ rusk
@@ -1085,8 +1100,8 @@ src/tui.rs            native full-screen terminal UI
 src/main.rs           command-line interface
 tests/e2e.rs          bake and run compiled programs
 tests/cli.rs          CLI and piped-session tests
-ruskmods/             standard modules written in Rusk
-rusklib/              higher-level file helpers and one-import bundle
+ruskmods/             standard modules written in Rusk, plus installwork/
+rusklib/              file helpers, the wheat terminal UI, and one-import bundle
 selfhost/             a Rusk interpreter written in Rusk
 ```
 
@@ -1149,15 +1164,18 @@ Implemented and checked:
 - A growable `mmap`-backed heap with a free list
 - Line REPL and native full-screen TUI
 - A Rusk-in-Rusk interpreter (`selfhost/interpreter.rk`)
-- Standard modules under `ruskmods/` and higher-level file helpers in
-  `rusklib/`
+- Standard modules under `ruskmods/`, the `installwork/` installer framework,
+  and file helpers plus the `wheat/` terminal UI in `rusklib/`
+- A `Ruskfile` manifest and task runner, found automatically when `rusk` runs
+  with no arguments
 
 Not implemented yet:
 
 - Full compiler self-hosting; the interpreter is the bootstrap stage
 - A global x86-64 register allocator that keeps values across branches and
   calls
-- Threads, signals, GUI toolkits, and a package registry
+- Threads, signals, GUI toolkits, and a networked package registry (the
+  `installwork/` registry is a local directory tree, not a server)
 - IPv6, UDP, DNS, TLS, socket timeouts, and non-blocking sockets
 
 Backend limits worth knowing:

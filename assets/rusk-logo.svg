@@ -1,28 +1,115 @@
-<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background -->
-  <rect width="512" height="512" rx="64" fill="#000000"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 260" width="300" height="260">
+  <defs>
+    <!-- Crust gradient -->
+    <linearGradient id="crustGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#D2691E" />
+      <stop offset="50%" stop-color="#A0522D" />
+      <stop offset="100%" stop-color="#703518" />
+    </linearGradient>
 
-  <!-- Rusk Monogram -->
-  <path
-    fill="#FFFFFF"
-    d="
-      M144 96
-      H272
-      C352 96 400 144 400 212
-      C400 263 370 301 316 316
-      L400 416
-      H326
-      L252 326
-      H208
-      V416
-      H144
-      Z
+    <!-- Golden baked interior gradient -->
+    <linearGradient id="crumbGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#F5C27D" />
+      <stop offset="60%" stop-color="#E5A253" />
+      <stop offset="100%" stop-color="#C88136" />
+    </linearGradient>
 
-      M208 152
-      V272
-      H266
-      C308 272 336 248 336 212
-      C336 176 308 152 266 152
-      Z"
-  />
+    <!-- Soft drop shadow -->
+    <filter id="dropShadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="4" dy="8" stdDeviation="6" flood-color="#3E2723" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- Main Rusk Group -->
+  <g filter="url(#dropShadow)" transform="translate(15, 10)">
+    <!-- 3D Side Thickness / Crust -->
+    <path d="M 65 55 
+             C 65 25, 215 25, 215 55 
+             C 228 65, 228 85, 212 95 
+             L 215 195 
+             C 215 208, 205 215, 192 215 
+             L 88 215 
+             C 75 215, 65 208, 65 195 
+             L 68 95 
+             C 52 85, 52 65, 65 55 Z" 
+          fill="url(#crustGrad)" />
+
+    <!-- Front Toasted Face -->
+    <path d="M 60 60 
+             C 60 32, 205 32, 205 60 
+             C 218 70, 218 88, 202 98 
+             L 205 198 
+             C 205 210, 195 218, 182 218 
+             L 83 218 
+             C 70 218, 60 210, 60 198 
+             L 63 98 
+             C 47 88, 47 70, 60 60 Z" 
+          fill="url(#crumbGrad)" 
+          stroke="#8B4513" 
+          stroke-width="3.5" 
+          stroke-linejoin="round" />
+
+    <!-- Subtle inner toast browning -->
+    <path d="M 68 65 
+             C 68 42, 197 42, 197 65 
+             C 207 73, 207 86, 194 94 
+             L 197 192 
+             C 197 202, 190 209, 179 209 
+             L 86 209 
+             C 75 209, 68 202, 68 192 
+             L 71 94 
+             C 58 86, 58 73, 68 65 Z" 
+          fill="none" 
+          stroke="#D4883B" 
+          stroke-width="4" 
+          opacity="0.5" />
+
+    <!-- Porous Air Pockets / Crumb Texture -->
+    <g fill="#9C571D" opacity="0.55">
+      <!-- Top dome pores -->
+      <ellipse cx="110" cy="58" rx="4" ry="2.5" transform="rotate(-15 110 58)" />
+      <circle cx="135" cy="50" r="2.2" />
+      <ellipse cx="160" cy="60" rx="5" ry="3" transform="rotate(20 160 60)" />
+      <circle cx="88" cy="72" r="3" />
+      <ellipse cx="182" cy="76" rx="3.5" ry="2" transform="rotate(-10 182 76)" />
+      <circle cx="132" cy="74" r="4" />
+      
+      <!-- Middle pores -->
+      <ellipse cx="95" cy="105" rx="5.5" ry="3" transform="rotate(12 95 105)" />
+      <circle cx="122" cy="96" r="2.5" />
+      <ellipse cx="152" cy="102" rx="4" ry="2.8" transform="rotate(-25 152 102)" />
+      <circle cx="176" cy="112" r="3.2" />
+      <ellipse cx="114" cy="128" rx="6" ry="3.5" transform="rotate(-8 114 128)" />
+      <circle cx="145" cy="132" r="2.8" />
+      <ellipse cx="86" cy="142" rx="3.5" ry="2" />
+      <ellipse cx="172" cy="146" rx="4.5" ry="2.5" transform="rotate(18 172 146)" />
+
+      <!-- Bottom pores -->
+      <circle cx="102" cy="168" r="3.5" />
+      <ellipse cx="134" cy="162" rx="5" ry="2.8" transform="rotate(10 134 162)" />
+      <circle cx="164" cy="174" r="2.5" />
+      <ellipse cx="88" cy="190" rx="4" ry="2.2" transform="rotate(-15 88 190)" />
+      <circle cx="120" cy="192" r="3" />
+      <ellipse cx="150" cy="194" rx="5.5" ry="3" transform="rotate(5 150 194)" />
+      <circle cx="180" cy="188" r="2.8" />
+    </g>
+
+    <!-- Lighter highlights inside larger pores for depth -->
+    <g fill="#FCE2B8" opacity="0.6">
+      <circle cx="131" cy="73" r="1.5" />
+      <circle cx="94" cy="104" r="2" />
+      <circle cx="113" cy="127" r="2.2" />
+      <circle cx="133" cy="161" r="1.8" />
+      <circle cx="149" cy="193" r="2" />
+    </g>
+
+    <!-- Loose Crunchy Crumbs Around Base -->
+    <g fill="#C88136" stroke="#8B4513" stroke-width="1">
+      <polygon points="45,212 50,209 52,214 47,216" />
+      <circle cx="38" cy="218" r="2" />
+      <polygon points="215,210 221,208 220,214 214,215" />
+      <circle cx="226" cy="217" r="2.5" />
+      <circle cx="212" cy="221" r="1.5" />
+    </g>
+  </g>
 </svg>

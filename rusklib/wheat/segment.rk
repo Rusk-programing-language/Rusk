@@ -1,0 +1,167 @@
+# segment.rk — styled pieces of a line.
+#
+# Rusk has no structs, so a segment is a two-item list:
+#
+#     [text, style]
+#
+# A line is a list of segments, and a block is a list of lines. The shapes are
+# plain data, which means they can be stored, copied, and passed without a
+# class system:
+#
+#     list of text                 a segment: text and style
+#     list of list of text         a line: segments
+#     list of list of list of text a block: lines
+#
+# Styles are plain strings, so segment text can be rendered with any color
+# system and the same data can also be exported without ANSI codes.
+
+import "text"
+import "style"
+
+# One segment.
+to wheat_segment with body as view of text and spec as view of text:
+    give back [copy of body, copy of spec]
+
+# The text part.
+to wheat_segment_text with segment as view of a list of text:
+    give back item 1 of segment
+
+# The style part.
+to wheat_segment_style with segment as view of a list of text:
+    give back item 2 of segment
+
+# True when the segment has no text.
+to wheat_segment_is_empty with segment as view of a list of text:
+    give back (length of (item 1 of segment)) is 0
+
+# Display width of one segment.
+to wheat_segment_width with segment as view of a list of text:
+    give back wheat_text_width with (item 1 of segment)
+
+# Visible text, with no styles applied.
+to wheat_segment_plain with segment as view of a list of text:
+    give back item 1 of segment
+
+# One segment rendered with ANSI codes.
+to wheat_segment_render_in with segment as view of a list of text and system as view of text:
+    give back wheat_style_apply_in with (item 1 of segment) and (item 2 of segment) and system
+
+to wheat_segment_render with segment as view of a list of text:
+    give back wheat_segment_render_in with segment and (wheat_color_system)
+
+# An empty segment list. Use it as the starting value for a line.
+to wheat_segments_new:
+    give back an empty list of list of text
+
+# Append one segment to a line. The list is changed in place and its new length
+# is returned, which is handy when building a line step by step.
+to wheat_segments_add with segments as a list of list of text and body as a view of text and spec as view of text:
+    add [copy of body, copy of spec] to segments
+    give back length of segments
+
+# A line built from one plain piece of text.
+to wheat_line_from_text with body as view of text:
+    let line be an empty list of list of text
+    if body is not "":
+        add [copy of body, ""] to line
+    give back line
+
+# A line built from one styled piece.
+to wheat_line_from_styled with body as view of text and spec as view of text:
+    let line be an empty list of list of text
+    if body is not "":
+        add [copy of body, copy of spec] to line
+    give back line
+
+# A line of spaces with an optional style.
+to wheat_line_blank with width as a number and spec as view of text:
+    let line be an empty list of list of text
+    if width is more than 0:
+        add [text_repeat with " " and width, copy of spec] to line
+    give back line
+
+# Copy a line.
+to wheat_line_copy with line as view of a list of list of text:
+    let out be an empty list of list of text
+    for each segment in line:
+        add [copy of (item 1 of segment), copy of (item 2 of segment)] to out
+    give back out
+
+# Join two lines, keeping the segments in order.
+to wheat_line_join with left as view of a list of list of text and right as view of a list of list of text:
+    let out be wheat_line_copy with left
+    for each segment in right:
+        add [copy of (item 1 of segment), copy of (item 2 of segment)] to out
+    give back out
+
+# Display width of a line.
+to wheat_line_width with line as view of a list of list of text:
+    let width be 0
+    for each segment in line:
+        set width to width + (wheat_text_width with (item 1 of segment))
+    give back width
+
+# Plain text of a line.
+to wheat_line_plain with line as view of a list of list of text:
+    let out be ""
+    for each segment in line:
+        set out to out + (item 1 of segment)
+    give back out
+
+# A line rendered with ANSI codes.
+to wheat_line_render_in with line as view of a list of list of text and system as view of text:
+    let out be ""
+    for each segment in line:
+        set out to out + (wheat_segment_render_in with segment and system)
+    give back out
+
+to wheat_line_render with line as view of a list of list of text:
+    give back wheat_line_render_in with line and (wheat_color_system)
+
+# Pad a line on the right to `width` cells. Padding uses `pad_style`.
+to wheat_line_pad_right with line as view of a list of list of text and width as a number and pad_style as view of text:
+    let out be wheat_line_copy with line
+    let gap be width - (wheat_line_width with line)
+    if gap is more than 0:
+        add [text_repeat with " " and gap, copy of pad_style] to out
+    give back out
+
+# Pad a line on the left.
+to wheat_line_pad_left with line as view of a list of list of text and width as a number and pad_style as view of text:
+    let out be an empty list of list of text
+    let gap be width - (wheat_line_width with line)
+    if gap is more than 0:
+        add [text_repeat with " " and gap, copy of pad_style] to out
+    for each segment in line:
+        add [copy of (item 1 of segment), copy of (item 2 of segment)] to out
+    give back out
+
+# Crop a line to `width` cells, dropping whole segments once the space is gone.
+to wheat_line_crop with line as view of a list of list of text and width as a number:
+    let out be an empty list of list of text
+    let left be width
+    for each segment in line:
+        if left is at most 0:
+            break
+        let body be item 1 of segment
+        let segment_width be wheat_text_width with body
+        if segment_width is at most left:
+            add [copy of body, copy of (item 2 of segment)] to out
+            set left to left - segment_width
+        otherwise:
+            let cropped be wheat_text_crop with body and left
+            if cropped is not "":
+                add [cropped, copy of (item 2 of segment)] to out
+            set left to 0
+    give back out
+
+# A line from markup: `[bold]hi[/] there`.
+to wheat_line_from_markup with body as view of text:
+    let line be an empty list of list of text
+    for each piece in (wheat_text_markup with body):
+        add [copy of (item 1 of piece), copy of (item 2 of piece)] to line
+    give back line
+
+# Render a line to plain text, stripping both markup and ANSI codes.
+to wheat_line_plain_from_markup with body as view of text:
+    give back wheat_text_plain with body

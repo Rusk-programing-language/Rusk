@@ -608,19 +608,42 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
     if raw_path.is_absolute() {
         candidates.extend(names.iter().cloned());
     } else {
+        // A bare module name (`import "math"`) is searched for beside the
+        // program, inside the bundled `ruskmods/` and `rusklib/` folders, and
+        // in the same folders in each parent directory. The parent walk lets a
+        // program in `examples/` or `tests/` import from the checkout root.
+        // Each root is checked completely before the next one, so a file
+        // beside the program always wins over an unrelated module in the
+        // current directory.
+        let bare = !raw.contains('/') && !raw.contains('\\');
+        let nested = format!("{raw}.rk");
+        let mut roots: Vec<PathBuf> = Vec::new();
+        fn add_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+            if root.as_os_str().is_empty() || roots.contains(&root) {
+                return;
+            }
+            roots.push(root);
+        }
         if let Some(base) = base {
-            for name in &names {
-                candidates.push(base.join(name));
-            }
-            for name in &names {
-                candidates.push(base.join("ruskmods").join(name));
+            add_root(&mut roots, base.to_path_buf());
+            for ancestor in base.ancestors().skip(1) {
+                add_root(&mut roots, ancestor.to_path_buf());
             }
         }
-        for name in &names {
-            candidates.push(name.clone());
-        }
-        for name in &names {
-            candidates.push(Path::new("ruskmods").join(name));
+        add_root(&mut roots, PathBuf::from("."));
+
+        for root in &roots {
+            for name in &names {
+                candidates.push(root.join(name));
+            }
+            for name in &names {
+                candidates.push(root.join("ruskmods").join(name));
+                candidates.push(root.join("rusklib").join(name));
+            }
+            if bare {
+                candidates.push(root.join("ruskmods").join(raw).join(&nested));
+                candidates.push(root.join("rusklib").join(raw).join(&nested));
+            }
         }
     }
 
@@ -630,7 +653,7 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "I can't find the file '{raw}' — I looked next to the program and in ruskmods/"
+        "I can't find the file '{raw}' — I looked next to the program and in ruskmods/ and rusklib/"
     ))
 }
 
@@ -707,6 +730,32 @@ mod tests {
             .filter(|s| matches!(s, Stmt::FuncDef { .. }))
             .count();
         assert_eq!(funcs, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bare_module_names_find_ruskmods_and_rusklib() {
+        let dir = scratch();
+        write(
+            &dir,
+            "ruskmods/math/math.rk",
+            "to math_double with n as a number:\n    give back n * 2\n",
+        );
+        write(
+            &dir,
+            "rusklib/wheat/wheat.rk",
+            "to wheat_nothing:\n    give back 0\n",
+        );
+        let main = write(
+            &dir,
+            "programs/main.rk",
+            "import \"math\"\nimport \"wheat\"\n",
+        );
+
+        let program = expand_file(&main).unwrap();
+        let names = func_names(&program);
+        assert!(names.contains(&"math_double".to_string()), "{names:?}");
+        assert!(names.contains(&"wheat_nothing".to_string()), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

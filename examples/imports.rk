@@ -1,11 +1,15 @@
 # Imports are resolved before type checking. A file is included at most once,
 # even when several modules import the same helper.
+#
+# Bare module names are looked up beside this file, then in `ruskmods/` and
+# `rusklib/` beside it and in each parent directory, so `import "math"` finds
+# `ruskmods/math.rk` from anywhere in the checkout.
 
 # A named import keeps every top-level name under one prefix.
 import "lib/greetings" as greet
 
 # A selective import brings just the names you ask for, without a prefix.
-from "../ruskmods/math" import math_square, math_sum_to
+from "math" import math_square, math_sum_to
 
 say greet.greeting with "world"
 say greet.farewell with "oven"

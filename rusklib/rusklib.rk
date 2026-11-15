@@ -2,17 +2,20 @@
 #
 #     import "rusklib/rusklib"
 #
-# pulls in every module under `ruskmods/` plus the higher-level file helpers in
-# `rusklib/files.rk`. Each module keeps its own prefix, so the shared namespace
-# stays readable. If a program only needs one area, import that file directly:
+# pulls in every module under `ruskmods/`, the higher-level file helpers in
+# `rusklib/files.rk`, and the wheat terminal library. Each module keeps its own
+# prefix, so the shared namespace stays readable. If a program only needs one
+# area, import that file directly:
 #
-#     import "date/date"
+#     import "date"
+#     import "math"
 #     import "rusklib/files"
+#     import "wheat/wheat"
 #
-# The imports below are relative to this file, so the bundle works from a
+# Bare names resolve next to the program, then in `ruskmods/` and `rusklib/`.
+# The imports below stay relative to this file, so the bundle works from a
 # checkout as well as from an installed copy that keeps the same layout.
 
-import "../ruskmods/text"
 import "../ruskmods/math"
 import "../ruskmods/math/math"
 import "../ruskmods/date/date"
@@ -25,4 +28,6 @@ import "../ruskmods/sys/sys"
 import "../ruskmods/os/os"
 import "../ruskmods/path/path"
 import "../ruskmods/shutils/shutils"
+import "../ruskmods/installwork/installwork"
 import "files"
+import "wheat/wheat"

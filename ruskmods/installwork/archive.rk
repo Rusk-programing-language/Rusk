@@ -1,0 +1,192 @@
+# archive.rk — pack a package tree into one text file and unpack it again.
+#
+# The format is deliberately simple, because Rusk gives us text and byte
+# lengths rather than a compression library:
+#
+#     RUSKPKG 1
+#     FILE 12 main.rk
+#     say "hello"
+#     FILE 7  lib/x.rk
+#     say 1
+#     END
+#
+# `FILE <size> <path>` is followed by exactly `<size>` bytes of file content
+# and one newline. Paths are relative to the tree root and use `/`. The magic
+# line names the format version. `END` terminates the archive.
+#
+# This is a transport format, not a compression format: it stores text files
+# unchanged and does not preserve permissions, symlinks, or binary data.
+
+import "text"
+import "fs"
+
+# The magic first line. A reader rejects anything else.
+to installwork_archive_magic:
+    give back "RUSKPKG 1"
+
+# The index of the next newline at or after `start`, or 0 when there is none.
+# Positions are 1-based, matching `part ... of ...`.
+to installwork_archive_newline_from with body as a view of text and start as a number:
+    let n be length of body
+    let i be start
+    while i is at most n:
+        if (letter i of body) is "\n":
+            give back i
+        set i to i + 1
+    give back 0
+
+# Parse an archive index into records written `<size> <path>`.
+#
+# The content itself is skipped using the recorded size, so a file containing
+# `FILE ...` text cannot confuse the scanner. A malformed archive gives back
+# whatever records were readable before the damage.
+to installwork_archive_scan with body as a view of text:
+    let out be an empty list of text
+    let n be length of body
+    if n is 0:
+        give back out
+    let first_end be installwork_archive_newline_from with body and 1
+    if first_end is 0:
+        give back out
+    let first be part 1 to (first_end - 1) of body
+    if first is not installwork_archive_magic:
+        give back out
+    let pos be first_end + 1
+    while pos is at most n:
+        let line_end be installwork_archive_newline_from with body and pos
+        if line_end is 0:
+            break
+        let line be part pos to (line_end - 1) of body
+        if line is "END":
+            break
+        if not (installwork_text_starts_with with line and "FILE "):
+            break
+        let rest be part 6 to (length of line) of line
+        let cut be installwork_text_index_of with rest and " "
+        if cut is 0:
+            break
+        let size_text be part 1 to (cut - 1) of rest
+        let path be part (cut + 1) to (length of rest) of rest
+        let size be installwork_text_to_number with size_text
+        if size is less than 0 or path is "":
+            break
+        add (size_text + " " + path) to out
+        set pos to line_end + 1 + size + 1
+    give back out
+
+# True when the archive has a valid header and a terminating `END` line.
+to installwork_archive_valid with body as a view of text:
+    let n be length of body
+    if n is 0:
+        give back false
+    let first_end be installwork_archive_newline_from with body and 1
+    if first_end is 0:
+        give back false
+    if (part 1 to (first_end - 1) of body) is not installwork_archive_magic:
+        give back false
+    let last_nl be 0
+    let i be n
+    while i is at least 1:
+        if (letter i of body) is "\n":
+            set last_nl to i
+            break
+        set i to i - 1
+    if last_nl is 0:
+        give back false
+    let last_start be last_nl
+    set i to last_nl - 1
+    while i is at least 1:
+        if (letter i of body) is "\n":
+            set last_start to i + 1
+            break
+        set i to i - 1
+    give back (part last_start to (last_nl - 1) of body) is "END"
+
+# The paths recorded in an archive, in stored order.
+to installwork_archive_paths with body as a view of text:
+    let out be an empty list of text
+    for each record in (installwork_archive_scan with body):
+        let cut be installwork_text_index_of with record and " "
+        add (part (cut + 1) to (length of record) of record) to out
+    give back out
+
+# The total content size recorded in an archive.
+to installwork_archive_size with body as a view of text:
+    let total be 0
+    for each record in (installwork_archive_scan with body):
+        let cut be installwork_text_index_of with record and " "
+        set total to total + (installwork_text_to_number with (part 1 to (cut - 1) of record))
+    give back total
+
+# A short human-readable index, one `path (size bytes)` per line.
+to installwork_archive_listing with body as a view of text:
+    let out be ""
+    let records be installwork_archive_scan with body
+    if length of records is 0:
+        give back "(empty archive)\n"
+    for each record in records:
+        let cut be installwork_text_index_of with record and " "
+        let size be part 1 to (cut - 1) of record
+        let path be part (cut + 1) to (length of record) of record
+        set out to out + path + " (" + size + " bytes)\n"
+    give back out
+
+# Pack every text file below `root` into an archive. Files are written in
+# alphabetical order, which keeps archives reproducible.
+to installwork_archive_pack with root as a view of text:
+    let out be installwork_archive_magic + "\n"
+    for each path in (installwork_fs_files_under with root):
+        let full be installwork_path_join with root and path
+        let content be read file full
+        set out to out + "FILE " + (installwork_text_from_number with (length of content)) + " " + path + "\n"
+        set out to out + content + "\n"
+    give back out + "END\n"
+
+# Expand an archive below `dest`. Returns false on a malformed archive or a
+# failed write; files written before the failure stay in place.
+to installwork_archive_unpack with body as a view of text and dest as a view of text:
+    if not (installwork_archive_valid with body):
+        give back false
+    if not (installwork_fs_ensure_directory with dest):
+        give back false
+    let n be length of body
+    let first_end be installwork_archive_newline_from with body and 1
+    let pos be first_end + 1
+    while pos is at most n:
+        let line_end be installwork_archive_newline_from with body and pos
+        if line_end is 0:
+            give back false
+        let line be part pos to (line_end - 1) of body
+        if line is "END":
+            give back true
+        if not (installwork_text_starts_with with line and "FILE "):
+            give back false
+        let rest be part 6 to (length of line) of line
+        let cut be installwork_text_index_of with rest and " "
+        if cut is 0:
+            give back false
+        let size be installwork_text_to_number with (part 1 to (cut - 1) of rest)
+        let path be part (cut + 1) to (length of rest) of rest
+        if size is less than 0 or path is "":
+            give back false
+        let content_start be line_end + 1
+        let content_end be content_start + size - 1
+        if content_end is more than n:
+            give back false
+        let content be ""
+        if size is more than 0:
+            set content to part content_start to content_end of body
+        if not (installwork_fs_write with (installwork_path_join with dest and path) and content):
+            give back false
+        set pos to content_end + 2
+    give back false
+
+# Read an archive file.
+to installwork_archive_read with path as a view of text:
+    if not (file exists path):
+        give back ""
+    give back read file path
+
+# Write an archive file, creating its parent directory first.
+to installwork_archive_write with path as a view of text and body as a view of text:
+    give back installwork_fs_write with path and body

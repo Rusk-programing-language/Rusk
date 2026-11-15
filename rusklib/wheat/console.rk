@@ -1,0 +1,263 @@
+# console.rk — the small terminal layer under wheat.
+#
+# Rich's Console object does a lot: it measures the terminal, prints with
+# styles, moves the cursor, and manages the alternate screen. Rusk can do the
+# printing and the escape sequences; it cannot ask the kernel for the terminal
+# size, so `wheat_console_columns` and `wheat_console_rows` read `COLUMNS` and
+# `LINES` and fall back to 80x24.
+#
+# Escape sequences are built here as text, so a caller can decide to send them
+# with `say` or store them. The control functions return a string; they do not
+# write it themselves. The `print` functions do write, which makes a REPL
+# session or a demo read naturally:
+#
+#     import "console"
+#     say wheat_console_clear
+#     wheat_console_print_markup with "[bold green]ready[/]"
+#
+# Nothing here checks whether stdout is a terminal. Redirecting a program that
+# uses cursor moves produces escape bytes in the file, which is the honest
+# behaviour: the caller chose to move a cursor.
+
+import "text"
+import "style"
+import "segment"
+
+# The width to lay out for: `COLUMNS` when set, otherwise 80.
+to wheat_console_columns:
+    let raw be environment "COLUMNS"
+    if raw is not "":
+        let n be wheat_text_to_number with raw
+        if n is more than 0:
+            give back n
+    give back 80
+
+# The height to lay out for: `LINES` when set, otherwise 24.
+to wheat_console_rows:
+    let raw be environment "LINES"
+    if raw is not "":
+        let n be wheat_text_to_number with raw
+        if n is more than 0:
+            give back n
+    give back 24
+
+# A Control Sequence Introducer followed by `params` and `final`.
+to wheat_console_csi with params as view of text and final as view of text:
+    give back "[" + params + final
+
+# Clear the screen and put the cursor in the top-left corner.
+to wheat_console_clear:
+    give back "[2J[H"
+
+# Clear the whole current line.
+to wheat_console_clear_line:
+    give back "[2K"
+
+# Clear from the cursor to the end of the line.
+to wheat_console_clear_to_end:
+    give back "[0K"
+
+# Clear from the cursor to the bottom of the screen.
+to wheat_console_clear_below:
+    give back "[0J"
+
+# Move the cursor to the top-left corner without clearing.
+to wheat_console_home:
+    give back "[H"
+
+# Move to a 1-based row and column.
+to wheat_console_move_to with row as a number and column as a number:
+    give back "[" + (wheat_text_from_number with row) + ";" + (wheat_text_from_number with column) + "H"
+
+# Move the cursor up `n` rows.
+to wheat_console_move_up with n as a number:
+    if n is at most 0:
+        give back ""
+    give back "[" + (wheat_text_from_number with n) + "A"
+
+# Move the cursor down `n` rows.
+to wheat_console_move_down with n as a number:
+    if n is at most 0:
+        give back ""
+    give back "[" + (wheat_text_from_number with n) + "B"
+
+# Move the cursor right `n` columns.
+to wheat_console_move_right with n as a number:
+    if n is at most 0:
+        give back ""
+    give back "[" + (wheat_text_from_number with n) + "C"
+
+# Move the cursor left `n` columns.
+to wheat_console_move_left with n as a number:
+    if n is at most 0:
+        give back ""
+    give back "[" + (wheat_text_from_number with n) + "D"
+
+# Remember the cursor position.
+to wheat_console_save:
+    give back "[s"
+
+# Return to the remembered position.
+to wheat_console_restore:
+    give back "[u"
+
+# Hide the cursor.
+to wheat_console_hide_cursor:
+    give back "[?25l"
+
+# Show the cursor again.
+to wheat_console_show_cursor:
+    give back "[?25h"
+
+# Enter the alternate screen, the way a full-screen program does.
+to wheat_console_alt_screen:
+    give back "[?1049h"
+
+# Leave the alternate screen.
+to wheat_console_normal_screen:
+    give back "[?1049l"
+
+# One terminal bell. The placeholder is replaced with a literal BEL byte by the
+# build script that also replaces ; Rusk has no `\a` escape.
+to wheat_console_bell:
+    give back ""
+
+# A carriage return, for redrawing the same line.
+to wheat_console_return:
+    give back "[1G"
+
+# The fill glyph for a rule style.
+to wheat_console_rule_glyph with kind as view of text:
+    if kind is "double":
+        give back "═"
+    if kind is "heavy":
+        give back "━"
+    if kind is "dots":
+        give back "·"
+    if kind is "ascii":
+        give back "-"
+    give back "─"
+
+# A horizontal rule, optionally with a title in the middle:
+#
+#     ────────── title ──────────
+#
+# The title is cropped when it cannot fit with at least one fill glyph on each
+# side.
+to wheat_console_rule with title as view of text and width as a number and kind as view of text:
+    let rule_width be width
+    if rule_width is at most 0:
+        set rule_width to wheat_console_columns
+    let glyph be wheat_console_rule_glyph with kind
+    if title is "":
+        give back text_repeat with glyph and rule_width
+    let label be " " + title + " "
+    let label_width be wheat_text_width with label
+    if label_width is more than rule_width - 2:
+        set label to " " + (wheat_text_ellipsis with title and (rule_width - 4)) + " "
+        set label_width to wheat_text_width with label
+    if label_width is more than rule_width - 2:
+        give back text_repeat with glyph and rule_width
+    let left be (rule_width - label_width) / 2
+    let right be rule_width - label_width - left
+    give back (text_repeat with glyph and left) + label + (text_repeat with glyph and right)
+
+# A rule that spans the detected terminal.
+to wheat_console_header with title as view of text:
+    give back wheat_console_rule with title and (wheat_console_columns) and "light"
+
+# Write text and a newline with `say`.
+to wheat_console_print with body as view of text:
+    say body
+    give back true
+
+# Print an empty line.
+to wheat_console_print_blank:
+    say ""
+    give back true
+
+# Write text without a newline. `/dev/stdout` is the portable spelling in Rusk.
+to wheat_console_write with body as view of text:
+    write body to file "/dev/stdout"
+    give back true
+
+# Write text and a newline to stdout without the REPL's own quoting, using the
+# same path as `wheat_console_write`.
+to wheat_console_writeln with body as view of text:
+    write body + "\n" to file "/dev/stdout"
+    give back true
+
+# Print text with markup tags expanded to ANSI codes:
+#
+#     wheat_console_print_markup with "[bold red]error[/] and a hint"
+to wheat_console_print_markup with body as view of text:
+    let line be wheat_line_from_markup with body
+    say wheat_line_render with line
+    give back true
+
+# Render markup to a string using the detected color system.
+to wheat_console_render_markup with body as view of text:
+    give back wheat_line_render with (wheat_line_from_markup with body)
+
+# Print a line in one style.
+to wheat_console_print_styled with body as view of text and spec as view of text:
+    say wheat_style_apply with body and spec
+    give back true
+
+# Print a title above a rule.
+to wheat_console_print_heading with title as view of text:
+    say title
+    say wheat_console_rule with "" and (wheat_console_columns) and "light"
+    give back true
+
+# Wrap text to the terminal width and print it.
+to wheat_console_print_wrapped with body as view of text:
+    say wheat_text_wrap with body and (wheat_console_columns)
+    give back true
+
+# A green tick and a message, as markup.
+to wheat_console_ok with body as view of text:
+    give back "[green]✓[/] " + body
+
+# A red cross and a message, as markup.
+to wheat_console_fail with body as view of text:
+    give back "[red]✗[/] " + body
+
+# A yellow warning and a message, as markup.
+to wheat_console_warn with body as view of text:
+    give back "[yellow]![/] " + body
+
+# A blue information mark and a message, as markup.
+to wheat_console_info with body as view of text:
+    give back "[blue]i[/] " + body
+
+# Print markup, then leave the cursor at the start of the line so the next
+# update overwrites it. The caller supplies the escape-free text.
+to wheat_console_status_line with body as view of text:
+    wheat_console_writeln with body
+    give back true
+
+# A one-line progress readout that returns to the start of the line:
+#
+#     wheat_console_write with (wheat_console_progress with 4 and 10 and 30)
+to wheat_console_progress with done as a number and total as a number and width as a number:
+    let percent be 0
+    if total is more than 0:
+        set percent to (done * 100 + total / 2) / total
+    let filled be 0
+    if total is more than 0:
+        set filled to (done * width + total / 2) / total
+    if filled is more than width:
+        set filled to width
+    if filled is less than 0:
+        set filled to 0
+    give back (wheat_console_return) + (text_repeat with "█" and filled) + (text_repeat with "░" and (width - filled)) + " " + (wheat_text_from_number with percent) + "%"
+
+# Print the four common status marks so the caller can see the colors.
+to wheat_console_demo:
+    say wheat_console_rule with "wheat console" and (wheat_console_columns) and "double"
+    say (wheat_console_render_markup with (wheat_console_ok with "installed math 1.2.0"))
+    say (wheat_console_render_markup with (wheat_console_warn with "text is already installed"))
+    say (wheat_console_render_markup with (wheat_console_fail with "no package named nothing"))
+    say (wheat_console_render_markup with (wheat_console_info with "64 columns"))
+    say wheat_console_rule with "" and (wheat_console_columns) and "light"

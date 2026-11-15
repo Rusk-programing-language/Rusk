@@ -1,0 +1,157 @@
+# style.rk — turn short style words into ANSI SGR codes.
+#
+# A style is a plain string, which keeps it easy to store in a theme file and
+# pass through function boundaries:
+#
+#     "bold red"
+#     "dim"
+#     "white on blue"
+#     "italic #ff8800"
+#     "bold underline bright_cyan on color(17)"
+#
+# Attributes: bold, dim, italic, underline, blink, reverse, strike.
+# `not bold` skips an attribute, which is useful when combining specs.
+# A color word, `#rrggbb`, or `color(n)` sets the foreground; `on COLOR` sets
+# the background. Anything unknown is ignored rather than crashing.
+
+import "text"
+import "color"
+
+# Lowercase and collapse whitespace in a style spec.
+to wheat_style_clean with spec as view of text:
+    let words be wheat_text_words with (wheat_text_lower with spec)
+    give back wheat_text_join with words and " "
+
+# True when `token` names a text attribute.
+to wheat_style_is_attribute with token as view of text:
+    if token is "bold" or token is "dim" or token is "italic" or token is "underline":
+        give back true
+    if token is "blink" or token is "reverse" or token is "strike":
+        give back true
+    give back false
+
+# The SGR parameter for an attribute, or "".
+to wheat_style_attribute_code with token as view of text:
+    if token is "bold":
+        give back "1"
+    if token is "dim":
+        give back "2"
+    if token is "italic":
+        give back "3"
+    if token is "underline":
+        give back "4"
+    if token is "blink":
+        give back "5"
+    if token is "reverse":
+        give back "7"
+    if token is "strike":
+        give back "9"
+    give back ""
+
+# Add `part` to a `;`-separated parameter list.
+to wheat_style_add_param with params as view of text and part as view of text:
+    if part is "":
+        give back copy of params
+    if params is "":
+        give back copy of part
+    give back params + ";" + part
+
+# Build the SGR parameter list for a style. An unknown or empty style gives "".
+to wheat_style_params with spec as view of text and system as view of text:
+    if system is "none":
+        give back ""
+    let cleaned be wheat_style_clean with spec
+    if cleaned is "":
+        give back ""
+    let tokens be wheat_text_words with cleaned
+    let params be ""
+    let i be 1
+    while i is at most length of tokens:
+        let token be item i of tokens
+        if token is "not":
+            set i to i + 2
+        otherwise if token is "on":
+            if i is less than length of tokens:
+                let next be item (i + 1) of tokens
+                let bg_code be wheat_color_code with next and true and system
+                set params to wheat_style_add_param with params and bg_code
+                set i to i + 2
+            otherwise:
+                set i to i + 1
+        otherwise:
+            let attr be wheat_style_attribute_code with token
+            if attr is not "":
+                set params to wheat_style_add_param with params and attr
+            otherwise:
+                let fg_code be wheat_color_code with token and false and system
+                set params to wheat_style_add_param with params and fg_code
+            set i to i + 1
+    give back params
+
+# The escape that starts a style, or "" when nothing applies.
+to wheat_style_prefix_in with spec as view of text and system as view of text:
+    let params be wheat_style_params with spec and system
+    if params is "":
+        give back ""
+    give back "[" + params + "m"
+
+# The escape that starts a style using the detected color system.
+to wheat_style_prefix with spec as view of text:
+    give back wheat_style_prefix_in with spec and (wheat_color_system)
+
+# The escape that clears a style, or "".
+to wheat_style_suffix_in with spec as view of text and system as view of text:
+    if (wheat_style_params with spec and system) is "":
+        give back ""
+    give back "[0m"
+
+to wheat_style_suffix with spec as view of text:
+    give back wheat_style_suffix_in with spec and (wheat_color_system)
+
+# Wrap `body` in a style. With no color system the body comes back unchanged.
+to wheat_style_apply_in with body as view of text and spec as view of text and system as view of text:
+    let prefix be wheat_style_prefix_in with spec and system
+    if prefix is "":
+        give back copy of body
+    give back prefix + body + "[0m"
+
+to wheat_style_apply with body as view of text and spec as view of text:
+    give back wheat_style_apply_in with body and spec and (wheat_color_system)
+
+# Combine two styles, base first.
+to wheat_style_merge with base as view of text and extra as view of text:
+    let cleaned_base be wheat_style_clean with base
+    let cleaned_extra be wheat_style_clean with extra
+    if cleaned_base is "":
+        give back cleaned_extra
+    if cleaned_extra is "":
+        give back cleaned_base
+    give back cleaned_base + " " + cleaned_extra
+
+# True when the style contains `token`.
+to wheat_style_has with spec as view of text and token as view of text:
+    for each word in (wheat_text_words with (wheat_style_clean with spec)):
+        if word is token:
+            give back true
+    give back false
+
+# The style with one attribute added.
+to wheat_style_with with spec as view of text and token as view of text:
+    give back wheat_style_merge with spec and token
+
+# A foreground color style.
+to wheat_style_fg with color_name as view of text:
+    give back copy of color_name
+
+# A background color style.
+to wheat_style_bg with color_name as view of text:
+    give back "on " + color_name
+
+# A demonstration string with every attribute.
+to wheat_style_demo:
+    let system be wheat_color_system
+    let out be ""
+    for each spec in ["bold", "dim", "italic", "underline", "blink", "reverse", "strike", "red", "bright_green on black"]:
+        let label be wheat_text_pad_right with spec and 22
+        set out to out + (wheat_style_apply_in with label and spec and system) + "\n"
+    give back out

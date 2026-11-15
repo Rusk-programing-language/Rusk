@@ -1,0 +1,163 @@
+# columns.rk — put blocks side by side, and lay cells out in a grid.
+#
+# Rich has a Columns renderable that flows several renderables into a row.
+# Rusk has text blocks, so the job is smaller:
+#
+#     wheat_columns with [left, right] and 2
+#
+# takes a list of blocks, splits each into lines, and joins the first lines,
+# then the second lines, and so on. Shorter blocks are padded with blank cells,
+# so the columns keep their width all the way down.
+#
+# Cells are ordinary text, which means a grid can hold anything that renders to
+# text: a box, a panel, a bar. Only the visible width is measured.
+
+import "text"
+import "measure"
+
+# The number of lines in each block, as a list of numbers.
+to wheat_columns_heights with blocks as view of a list of text:
+    let out be an empty list of numbers
+    for each block in blocks:
+        add (length of (wheat_text_lines with block)) to out
+    give back out
+
+# The width of each block, as a list of numbers.
+to wheat_columns_widths with blocks as view of a list of text:
+    let out be an empty list of numbers
+    for each block in blocks:
+        add (wheat_measure_width with block) to out
+    give back out
+
+# The largest height among the blocks. Zero blocks give 0.
+to wheat_columns_tallest with blocks as view of a list of text:
+    let tallest be 0
+    for each height in (wheat_columns_heights with blocks):
+        if height is more than tallest:
+            set tallest to height
+    give back tallest
+
+# Lay blocks side by side, top-aligned.
+#
+#     wheat_columns with ["aaa\nbbb", "x"] and 3
+#     aaa   x
+#     bbb
+#
+# Blank lines below a short block are spaces of the same width, so a later
+# column never shifts to the left.
+to wheat_columns with blocks as view of a list of text and gap as a number:
+    let out be ""
+    if length of blocks is 0:
+        give back out
+    let gaps be gap
+    if gaps is less than 0:
+        set gaps to 0
+    let widths be wheat_columns_widths with blocks
+    let lines be an empty list of list of text
+    for each block in blocks:
+        add (wheat_text_lines with block) to lines
+    let tallest be wheat_columns_tallest with blocks
+    let row be 1
+    while row is at most tallest:
+        let line be ""
+        let c be 1
+        while c is at most length of blocks:
+            let cell be ""
+            let block_lines be item c of lines
+            if row is at most length of block_lines:
+                set cell to item row of block_lines
+            let width be item c of widths
+            let padded be wheat_text_pad_right with cell and width
+            if c is more than 1:
+                set line to line + (text_repeat with " " and gaps)
+            set line to line + padded
+            set c to c + 1
+        set out to out + line
+        if row is less than tallest:
+            set out to out + "\n"
+        set row to row + 1
+    give back out
+
+# Cells with one blank line between them.
+to wheat_columns_spaced with blocks as view of a list of text and gap as a number:
+    give back wheat_columns with blocks and (gap + 1)
+
+# A grid with a fixed number of cells per row. Each column is as wide as its
+# widest cell, so the grid lines up even when the cells differ in length:
+#
+#     wheat_columns_grid with ["a", "bbb", "cc", "d"] and 2 and 2
+#     a    bbb
+#     cc   d
+to wheat_columns_grid with cells as view of a list of text and per_row as a number and gap as a number:
+    let columns be per_row
+    if columns is less than 1:
+        set columns to 1
+    let out be ""
+    let start be 1
+    while start is at most length of cells:
+        let row_cells be an empty list of text
+        let c be 0
+        while c is less than columns and (start + c) is at most length of cells:
+            add (item (start + c) of cells) to row_cells
+            set c to c + 1
+        set out to out + (wheat_columns with row_cells and gap)
+        set start to start + columns
+        if start is at most length of cells:
+            set out to out + "\n"
+    give back out
+
+# Pack cells into rows of at most `width` cells, in order. A cell wider than
+# the line gets a row of its own. This is how a tag cloud or a list of chips
+# wraps when there is no fixed column count.
+to wheat_columns_pack with cells as view of a list of text and width as a number and gap as a number:
+    let out be ""
+    if length of cells is 0 or width is at most 0:
+        give back out
+    let gaps be gap
+    if gaps is less than 0:
+        set gaps to 0
+    let line be ""
+    let line_width be 0
+    for each cell in cells:
+        let cell_width be wheat_text_width with cell
+        if line is "":
+            set line to copy of cell
+            set line_width to cell_width
+        otherwise if line_width + gaps + cell_width is at most width:
+            set line to line + (text_repeat with " " and gaps) + cell
+            set line_width to line_width + gaps + cell_width
+        otherwise:
+            set out to out + line + "\n"
+            set line to copy of cell
+            set line_width to cell_width
+    give back out + line
+
+# How many rows a packed list would need at `width`.
+to wheat_columns_pack_rows with cells as view of a list of text and width as a number and gap as a number:
+    if width is at most 0:
+        give back 0
+    let rows be 0
+    let line_width be 0
+    let empty be true
+    for each cell in cells:
+        let cell_width be wheat_text_width with cell
+        if empty:
+            set line_width to cell_width
+            set empty to false
+            set rows to 1
+        otherwise if line_width + gap + cell_width is at most width:
+            set line_width to line_width + gap + cell_width
+        otherwise:
+            set rows to rows + 1
+            set line_width to cell_width
+    give back rows
+
+# Three columns with different heights, then a packed row of chips.
+to wheat_columns_demo:
+    let left be "alpha\nbeta\ngamma"
+    let middle be "one\ntwo"
+    let right be "x"
+    let out be wheat_columns with [left, middle, right] and 4
+    set out to out + "\n\n"
+    set out to out + (wheat_columns_pack with ["red", "green", "blue", "cyan", "magenta", "yellow", "black", "white"] and 24 and 1)
+    give back out

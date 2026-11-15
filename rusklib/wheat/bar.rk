@@ -1,0 +1,246 @@
+# bar.rk — progress bars, meters, sparklines, and spinners.
+#
+# Everything here is text. A bar is a row of block glyphs; it has no idea what
+# it is measuring, so the same helpers work for a download, a build, or a
+# survey. Progress is expressed with whole numbers, because Rusk numbers are
+# whole numbers:
+#
+#     wheat_bar with 3 and 10 and 20
+#     ██████░░░░░░░░░░░░░░
+#
+# `done` is clamped to `0..total`. A `total` of zero is treated as "nothing
+# done yet" rather than dividing by zero.
+#
+# The partial blocks let a bar advance in eighths of a cell:
+#
+#     wheat_bar_smooth with 7 and 24 and 20
+#     █████▊░░░░░░░░░░░░░░
+
+import "text"
+
+# Clamp `n` into `low..high`.
+to wheat_bar_clamp with n as a number and low as a number and high as a number:
+    if n is less than low:
+        give back low
+    if n is more than high:
+        give back high
+    give back n
+
+# `done` as a percentage from 0 to 100, rounded to the nearest whole number.
+to wheat_bar_percent with done as a number and total as a number:
+    if total is at most 0:
+        give back 0
+    let value be wheat_bar_clamp with done and 0 and total
+    give back (value * 100 + total / 2) / total
+
+# The printable percentage, `42%`.
+to wheat_bar_percent_text with done as a number and total as a number:
+    give back (wheat_text_from_number with (wheat_bar_percent with done and total)) + "%"
+
+# How many cells of a `width`-cell bar are full.
+to wheat_bar_full_cells with done as a number and total as a number and width as a number:
+    if total is at most 0 or width is at most 0:
+        give back 0
+    let value be wheat_bar_clamp with done and 0 and total
+    give back (value * width + total / 2) / total
+
+# A simple two-glyph bar:
+#
+#     wheat_bar with 3 and 10 and 10  ->  ███░░░░░░░
+#
+# `partial` may be any glyph, including "" for a bar with no empty track.
+to wheat_bar with done as a number and total as a number and width as a number:
+    let bar_width be width
+    if bar_width is less than 0:
+        set bar_width to 0
+    let full be wheat_bar_full_cells with done and total and bar_width
+    give back (text_repeat with "█" and full) + (text_repeat with "░" and (bar_width - full))
+
+# A bar that fills in eighths of a cell, using the partial block glyphs.
+to wheat_bar_smooth with done as a number and total as a number and width as a number:
+    let bar_width be width
+    if bar_width is less than 0:
+        set bar_width to 0
+    if total is at most 0 or bar_width is 0:
+        give back text_repeat with "░" and bar_width
+    let value be wheat_bar_clamp with done and 0 and total
+    let eighths be (value * bar_width * 8 + total / 2) / total
+    let whole be eighths / 8
+    let part be eighths - whole * 8
+    let out be text_repeat with "█" and whole
+    let remaining be bar_width - whole
+    if part is more than 0 and remaining is more than 0:
+        let partials be ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
+        set out to out + (item (part + 1) of partials)
+        set remaining to remaining - 1
+    give back out + (text_repeat with "░" and remaining)
+
+# A bar with a caption on the left and the percentage on the right:
+#
+#     build   ████████░░░░░░  58%
+#
+# The caption is padded to 12 cells. The bar width is what is left after the
+# caption and the percentage, with at least four cells for the bar.
+to wheat_bar_labelled with label as view of text and done as a number and total as a number and width as a number:
+    let caption be wheat_text_pad_right with (wheat_text_crop with label and 12) and 12
+    let percent be wheat_bar_percent_text with done and total
+    let bar_width be width - 12 - (length of percent) - 2
+    if bar_width is less than 4:
+        set bar_width to 4
+    give back caption + " " + (wheat_bar with done and total and bar_width) + " " + percent
+
+# A meter whose filled part is styled with markup tags, for `wheat_text_markup`
+# or a console that understands markup:
+#
+#     wheat_bar_markup with 4 and 10 and 10 and "green"
+#     [green]████[/][dim]░░░░░░[/]
+to wheat_bar_markup with done as a number and total as a number and width as a number and spec as view of text:
+    let bar_width be width
+    if bar_width is less than 0:
+        set bar_width to 0
+    let full be wheat_bar_full_cells with done and total and bar_width
+    let filled be text_repeat with "█" and full
+    let empty be text_repeat with "░" and (bar_width - full)
+    let out be ""
+    if filled is not "":
+        set out to out + "[" + spec + "]" + filled + "[/]"
+    if empty is not "":
+        set out to out + "[dim]" + empty + "[/]"
+    give back out
+
+# A travelling highlight on a track: one bright stretch that moves left to
+# right as `frame` grows. Useful for work with no known total.
+to wheat_bar_pulse with frame as a number and width as a number:
+    let bar_width be width
+    if bar_width is at most 0:
+        give back ""
+    let span be bar_width / 4
+    if span is less than 1:
+        set span to 1
+    let travel be bar_width + span
+    let start be frame - (frame / travel) * travel - span
+    let out be ""
+    let i be 0
+    while i is less than bar_width:
+        if i is at least start and i is less than (start + span):
+            set out to out + "█"
+        otherwise:
+            set out to out + "░"
+        set i to i + 1
+    give back out
+
+# A sparkline from `values`, using eight levels of vertical block. When `low`
+# and `high` are both 0 the range is taken from the data. A flat series of
+# zeroes draws the lowest block.
+to wheat_bar_spark with values as view of a list of numbers and low as a number and high as a number:
+    let glyphs be ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+    if length of values is 0:
+        give back ""
+    let bottom be low
+    let top be high
+    if bottom is 0 and top is 0:
+        set bottom to item 1 of values
+        set top to item 1 of values
+        for each value in values:
+            if value is less than bottom:
+                set bottom to value
+            if value is more than top:
+                set top to value
+    if top is bottom:
+        set top to bottom + 1
+    let out be ""
+    for each value in values:
+        let level be (value - bottom) * 7 / (top - bottom)
+        set level to wheat_bar_clamp with level and 0 and 7
+        set out to out + (item (level + 1) of glyphs)
+    give back out
+
+# A vertical bar chart, one row per level, built from `█` and spaces. `height`
+# is the number of rows. Rows are printed top down, so the first line in the
+# result is the tallest.
+to wheat_bar_columns with values as view of a list of numbers and height as a number:
+    let out be an empty list of text
+    if length of values is 0 or height is at most 0:
+        add "" to out
+        give back out
+    let top be item 1 of values
+    for each value in values:
+        if value is more than top:
+            set top to value
+    if top is at most 0:
+        set top to 1
+    let row be height
+    while row is at least 1:
+        let line be ""
+        for each value in values:
+            let cells be (value * height + top / 2) / top
+            if cells is at least row:
+                set line to line + "█"
+            otherwise:
+                set line to line + " "
+        add line to out
+        set row to row - 1
+    give back out
+
+# Frames of a spinner, for work with no percentage. Advance `frame` each tick.
+to wheat_bar_spinner with frame as a number:
+    let frames be ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    let i be frame - (frame / (length of frames)) * (length of frames)
+    if i is less than 0:
+        set i to i + (length of frames)
+    give back item (i + 1) of frames
+
+# A four-frame ASCII spinner, for terminals without Braille glyphs.
+to wheat_bar_spinner_ascii with frame as a number:
+    let frames be ["|", "/", "-", "\\"]
+    let i be frame - (frame / 4) * 4
+    if i is less than 0:
+        set i to i + 4
+    give back item (i + 1) of frames
+
+# A gauge: a bar split into ten steps with the value written inside. The value
+# is a percentage. The label is overlaid on the track in the middle of the
+# filled part, so it reads the same whether the bar is nearly empty or nearly
+# full.
+to wheat_bar_gauge with percent as a number and width as a number:
+    let value be wheat_bar_clamp with percent and 0 and 100
+    let bar_width be width
+    if bar_width is less than 12:
+        set bar_width to 12
+    let label be wheat_text_from_number with value
+    if value is less than 10:
+        set label to " " + label
+    set label to label + "%"
+    let full be (value * bar_width + 50) / 100
+    let label_width be length of label
+    let start be full - label_width / 2
+    if start is less than 0:
+        set start to 0
+    if start + label_width is more than bar_width:
+        set start to bar_width - label_width
+    let out be ""
+    let i be 0
+    while i is less than bar_width:
+        let glyph be "░"
+        if i is less than full:
+            set glyph to "█"
+        if i is at least start and i is less than (start + label_width):
+            set glyph to letter (i - start + 1) of label
+        set out to out + glyph
+        set i to i + 1
+    give back out
+
+# Every bar helper in one string, for a quick look.
+to wheat_bar_demo:
+    let out be ""
+    let i be 0
+    while i is at most 10:
+        set out to out + (wheat_bar_labelled with "loading" and i and 10 and 40) + "\n"
+        set i to i + 1
+    set out to out + "\n"
+    set out to out + "smooth  " + (wheat_bar_smooth with 7 and 24 and 30) + "\n"
+    set out to out + "pulse   " + (wheat_bar_pulse with 4 and 30) + "\n"
+    set out to out + "spark   " + (wheat_bar_spark with [1, 4, 2, 8, 5, 9, 3, 7, 6] and 0 and 0) + "\n"
+    set out to out + "gauge   " + (wheat_bar_gauge with 35 and 24) + "\n"
+    set out to out + "spinner " + (wheat_bar_spinner with 3) + "\n"
+    give back out

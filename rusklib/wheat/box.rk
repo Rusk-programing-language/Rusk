@@ -1,0 +1,241 @@
+# box.rk — draw a frame around text.
+#
+# A box is plain text. Nothing here depends on a terminal: `wheat_box_around`
+# gives back a block of text lines, and the caller decides whether to print it,
+# style it, or store it. The border characters are the six pieces a frame
+# needs, in this order:
+#
+#     [top_left, top_right, bottom_left, bottom_right, horizontal, vertical]
+#
+# The named styles are:
+#
+#     light     ┌ ┐ └ ┘ ─ │
+#     heavy     ┏ ┓ ┗ ┛ ━ ┃
+#     double    ╔ ╗ ╚ ╝ ═ ║
+#     rounded   ╭ ╮ ╰ ╯ ─ │
+#     ascii     + + + + - |
+#     none      no border at all
+#
+# Boxes are measured in display cells, using `wheat_text_width`, so the drawing
+# glyphs count as one cell each even though they are three bytes in UTF-8.
+#
+#     say wheat_box_around with "hello\nworld" and 0 and "rounded"
+#     ╭─────────╮
+#     │ hello   │
+#     │ world   │
+#     ╰─────────╯
+
+import "text"
+import "measure"
+
+# The six border pieces for a named style. An unknown style gives the light box.
+to wheat_box_chars with kind as view of text:
+    if kind is "heavy":
+        give back ["┏", "┓", "┗", "┛", "━", "┃"]
+    if kind is "double":
+        give back ["╔", "╗", "╚", "╝", "═", "║"]
+    if kind is "rounded":
+        give back ["╭", "╮", "╰", "╯", "─", "│"]
+    if kind is "ascii":
+        give back ["+", "+", "+", "+", "-", "|"]
+    if kind is "bold":
+        give back ["┏", "┓", "┗", "┛", "━", "┃"]
+    if kind is "none":
+        give back ["", "", "", "", "", ""]
+    give back ["┌", "┐", "└", "┘", "─", "│"]
+
+# The style names, in the order the demo prints them.
+to wheat_box_styles:
+    give back ["light", "heavy", "double", "rounded", "ascii", "none"]
+
+# One horizontal rule of `width` cells, built from the left corner, the fill,
+# and the right corner.
+to wheat_box_rule with width as a number and kind as view of text:
+    let chars be wheat_box_chars with kind
+    let horizontal be item 5 of chars
+    if horizontal is "":
+        give back ""
+    let inside be width - 2
+    if inside is less than 0:
+        set inside to 0
+    give back (item 1 of chars) + (text_repeat with horizontal and inside) + (item 2 of chars)
+
+# The bottom rule of `width` cells.
+to wheat_box_floor with width as a number and kind as view of text:
+    let chars be wheat_box_chars with kind
+    let horizontal be item 5 of chars
+    if horizontal is "":
+        give back ""
+    let inside be width - 2
+    if inside is less than 0:
+        set inside to 0
+    give back (item 3 of chars) + (text_repeat with horizontal and inside) + (item 4 of chars)
+
+# The top rule with a title sitting in it:
+#
+#     ┌─ title ─────┐
+#
+# The title is cropped when the box is too narrow to hold it.
+to wheat_box_title_rule with title as view of text and width as a number and kind as view of text:
+    if title is "":
+        give back wheat_box_rule with width and kind
+    let chars be wheat_box_chars with kind
+    let horizontal be item 5 of chars
+    if horizontal is "":
+        give back "  " + title
+    if width is less than 6:
+        give back wheat_box_rule with width and kind
+    let label be " " + title + " "
+    if (wheat_text_width with label) is more than (width - 3):
+        set label to " " + (wheat_text_ellipsis with title and (width - 5)) + " "
+    let used be wheat_text_width with label
+    let fill be width - used - 2
+    if fill is less than 0:
+        set fill to 0
+    give back (item 1 of chars) + horizontal + label + (text_repeat with horizontal and fill) + (item 2 of chars)
+
+# One framed content line. `body` is cropped or padded to fit the box's inner
+# width, so a caller does not have to measure first:
+#
+#     │ body   │
+to wheat_box_line with body as view of text and width as a number and kind as view of text:
+    let chars be wheat_box_chars with kind
+    let vertical be item 6 of chars
+    if vertical is "":
+        give back "  " + body
+    let inside be width - 4
+    if inside is less than 0:
+        set inside to 0
+    let fitted be wheat_text_pad_right with (wheat_text_crop with body and inside) and inside
+    give back vertical + " " + fitted + " " + vertical
+
+# One framed content line whose body is already styled with ANSI codes. The
+# padding is computed from the visible width, not the byte length.
+to wheat_box_styled_line with body as view of text and width as a number and kind as view of text:
+    let chars be wheat_box_chars with kind
+    let vertical be item 6 of chars
+    if vertical is "":
+        give back "  " + body
+    let inside be width - 4
+    if inside is less than 0:
+        set inside to 0
+    let fitted be copy of body
+    if (wheat_text_width with body) is more than inside:
+        set fitted to wheat_text_crop with body and inside
+    let gap be inside - (wheat_text_width with fitted)
+    let padding be ""
+    if gap is more than 0:
+        set padding to text_repeat with " " and gap
+    give back vertical + " " + fitted + padding + " " + vertical
+
+# The natural width of a body: two border cells, two spaces of padding, and the
+# widest line.
+to wheat_box_width_for with body as view of text:
+    give back (wheat_measure_width with body) + 4
+
+# Wrap a body of text in a frame. Three cases:
+#
+#   width = 0   the box is as wide as the widest line plus the frame
+#   width > 0   the box is exactly that wide and lines are cropped or padded
+#   kind none   the body is returned unchanged
+#
+# A multi-line body keeps its blank lines, so vertical spacing survives.
+to wheat_box_around with body as view of text and width as a number and kind as view of text:
+    let chars be wheat_box_chars with kind
+    if (item 6 of chars) is "":
+        give back copy of body
+    let box_width be width
+    if box_width is at most 0:
+        set box_width to wheat_box_width_for with body
+    if box_width is less than 4:
+        set box_width to 4
+    let out be wheat_box_rule with box_width and kind
+    for each line in (wheat_text_lines with body):
+        set out to out + "\n" + (wheat_box_line with line and box_width and kind)
+    give back out + "\n" + (wheat_box_floor with box_width and kind)
+
+# Wrap a body in a frame with a title in the top edge.
+to wheat_box_titled with title as view of text and body as view of text and width as a number and kind as view of text:
+    let chars be wheat_box_chars with kind
+    if (item 6 of chars) is "":
+        give back copy of body
+    let box_width be width
+    if box_width is at most 0:
+        set box_width to wheat_box_width_for with body
+    let title_width be (wheat_text_width with title) + 4
+    if title_width is more than box_width:
+        set box_width to title_width
+    if box_width is less than 6:
+        set box_width to 6
+    let out be wheat_box_title_rule with title and box_width and kind
+    for each line in (wheat_text_lines with body):
+        set out to out + "\n" + (wheat_box_line with line and box_width and kind)
+    give back out + "\n" + (wheat_box_floor with box_width and kind)
+
+# An empty frame of `width` by `height` cells. Height counts the two rules, so
+# a height of 3 is one content line.
+to wheat_box_empty with width as a number and height as a number and kind as view of text:
+    let box_width be width
+    if box_width is less than 4:
+        set box_width to 4
+    let box_height be height
+    if box_height is less than 2:
+        set box_height to 2
+    let out be wheat_box_rule with box_width and kind
+    let i be 3
+    while i is at most box_height:
+        set out to out + "\n" + (wheat_box_line with "" and box_width and kind)
+        set i to i + 1
+    give back out + "\n" + (wheat_box_floor with box_width and kind)
+
+# A box with a horizontal divider after every `every` lines. A value of 0 or
+# less disables dividers.
+to wheat_box_sections with body as view of text and width as a number and kind as view of text and every as a number:
+    let chars be wheat_box_chars with kind
+    if (item 6 of chars) is "":
+        give back copy of body
+    let box_width be width
+    if box_width is at most 0:
+        set box_width to wheat_box_width_for with body
+    let rules be wheat_box_chars with kind
+    let horizontal be item 5 of rules
+    let divider be ""
+    if horizontal is not "":
+        set divider to "├" + (text_repeat with horizontal and (box_width - 2)) + "┤"
+        if kind is "ascii":
+            set divider to "+" + (text_repeat with horizontal and (box_width - 2)) + "+"
+    let out be wheat_box_rule with box_width and kind
+    let count be 0
+    for each line in (wheat_text_lines with body):
+        set out to out + "\n" + (wheat_box_line with line and box_width and kind)
+        set count to count + 1
+        if every is more than 0 and count is (count / every) * every and divider is not "":
+            set out to out + "\n" + divider
+    give back out + "\n" + (wheat_box_floor with box_width and kind)
+
+# Put `body` inside `margin` cells of space on every side, without drawing a
+# border. This is the padding half of a box, useful on its own.
+to wheat_box_inset with body as view of text and margin as a number:
+    let pad be margin
+    if pad is less than 0:
+        set pad to 0
+    let spaces be text_repeat with " " and pad
+    let out be ""
+    let i be 1
+    while i is at most pad:
+        set out to out + "\n"
+        set i to i + 1
+    for each line in (wheat_text_lines with body):
+        set out to out + spaces + line + "\n"
+    set i to 1
+    while i is at most pad:
+        set out to out + "\n"
+        set i to i + 1
+    give back out
+
+# One labelled example of every style, for a quick visual check.
+to wheat_box_demo:
+    let out be ""
+    for each kind in (wheat_box_styles):
+        set out to out + (wheat_box_titled with kind and ("the quick brown fox") and 25 and kind) + "\n\n"
+    give back out

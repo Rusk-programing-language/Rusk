@@ -1,0 +1,47 @@
+# wheat.rk — one import for the whole wheat terminal library.
+#
+#     import "wheat"
+#
+# pulls in every module in this directory. A program that needs one corner can
+# import it directly and compile less:
+#
+#     import "wheat/color"
+#     import "wheat/table"
+#
+# The modules and what they hold:
+#
+#     text      trimming, splitting, width, wrapping, markup
+#     color     color names, hex, the 256 palette, ANSI codes
+#     style     attribute and color specs such as "bold red"
+#     segment   [text, style] segments, lines, and blocks
+#     measure   widths, heights, column sizing
+#     box       frames: light, heavy, double, rounded, ascii
+#     bar       progress bars, gauges, sparklines, spinners
+#     columns   side-by-side blocks and packed grids
+#     panel     boxed sections with title, padding, and subtitle
+#     table     aligned rows with optional frames
+#     layout    vertical stacks, splits, pages
+#     theme     named styles and theme markup
+#     console   terminal size, escape sequences, printing, rules
+#     keys      key names and escape sequences from `read key`
+#     app       menus, checklists, dialogs, frames, status bars
+#
+# wheat does not guess whether stdout is a terminal. Color output follows
+# `WHEAT_COLOR`, `NO_COLOR`, and `TERM` (see color.rk); cursor moves are just
+# text that the caller writes. Nothing in the library needs a dependency.
+
+import "text"
+import "color"
+import "style"
+import "segment"
+import "measure"
+import "box"
+import "bar"
+import "columns"
+import "panel"
+import "table"
+import "layout"
+import "theme"
+import "console"
+import "keys"
+import "app"

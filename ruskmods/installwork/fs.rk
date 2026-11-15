@@ -1,0 +1,184 @@
+# fs.rk — small file-tree helpers for the installer.
+#
+# Rusk gives us `read file`, `write ... to file`, `file exists`,
+# `list directory`, `make directory`, `remove file`, `remove directory`, and
+# `rename`. Those primitives work one path at a time. This module builds the
+# recursive operations an installer needs: create a directory tree, copy a
+# package tree, list it in order, and remove it again.
+#
+# Everything here works on text files. Rusk strings are text, so copying a
+# binary file byte-for-byte is out of scope; a package tree is source files,
+# Ruskfiles, and text assets.
+
+import "text"
+
+# True when the path names something that exists, file or directory.
+to installwork_fs_exists with path as a view of text:
+    if path is "":
+        give back false
+    give back file exists path
+
+# True when the path names a directory. Appending `/.` makes the kernel say
+# "not a directory" for a plain file, which keeps this from crashing on a path
+# that is not a directory.
+to installwork_fs_is_directory with path as a view of text:
+    if path is "":
+        give back false
+    if not (file exists path):
+        give back false
+    give back file exists (installwork_path_join with path and ".")
+
+# True when the path names a plain file (or a symlink to one).
+to installwork_fs_is_file with path as a view of text:
+    if not (file exists path):
+        give back false
+    give back not (installwork_fs_is_directory with path)
+
+# Sort a list of names in place, alphabetically. This is the same insertion
+# sort used by the registry, kept local so fs.rk has no installer dependency.
+to installwork_fs_sort with names as a list of text:
+    let n be length of names
+    for each i from 2 to n:
+        let j be i
+        while j is more than 1:
+            let left be item (j - 1) of names
+            let right be item j of names
+            if right is less than left:
+                set item (j - 1) of names to right
+                set item j of names to left
+                set j to j - 1
+            otherwise:
+                break
+    give back names
+
+# Directory entry names in alphabetical order. A missing directory or a path
+# that is a file gives an empty list rather than a crashed program.
+to installwork_fs_entries with path as a view of text:
+    let out be an empty list of text
+    if not (installwork_fs_is_directory with path):
+        give back out
+    for each entry in (list directory path):
+        add entry to out
+    give back installwork_fs_sort with out
+
+# Create `path` and every missing parent directory.
+#
+# Rusk has no `-p` flag, so walk from the left and create each prefix. Absolute
+# paths keep their leading slash; relative paths are created from the current
+# directory.
+to installwork_fs_ensure_directory with path as a view of text:
+    let p be installwork_text_trim with path
+    if p is "" or p is ".":
+        give back true
+    if installwork_fs_is_directory with p:
+        give back true
+
+    let absolute be (letter 1 of p) is "/"
+    let built be ""
+    if absolute:
+        set built to "/"
+
+    for each piece in (installwork_text_split with p and "/"):
+        if piece is not "" and piece is not ".":
+            if built is "":
+                set built to piece
+            otherwise if built is "/":
+                set built to "/" + piece
+            otherwise:
+                set built to built + "/" + piece
+            if not (installwork_fs_is_directory with built):
+                make directory built
+
+    give back installwork_fs_is_directory with p
+
+# Make sure the directory that will hold `path` exists.
+to installwork_fs_ensure_parent with path as a view of text:
+    give back installwork_fs_ensure_directory with (installwork_path_parent with path)
+
+# Read a text file. A missing file gives empty text so callers can check.
+to installwork_fs_read with path as a view of text:
+    if not (installwork_fs_is_file with path):
+        give back ""
+    give back read file path
+
+# Replace a text file, creating its parent directory first.
+to installwork_fs_write with path as a view of text and body as a view of text:
+    if not (installwork_fs_ensure_parent with path):
+        give back false
+    write body to file path
+    give back true
+
+# Append text to a file, creating it when needed. `read file` plus `write file`
+# is the portable spelling of append in Rusk today.
+to installwork_fs_append with path as a view of text and body as a view of text:
+    let old be installwork_fs_read with path
+    give back installwork_fs_write with path and (old + body)
+
+# Copy one text file. Missing sources give false.
+to installwork_fs_copy_file with from as a view of text and to as a view of text:
+    if not (installwork_fs_is_file with from):
+        give back false
+    if not (installwork_fs_ensure_parent with to):
+        give back false
+    write (read file from) to file to
+    give back true
+
+# Copy a whole directory tree. Text files are copied; nested directories are
+# created first. `to` is created when it does not exist.
+to installwork_fs_copy_tree with from as a view of text and to as a view of text:
+    if not (installwork_fs_is_directory with from):
+        give back false
+    if not (installwork_fs_ensure_directory with to):
+        give back false
+    for each entry in (installwork_fs_entries with from):
+        let source be installwork_path_join with from and entry
+        let target be installwork_path_join with to and entry
+        if installwork_fs_is_directory with source:
+            if not (installwork_fs_copy_tree with source and target):
+                give back false
+        otherwise:
+            if not (installwork_fs_copy_file with source and target):
+                give back false
+    give back true
+
+# Remove a directory tree, deepest entries first. A missing path is already
+# gone and gives true.
+to installwork_fs_remove_tree with path as a view of text:
+    if not (file exists path):
+        give back true
+    if installwork_fs_is_file with path:
+        remove file path
+        give back not (file exists path)
+    for each entry in (installwork_fs_entries with path):
+        let child be installwork_path_join with path and entry
+        if installwork_fs_is_directory with child:
+            if not (installwork_fs_remove_tree with child):
+                give back false
+        otherwise:
+            remove file child
+    remove directory path
+    give back not (file exists path)
+
+# Every file below `root`, as paths relative to `root`, sorted. Directories are
+# descended into but are not themselves listed.
+to installwork_fs_files_under with root as a view of text:
+    let out be an empty list of text
+    for each entry in (installwork_fs_entries with root):
+        let child be installwork_path_join with root and entry
+        if installwork_fs_is_directory with child:
+            for each nested in (installwork_fs_files_under with child):
+                add (installwork_path_join with entry and nested) to out
+        otherwise:
+            add entry to out
+    give back out
+
+# The total size in bytes of the text files below `root`.
+to installwork_fs_tree_size with root as a view of text:
+    let total be 0
+    for each entry in (installwork_fs_entries with root):
+        let child be installwork_path_join with root and entry
+        if installwork_fs_is_directory with child:
+            set total to total + (installwork_fs_tree_size with child)
+        otherwise:
+            set total to total + (length of (installwork_fs_read with child))
+    give back total

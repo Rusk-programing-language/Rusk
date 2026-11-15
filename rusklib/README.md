@@ -1,27 +1,31 @@
 # rusklib — higher-level Rusk helpers
 
 `rusklib` sits on top of [`ruskmods/`](../ruskmods/README.md). It holds the
-helpers that need to copy whole trees or call standard tools, plus one bundle
-that imports every module.
+helpers that need to copy whole trees or call standard tools, the inbuilt
+terminal UI library, and one bundle that imports every module.
 
 ```rusk
 import "rusklib/rusklib"
 
 say date_format_iso with 2026 and 11 and 12
 say files_exists with "notes.txt"
+say wheat_box_around with "hello" and 0 and "rounded"
 ```
 
 Import one file directly when the bundle is more than a program needs:
 
 ```rusk
 import "rusklib/files"
+import "wheat/table"
 
 files_copy with "src" and "backup/src"
 say files_size with "backup/src/notes.txt"
+say wheat_table with ["name"] and [["math"]] and "simple"
 ```
 
-Every public name keeps its prefix, because a plain import shares one global
-namespace.
+Bare module names resolve next to the importing file, then in `ruskmods/` and
+`rusklib/` beside it and in each parent directory. Every public name keeps its
+prefix (`files_`, `wheat_`), because a plain import shares one global namespace.
 
 ## `files.rk`
 
@@ -49,18 +53,68 @@ return the command's exit status. They need the usual POSIX tools (`cp`, `mv`,
 `rm`, `tar`, `mkdir`). `files_copy_file`, `files_write`, and `files_append` use
 the language's own file primitives instead.
 
+## `wheat/` — terminal UI
+
+[`wheat/`](wheat/README.md) is a Rich-inspired terminal library written entirely
+in Rusk. It renders text; it does not own a screen or run an event loop.
+
+| Module | What it holds |
+|---|---|
+| `wheat/text` | trimming, split, join, replace, case, padding, cropping, wrapping, markup; inherited `text_*` helpers |
+| `wheat/color` | colour names, hex, the 256 palette, ANSI codes, colour-system detection |
+| `wheat/style` | attribute and colour specs such as `bold red` |
+| `wheat/segment` | `[text, style]` segments, lines, and blocks |
+| `wheat/measure` | widths, heights, column sizing |
+| `wheat/box` | frames: light, heavy, double, rounded, ascii, none |
+| `wheat/bar` | progress bars, gauges, sparklines, spinners |
+| `wheat/columns` | side-by-side blocks, grids, packed chips |
+| `wheat/panel` | boxed sections with title, padding, and subtitle |
+| `wheat/table` | aligned rows with optional frames |
+| `wheat/layout` | vertical stacks, splits, pages |
+| `wheat/theme` | named styles and theme markup |
+| `wheat/console` | terminal size, escape sequences, printing, rules |
+| `wheat/keys` | key names and escape sequences from `read key` |
+| `wheat/app` | menus, checklists, dialogs, frames, status bars |
+| `wheat/wheat` | the bundle: imports every module above |
+
+```rusk
+import "wheat/wheat"
+
+say wheat_panel_full with "Installed" and "2 items" and "math 1.2.0" and 0 and "left" and 1 and "rounded"
+say wheat_bar_labelled with "build" and 5 and 20 and 40
+```
+
+Colour follows `WHEAT_COLOR`, `NO_COLOR`, `COLORTERM`, and `TERM`; the default
+is `standard` rather than "detect a tty", and `WHEAT_COLOR=none` turns escape
+codes off. Widths are in display cells, measured correctly for ASCII and for
+wheat's own drawing glyphs; other non-ASCII text is measured by UTF-8 byte
+length. See [`wheat/README.md`](wheat/README.md) for every module, the colour
+modes, and the limits.
+
 ## `rusklib.rk`
 
 `import "rusklib/rusklib"` pulls in:
 
-- `text`, `math`, `math/math`
+- `math`, `math/math`
 - `date/date`, `time/time`, `random/random`, `statistics/statistics`
 - `json/json`, `toml/toml`
 - `sys/sys`, `os/os`, `path/path`, `shutils/shutils`
+- `installwork/installwork`
 - `files`
+- `wheat/wheat`
 
-The bundle uses relative imports, so it works from a checkout and from an
-installed copy that keeps the same layout.
+The bundle mostly uses explicit relative imports so it works from a checkout and
+from an installed copy that keeps the same layout. The `wheat` modules import
+each other by bare name.
+
+## Installer framework
+
+`import "installwork"` (source in
+[`ruskmods/installwork/`](../ruskmods/installwork/)) is a separate, larger
+framework: a package registry, version specs, a dependency resolver, archive
+handling, an install prefix, recorded state, an installer, and a CLI. It also
+reads `Ruskfile` manifests. It is not part of `files.rk` or `wheat`; the bundle
+imports it for convenience, but a program that only wants widgets need not.
 
 ## Limits
 
@@ -72,3 +126,5 @@ installed copy that keeps the same layout.
   that need output read a file.
 - File copies keep the file contents in memory as text. They are for ordinary
   files, not multi-gigabyte data.
+- `wheat` does not query the terminal, does not detect a tty, and does not
+  implement an event loop. It builds strings; the caller writes them.

@@ -30,6 +30,77 @@ fn run_forwards_arguments_after_the_file() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1\nalpha\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn no_arguments_runs_the_nearby_ruskfile() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-ruskfile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Ruskfile"), "say \"from Ruskfile\"\n").unwrap();
+
+    let out = Command::new(rusk())
+        .current_dir(&dir)
+        .output()
+        .expect("rusk should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "from Ruskfile\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn no_arguments_finds_a_ruskfile_in_a_parent_directory() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-ruskfile-parent-{}", std::process::id()));
+    let nested = dir.join("src").join("deep");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(dir.join("Ruskfile"), "say \"from above\"\n").unwrap();
+
+    let out = Command::new(rusk())
+        .current_dir(&nested)
+        .output()
+        .expect("rusk should start");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "from above\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn no_arguments_without_a_ruskfile_starts_the_session() {
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join(format!("rusk-cli-no-ruskfile-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let mut child = Command::new(rusk())
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("rusk should start");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"say \"session\"\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "session\n");
+}
+
 #[test]
 fn tui_demo_falls_back_to_text_when_stdout_is_not_a_terminal() {
     let out = Command::new(rusk())

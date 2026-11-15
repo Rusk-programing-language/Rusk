@@ -1,0 +1,118 @@
+# theme.rk — named styles, so a program does not repeat color words.
+#
+# A theme is a list of `[name, style]` pairs:
+#
+#     [["title", "bold bright_white"], ["error", "bold red"], ...]
+#
+# The default theme covers the words a report or an installer uses: `title`,
+# `subtitle`, `muted`, `accent`, `info`, `success`, `warning`, `error`,
+# `border`, `header`, `key`, `value`, `path`, `number`, `ok`, `fail`.
+#
+# Markup can use theme names as tags:
+#
+#     wheat_theme_render with "[title]installed[/] [number]2[/] packages"
+#
+# `wheat_text_markup` turns the tags into segments; `wheat_theme_render` then
+# maps each tag through the theme. A tag that is not a theme name is passed
+# through unchanged, so plain styles such as `[bold red]` still work.
+
+import "text"
+import "style"
+import "segment"
+
+# The built-in theme.
+to wheat_theme_default:
+    give back [["title", "bold bright_white"], ["subtitle", "dim"], ["muted", "dim"], ["accent", "bold cyan"], ["info", "blue"], ["success", "green"], ["warning", "yellow"], ["error", "bold red"], ["danger", "bold red"], ["border", "bright_black"], ["header", "bold"], ["key", "cyan"], ["value", "white"], ["path", "bright_blue"], ["number", "magenta"], ["ok", "green"], ["fail", "red"]]
+
+# The names in a theme, in order.
+to wheat_theme_names with theme as view of a list of list of text:
+    let out be an empty list of text
+    for each entry in theme:
+        add (copy of (item 1 of entry)) to out
+    give back out
+
+# The style for `name`, or empty text when the theme has no such entry.
+to wheat_theme_get with theme as view of a list of list of text and name as view of text:
+    for each entry in theme:
+        if (item 1 of entry) is name:
+            give back copy of (item 2 of entry)
+    give back ""
+
+# True when the theme has an entry for `name`.
+to wheat_theme_has with theme as view of a list of list of text and name as view of text:
+    for each entry in theme:
+        if (item 1 of entry) is name:
+            give back true
+    give back false
+
+# Add or replace one entry. The theme is changed in place and also returned.
+to wheat_theme_set with theme as a list of list of text and name as view of text and spec as view of text:
+    let i be 1
+    while i is at most length of theme:
+        if (item 1 of (item i of theme)) is name:
+            set item 2 of (item i of theme) to copy of spec
+            give back theme
+        set i to i + 1
+    add [copy of name, copy of spec] to theme
+    give back theme
+
+# A new theme made of `base` with every entry of `extra` replacing or adding
+# to it.
+to wheat_theme_merge with base as view of a list of list of text and extra as view of a list of list of text:
+    let out be an empty list of list of text
+    for each entry in base:
+        add [copy of (item 1 of entry), copy of (item 2 of entry)] to out
+    for each entry in extra:
+        set out to wheat_theme_set with out and (item 1 of entry) and (item 2 of entry)
+    give back out
+
+# A theme with a different style for one name, leaving the original alone.
+to wheat_theme_with with theme as view of a list of list of text and name as view of text and spec as view of text:
+    let out be an empty list of list of text
+    for each entry in theme:
+        add [copy of (item 1 of entry), copy of (item 2 of entry)] to out
+    give back wheat_theme_set with out and name and spec
+
+# Apply a named style from a theme. An unknown name means plain text.
+to wheat_theme_apply_in with theme as view of a list of list of text and name as view of text and body as view of text and system as view of text:
+    let spec be wheat_theme_get with theme and name
+    if spec is "":
+        give back copy of body
+    give back wheat_style_apply_in with body and spec and system
+
+to wheat_theme_apply with name as view of text and body as view of text:
+    give back wheat_theme_apply_in with (wheat_theme_default) and name and body and (wheat_color_system)
+
+# `[name]...[/]` tags mapped through a theme, as segments.
+to wheat_theme_markup with theme as view of a list of list of text and body as view of text:
+    let out be an empty list of list of text
+    for each piece in (wheat_text_markup with body):
+        let tag be item 2 of piece
+        let spec be copy of tag
+        if tag is not "":
+            let themed be wheat_theme_get with theme and tag
+            if themed is not "":
+                set spec to themed
+        add [copy of (item 1 of piece), copy of spec] to out
+    give back out
+
+# Render markup through a theme, using the detected color system.
+to wheat_theme_render_with with theme as view of a list of list of text and body as view of text and system as view of text:
+    let line be wheat_theme_markup with theme and body
+    give back wheat_line_render_in with line and system
+
+to wheat_theme_render with body as view of text:
+    give back wheat_theme_render_with with (wheat_theme_default) and body and (wheat_color_system)
+
+# A theme rendered as a two-column table-like listing of names and previews.
+to wheat_theme_listing with theme as view of a list of list of text:
+    let out be ""
+    for each entry in theme:
+        let name be wheat_text_pad_right with (item 1 of entry) and 12
+        let preview be wheat_style_apply_in with (wheat_text_pad_right with (item 2 of entry) and 26) and (item 2 of entry) and (wheat_color_system)
+        set out to out + name + preview + "\n"
+    give back out
+
+# Every default style shown on its own name.
+to wheat_theme_demo:
+    give back wheat_theme_listing with (wheat_theme_default)

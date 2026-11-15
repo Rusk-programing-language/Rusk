@@ -1,0 +1,348 @@
+# color.rk — terminal colors without a color library underneath.
+#
+# A color is one of:
+#
+#     red, green, yellow, blue, magenta, cyan, white, black
+#     bright_red ... bright_white, gray
+#     #ff8800                    a 24-bit hex color
+#     color(196)                 a 256-color palette index
+#
+# `wheat_color_system` chooses how to encode them:
+#
+#     none        no escape codes at all
+#     standard    the 16 basic colors
+#     truecolor   `38;2;r;g;b`
+#     256         the xterm 256-color cube
+#
+# The system comes from `WHEAT_COLOR` when set, otherwise from `NO_COLOR`,
+# `COLORTERM`, and `TERM`. Rusk cannot ask whether stdout is a terminal portably,
+# so the default is the safe `standard`; set `WHEAT_COLOR=none` for logs and
+# `WHEAT_COLOR=truecolor` when you know the terminal supports it.
+
+# Read an integer from the environment, or give back `fallback`.
+
+import "text"
+
+to wheat_color_env_number with name as view of text and fallback as a number:
+    let raw be environment name
+    if raw is "":
+        give back fallback
+    let n be wheat_text_to_number with raw
+    if n is less than 0:
+        give back fallback
+    give back n
+
+# The color system to use.
+to wheat_color_system:
+    let forced be environment "WHEAT_COLOR"
+    if forced is "none" or forced is "off" or forced is "0":
+        give back "none"
+    if forced is "256" or forced is "eight-bit" or forced is "8bit":
+        give back "256"
+    if forced is "truecolor" or forced is "24bit" or forced is "true":
+        give back "truecolor"
+    if forced is "standard" or forced is "16":
+        give back "standard"
+    if forced is "auto":
+        give back wheat_color_detect
+    if forced is not "":
+        give back "standard"
+    give back wheat_color_detect
+
+# Guess from environment variables. Called by `wheat_color_system`.
+to wheat_color_detect:
+    if environment "NO_COLOR" is not "":
+        give back "none"
+    let force be environment "FORCE_COLOR"
+    if force is "0" or force is "false":
+        give back "none"
+    let color_term be wheat_text_lower with (environment "COLORTERM")
+    if color_term is "truecolor" or color_term is "24bit":
+        give back "truecolor"
+    let term be wheat_text_lower with (environment "TERM")
+    if term is "dumb" or term is "unknown":
+        give back "none"
+    if wheat_text_contains with term and "256color":
+        give back "256"
+    if force is not "":
+        give back "standard"
+    give back "standard"
+
+# The xterm name of a basic color. Bright variants use `bright_`.
+to wheat_color_base with name as view of text and bright as view of text:
+    give back bright + name
+
+# True when `name` is one of the eight base color words.
+to wheat_color_is_base with name as view of text:
+    if name is "black" or name is "red" or name is "green" or name is "yellow":
+        give back true
+    if name is "blue" or name is "magenta" or name is "cyan" or name is "white":
+        give back true
+    give back false
+
+# The 0-based slot of a basic color, or -1.
+to wheat_color_slot with name as view of text:
+    if name is "black":
+        give back 0
+    if name is "red":
+        give back 1
+    if name is "green":
+        give back 2
+    if name is "yellow":
+        give back 3
+    if name is "blue":
+        give back 4
+    if name is "magenta":
+        give back 5
+    if name is "cyan":
+        give back 6
+    if name is "white":
+        give back 7
+    give back -1
+
+# The ANSI SGR parameter for a basic color name, or "" when it is not basic.
+# `background` selects the 40/100 range instead of 30/90.
+to wheat_color_named_code with name as view of text and background as a truth value:
+    let lower be wheat_text_lower with name
+    if lower is "default":
+        if background:
+            give back "49"
+        give back "39"
+    let bright be false
+    let base_name be copy of lower
+    if wheat_text_starts_with with lower and "bright_":
+        set bright to true
+        set base_name to part 8 to (length of base_name) of base_name
+    if base_name is "grey" or base_name is "gray":
+        set base_name to "bright_black"
+        set bright to false
+        if background:
+            give back "100"
+        give back "90"
+    let slot be wheat_color_slot with base_name
+    if slot is less than 0:
+        give back ""
+    let code be slot + 30
+    if bright:
+        set code to slot + 90
+    if background:
+        set code to code + 10
+    give back wheat_text_from_number with code
+
+# The 0-15 value of one hex digit, or -1.
+to wheat_color_hex_digit with ch as view of text:
+    let digit be wheat_text_digit with ch
+    if digit is at least 0:
+        give back digit
+    let lower be wheat_text_lower with ch
+    let letters be ["a", "b", "c", "d", "e", "f"]
+    let i be 1
+    while i is at most length of letters:
+        if (item i of letters) is lower:
+            give back i + 9
+        set i to i + 1
+    give back -1
+
+# Two hex digits at `start` as a number, or -1.
+to wheat_color_hex_byte with hex as view of text and start as a number:
+    if start + 1 is more than length of hex:
+        give back -1
+    let high be wheat_color_hex_digit with (letter start of hex)
+    let low be wheat_color_hex_digit with (letter (start + 1) of hex)
+    if high is less than 0 or low is less than 0:
+        give back -1
+    give back high * 16 + low
+
+# True when `s` looks like `#rrggbb`.
+to wheat_color_is_hex with s as view of text:
+    if length of s is not 7:
+        give back false
+    if (letter 1 of s) is not "#":
+        give back false
+    give back (wheat_color_hex_byte with s and 2) is at least 0 and (wheat_color_hex_byte with s and 4) is at least 0 and (wheat_color_hex_byte with s and 6) is at least 0
+
+# `#rrggbb` as `[r, g, b]`. A malformed value gives `[0, 0, 0]`.
+to wheat_color_rgb with s as view of text:
+    let r be wheat_color_hex_byte with s and 2
+    let g be wheat_color_hex_byte with s and 4
+    let b be wheat_color_hex_byte with s and 6
+    if r is less than 0 or g is less than 0 or b is less than 0:
+        give back [0, 0, 0]
+    give back [r, g, b]
+
+# Clamp a channel to 0..255.
+to wheat_color_clamp with n as a number:
+    if n is less than 0:
+        give back 0
+    if n is more than 255:
+        give back 255
+    give back n
+
+# Two uppercase hex digits.
+to wheat_color_hex2 with n as a number:
+    let digits be ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "C", "D", "E", "F"]
+    let value be wheat_color_clamp with n
+    let high be value / 16
+    let low be value - high * 16
+    give back (item (high + 1) of digits) + (item (low + 1) of digits)
+
+# `[r, g, b]` as `#RRGGBB`.
+to wheat_color_to_hex with rgb as view of a list of numbers:
+    give back "#" + (wheat_color_hex2 with (item 1 of rgb)) + (wheat_color_hex2 with (item 2 of rgb)) + (wheat_color_hex2 with (item 3 of rgb))
+
+# `[r, g, b]` as a 256-color palette index. The cube is the xterm 6x6x6 cube;
+# near-gray colors use the 24-step gray ramp.
+to wheat_color_256 with rgb as view of a list of numbers:
+    let r be wheat_color_clamp with (item 1 of rgb)
+    let g be wheat_color_clamp with (item 2 of rgb)
+    let b be wheat_color_clamp with (item 3 of rgb)
+    if r is g and g is b:
+        if r is less than 8:
+            give back 16
+        if r is more than 238:
+            give back 231
+        give back 232 + ((r - 8) / 10)
+    let r6 be r * 6 / 256
+    let g6 be g * 6 / 256
+    let b6 be b * 6 / 256
+    if r6 is more than 5:
+        set r6 to 5
+    if g6 is more than 5:
+        set g6 to 5
+    if b6 is more than 5:
+        set b6 to 5
+    give back 16 + 36 * r6 + 6 * g6 + b6
+
+# The nearest basic color word for an RGB triple, used when the terminal is
+# limited to 16 colors.
+to wheat_color_nearest with rgb as view of a list of numbers:
+    let r be item 1 of rgb
+    let g be item 2 of rgb
+    let b be item 3 of rgb
+    let high be r
+    if g is more than high:
+        set high to g
+    if b is more than high:
+        set high to b
+    let low be r
+    if g is less than low:
+        set low to g
+    if b is less than low:
+        set low to b
+    if high - low is less than 36:
+        if high is less than 64:
+            give back "black"
+        if high is more than 200:
+            give back "white"
+        give back "bright_black"
+    if high is r:
+        if g is more than (b + 40):
+            give back "yellow"
+        if b is more than (g + 40):
+            give back "magenta"
+        give back "red"
+    if high is g:
+        if b is more than (r + 40):
+            give back "cyan"
+        give back "green"
+    if r is more than (g + 40):
+        give back "magenta"
+    give back "blue"
+
+# A palette index written as `color(196)`, or -1.
+to wheat_color_palette_index with s as view of text:
+    if not (wheat_text_starts_with with s and "color("):
+        give back -1
+    if not (wheat_text_ends_with with s and ")"):
+        give back -1
+    let inner be part 7 to (length of s - 1) of s
+    give back wheat_text_to_number with inner
+
+# An SGR color parameter such as `31`, `38;5;196`, or `38;2;255;136;0`.
+# `background` selects the 40/48 range. An unknown color gives "".
+to wheat_color_code with color as view of text and background as a truth value and system as view of text:
+    if system is "none" or color is "":
+        give back ""
+    let lower be wheat_text_lower with color
+    let named be wheat_color_named_code with lower and background
+    if named is not "":
+        give back named
+    let lead be "38"
+    if background:
+        set lead to "48"
+    if wheat_color_is_hex with lower:
+        let rgb be wheat_color_rgb with lower
+        if system is "truecolor":
+            give back lead + ";2;" + (wheat_text_from_number with (item 1 of rgb)) + ";" + (wheat_text_from_number with (item 2 of rgb)) + ";" + (wheat_text_from_number with (item 3 of rgb))
+        if system is "256":
+            give back lead + ";5;" + (wheat_text_from_number with (wheat_color_256 with rgb))
+        give back wheat_color_named_code with (wheat_color_nearest with rgb) and background
+    let index be wheat_color_palette_index with lower
+    if index is at least 0:
+        if system is "truecolor" or system is "256":
+            give back lead + ";5;" + (wheat_text_from_number with index)
+        let cube be wheat_color_palette_rgb with index
+        give back wheat_color_named_code with (wheat_color_nearest with cube) and background
+    give back ""
+
+# RGB for a basic palette slot 0..255.
+to wheat_color_palette_rgb with index as a number:
+    if index is less than 0 or index is more than 255:
+        give back [0, 0, 0]
+    if index is less than 16:
+        let basic be [[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0], [0, 0, 128], [128, 0, 128], [0, 128, 128], [192, 192, 192], [128, 128, 128], [255, 0, 0], [0, 255, 0], [255, 255, 0], [0, 0, 255], [255, 0, 255], [0, 255, 255], [255, 255, 255]]
+        give back item (index + 1) of basic
+    if index is at least 232:
+        let shade be 8 + (index - 232) * 10
+        give back [shade, shade, shade]
+    let n be index - 16
+    let r be n / 36
+    let g be (n - r * 36) / 6
+    let b be n - r * 36 - g * 6
+    let steps be [0, 95, 135, 175, 215, 255]
+    give back [item (r + 1) of steps, item (g + 1) of steps, item (b + 1) of steps]
+
+# Blend two RGB triples. `percent` is 0..100 of `b`.
+to wheat_color_blend with a as view of a list of numbers and b as view of a list of numbers and percent as a number:
+    let p be percent
+    if p is less than 0:
+        set p to 0
+    if p is more than 100:
+        set p to 100
+    let r be (item 1 of a) + ((item 1 of b) - (item 1 of a)) * p / 100
+    let g be (item 2 of a) + ((item 2 of b) - (item 2 of a)) * p / 100
+    let bb be (item 3 of a) + ((item 3 of b) - (item 3 of a)) * p / 100
+    give back [wheat_color_clamp with r, wheat_color_clamp with g, wheat_color_clamp with bb]
+
+# Foreground escape for one color.
+to wheat_color_fg with color as view of text:
+    give back wheat_color_fg_in with color and (wheat_color_system)
+
+to wheat_color_fg_in with color as view of text and system as view of text:
+    let code be wheat_color_code with color and false and system
+    if code is "":
+        give back ""
+    give back "[" + code + "m"
+
+# Background escape for one color.
+to wheat_color_bg with color as view of text:
+    give back wheat_color_bg_in with color and (wheat_color_system)
+
+to wheat_color_bg_in with color as view of text and system as view of text:
+    let code be wheat_color_code with color and true and system
+    if code is "":
+        give back ""
+    give back "[" + code + "m"
+
+# The 16 basic colors as names.
+to wheat_color_basic_names:
+    give back ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white", "bright_black", "bright_red", "bright_green", "bright_yellow", "bright_blue", "bright_magenta", "bright_cyan", "bright_white"]
+
+# A small demonstration: one padded swatch per basic color.
+to wheat_color_demo:
+    let out be ""
+    let system be wheat_color_system
+    for each name in (wheat_color_basic_names):
+        let label be wheat_text_pad_right with name and 14
+        set out to out + (wheat_color_bg_in with name and system) + label + "[0m\n"
+    give back out

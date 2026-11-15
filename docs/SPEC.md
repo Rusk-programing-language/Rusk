@@ -749,7 +749,8 @@ say call add5 with 10         # 15
 
 ```rusk
 import "lib/greetings"
-import "../ruskmods/math"
+import "math"                 # bare module name
+import "wheat/table"          # a module inside a library folder
 ```
 
 The name is either text in quotes or a bare name; the `.rk` extension is
@@ -759,9 +760,19 @@ same. Several imports may appear at the top of one file.
 Resolution order, for a relative path:
 
 1. next to the file that wrote the import;
-2. inside a `ruskmods/` folder next to that file;
-3. relative to the current directory;
-4. inside a `ruskmods/` folder in the current directory.
+2. inside `ruskmods/` and `rusklib/` next to that file;
+3. the same three places in each parent directory of that file;
+4. the same three places relative to the current directory.
+
+Each directory is checked completely before the next one, so a file beside the
+importing file always wins over an unrelated module with the same name. Within
+one directory the order is: the path as written, then the path inside
+`ruskmods/`, then inside `rusklib/`.
+
+A bare name (no slash) also finds a module directory, so `import "math"` matches
+`ruskmods/math/math.rk` and `import "wheat"` matches `rusklib/wheat/wheat.rk`.
+The parent walk is what lets a program in `examples/` or `tests/` write
+`import "math"` and still find the checkout's `ruskmods/math.rk`.
 
 An absolute path is used as written. A file and a namespace are expanded **at
 most once** per bake, so several modules can import the same helper without
@@ -864,7 +875,11 @@ as `argument 1` skip automatically.
 
 ## 13. The interactive session
 
-`rusk` with no arguments, or `rusk repl`, starts an interactive session:
+`rusk` with no arguments searches the current directory and its parents for a
+`Ruskfile` (or `ruskfile`), bakes and runs the first one it finds, and passes no
+arguments to it. That makes a checkout's `Ruskfile` the default task. When no
+`Ruskfile` exists, `rusk` starts an interactive session. `rusk repl` always
+starts the interactive session.
 
 ```console
 $ rusk

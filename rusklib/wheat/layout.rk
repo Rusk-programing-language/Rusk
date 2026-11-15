@@ -1,0 +1,236 @@
+# layout.rk — compose blocks vertically, split them, and fill a page.
+#
+# `columns.rk` arranges blocks side by side. This module is the other axis:
+# stack blocks, split a block at a line or a column, centre text in a width,
+# and assemble a header / body / footer page that fills a fixed height.
+#
+# All operations work on text blocks. A split gives back a two-item list of
+# text blocks, because Rusk has no tuples:
+#
+#     let halves be wheat_layout_split_rows with body and 5
+#     let top be item 1 of halves
+#     let bottom be item 2 of halves
+#
+# Splitting a column is measured in display cells, so a line that contains box
+# drawing glyphs is cut at the right place rather than two bytes early.
+
+import "text"
+import "measure"
+
+# Stack blocks with `gap` blank lines between them.
+to wheat_layout_vertical with blocks as view of a list of text and gap as a number:
+    let out be ""
+    let gap_lines be gap
+    if gap_lines is less than 0:
+        set gap_lines to 0
+    let i be 1
+    for each block in blocks:
+        if i is more than 1:
+            set out to out + "\n"
+            let g be 1
+            while g is at most gap_lines:
+                set out to out + "\n"
+                set g to g + 1
+        set out to out + block
+        set i to i + 1
+    give back out
+
+# Stack blocks and pad the bottom so the result is exactly `height` lines.
+to wheat_layout_vertical_fill with blocks as view of a list of text and height as a number and gap as a number:
+    give back wheat_layout_fill with (wheat_layout_vertical with blocks and gap) and height
+
+# A block cropped or padded to exactly `height` lines.
+to wheat_layout_fill with body as view of text and height as a number:
+    if height is at most 0:
+        give back copy of body
+    let lines be wheat_text_lines with body
+    let out be an empty list of text
+    let i be 1
+    while i is at most height:
+        if i is at most length of lines:
+            add (item i of lines) to out
+        otherwise:
+            add "" to out
+        set i to i + 1
+    give back wheat_text_join with out and "\n"
+
+# Split a block after `top_height` lines. The split line belongs to the top.
+to wheat_layout_split_rows with body as view of text and top_height as a number:
+    let lines be wheat_text_lines with body
+    let cut be top_height
+    if cut is less than 0:
+        set cut to 0
+    if cut is more than length of lines:
+        set cut to length of lines
+    let top be an empty list of text
+    let bottom be an empty list of text
+    let i be 1
+    while i is at most length of lines:
+        if i is at most cut:
+            add (item i of lines) to top
+        otherwise:
+            add (item i of lines) to bottom
+        set i to i + 1
+    give back [wheat_text_join with top and "\n", wheat_text_join with bottom and "\n"]
+
+# Drop the first `cells` display cells of a line.
+to wheat_layout_drop_cells with line as view of text and cells as a number:
+    if cells is at most 0:
+        give back copy of line
+    let n be length of line
+    let i be 1
+    while i is at most n:
+        let prefix be part 1 to i of line
+        if (wheat_text_width with prefix) is at least cells:
+            give back part (i + 1) to n of line
+        set i to i + 1
+    give back ""
+
+# Split every line of a block after `left_width` display cells. The left block
+# is padded to that width so the two halves line up if stacked or framed.
+to wheat_layout_split_columns with body as view of text and left_width as a number:
+    let left_lines be an empty list of text
+    let right_lines be an empty list of text
+    for each line in (wheat_text_lines with body):
+        add (wheat_text_pad_right with (wheat_text_crop with line and left_width) and left_width) to left_lines
+        add (wheat_layout_drop_cells with line and left_width) to right_lines
+    give back [wheat_text_join with left_lines and "\n", wheat_text_join with right_lines and "\n"]
+
+# Centre every line in `width` cells. Lines wider than `width` are cropped.
+to wheat_layout_center with body as view of text and width as a number:
+    let out be an empty list of text
+    for each line in (wheat_text_lines with body):
+        add (wheat_text_pad_center with (wheat_text_crop with line and width) and width) to out
+    give back wheat_text_join with out and "\n"
+
+# Right-align every line in `width` cells.
+to wheat_layout_right with body as view of text and width as a number:
+    let out be an empty list of text
+    for each line in (wheat_text_lines with body):
+        add (wheat_text_pad_left with (wheat_text_crop with line and width) and width) to out
+    give back wheat_text_join with out and "\n"
+
+# Pad every line to the same width, so a block has a rectangle shape.
+to wheat_layout_rect with body as view of text:
+    let width be wheat_measure_width with body
+    let out be an empty list of text
+    for each line in (wheat_text_lines with body):
+        add (wheat_text_pad_right with line and width) to out
+    give back wheat_text_join with out and "\n"
+
+# Split `body` into `parts` vertical slices of roughly equal height. The last
+# slice takes the remainder, so nothing is lost. Parts below one are treated as
+# one.
+to wheat_layout_rows with body as view of text and parts as a number:
+    let count be parts
+    if count is less than 1:
+        set count to 1
+    let lines be wheat_text_lines with body
+    let out be an empty list of text
+    let per be length of lines / count
+    if per is less than 1:
+        set per to 1
+    let start be 1
+    let i be 1
+    while i is at most count and start is at most length of lines:
+        let piece be an empty list of text
+        let take be per
+        if i is count and length of lines - start + 1 is more than take:
+            set take to length of lines - start + 1
+        let j be 0
+        while j is less than take and (start + j) is at most length of lines:
+            add (item (start + j) of lines) to piece
+            set j to j + 1
+        add (wheat_text_join with piece and "\n") to out
+        set start to start + take
+        set i to i + 1
+    give back out
+
+# Build a page: header lines at the top, footer lines at the bottom, and the
+# body padded to take the space between them. A width of 0 uses the widest
+# line; a height of 0 uses the natural height.
+#
+#     wheat_layout_page with header and body and footer and 40 and 12
+#
+# One blank line separates the header from the body and the body from the
+# footer. When the height is too small for all three, the body is cropped
+# first and the footer is kept.
+to wheat_layout_page with header as view of text and body as view of text and footer as view of text and width as a number and height as a number:
+    let page_width be width
+    if page_width is at most 0:
+        set page_width to wheat_measure_width with header
+        let body_width be wheat_measure_width with body
+        if body_width is more than page_width:
+            set page_width to body_width
+        let footer_width be wheat_measure_width with footer
+        if footer_width is more than page_width:
+            set page_width to footer_width
+    let header_lines be wheat_text_lines with header
+    let body_lines be wheat_text_lines with body
+    let footer_lines be wheat_text_lines with footer
+    let head_count be 0
+    if header is not "":
+        set head_count to length of header_lines
+    let foot_count be 0
+    if footer is not "":
+        set foot_count to length of footer_lines
+    let page_height be height
+    if page_height is at most 0:
+        set page_height to head_count + foot_count + length of body_lines + 2
+    let separators be 0
+    if head_count is more than 0:
+        set separators to separators + 1
+    if foot_count is more than 0:
+        set separators to separators + 1
+    let body_room be page_height - head_count - foot_count - separators
+    if body_room is less than 0:
+        set body_room to 0
+    let out be ""
+    let i be 1
+    while i is at most head_count:
+        if i is more than 1:
+            set out to out + "\n"
+        set out to out + (wheat_text_pad_right with (wheat_text_crop with (item i of header_lines) and page_width) and page_width)
+        set i to i + 1
+    if head_count is more than 0:
+        set out to out + "\n"
+    if body_room is more than 0:
+        if head_count is more than 0:
+            set out to out + "\n"
+        let fitted be wheat_layout_fill with body and body_room
+        for each line in (wheat_text_lines with fitted):
+            set out to out + (wheat_text_pad_right with (wheat_text_crop with line and page_width) and page_width) + "\n"
+        if foot_count is more than 0:
+            set out to out + "\n"
+    let f be 1
+    while f is at most foot_count:
+        if f is more than 1:
+            set out to out + "\n"
+        set out to out + (wheat_text_pad_right with (wheat_text_crop with (item f of footer_lines) and page_width) and page_width)
+        set f to f + 1
+    give back wheat_text_trim_end_lines with out
+
+# Remove blank lines from the end of a block, keeping the text of earlier lines
+# exactly as it was.
+to wheat_text_trim_end_lines with body as view of text:
+    let lines be wheat_text_lines with body
+    let last be length of lines
+    while last is at least 1:
+        if (wheat_text_width with (item last of lines)) is 0:
+            set last to last - 1
+        otherwise:
+            break
+    let out be an empty list of text
+    let i be 1
+    while i is at most last:
+        add (item i of lines) to out
+        set i to i + 1
+    give back wheat_text_join with out and "\n"
+
+# A page with a rule under the header, to show the composition.
+to wheat_layout_demo:
+    let header be "wheat layout\n"
+    set header to header + (text_repeat with "─" and 30)
+    let body be "The body fills the space\nbetween the header and the\nfooter."
+    let footer be "page 1 of 1"
+    give back wheat_layout_page with header and body and footer and 30 and 10

@@ -1,0 +1,66 @@
+# requirement.rk — turn `name spec` text into a package name and a version spec.
+#
+# A requirement is written either as a package name alone (`math`) or as a name
+# followed by a spec (`math >=1.2.0`, `text ^2.1.0`). The installer also accepts
+# the compact form `math>=1.2.0`.
+
+import "text"
+import "version"
+
+# The package name at the front of a requirement.
+to installwork_requirement_name with requirement as a view of text:
+    let r be installwork_text_trim with requirement
+    let n be length of r
+    let i be 1
+    while i is at most n:
+        let ch be letter i of r
+        if ch is " " or ch is "\t" or ch is ">" or ch is "<" or ch is "=" or ch is "^" or ch is "~":
+            if i is 1:
+                give back ""
+            give back part 1 to (i - 1) of r
+        set i to i + 1
+    give back r
+
+# The version spec after the name, or `*` when the requirement has no spec.
+to installwork_requirement_spec with requirement as a view of text:
+    let r be installwork_text_trim with requirement
+    let n be length of r
+    let start be 0
+    let i be 1
+    while i is at most n:
+        let ch be letter i of r
+        if ch is " " or ch is "\t":
+            if start is 0:
+                set start to i + 1
+        otherwise if ch is ">" or ch is "<" or ch is "=" or ch is "^" or ch is "~":
+            if start is 0:
+                set start to i
+        set i to i + 1
+    if start is 0 or start is more than n:
+        give back "*"
+    give back installwork_text_trim with (part start to n of r)
+
+# True when the requirement has a name and a version spec the resolver understands.
+to installwork_requirement_valid with requirement as a view of text:
+    let name be installwork_requirement_name with requirement
+    let spec be installwork_requirement_spec with requirement
+    if name is "":
+        give back false
+    if spec is "*":
+        give back true
+    let n be length of spec
+    let start be 1
+    if n is at least 2:
+        let two be part 1 to 2 of spec
+        if two is ">=" or two is "<=" or two is "==":
+            set start to 3
+    if start is 1 and n is at least 1:
+        let one be letter 1 of spec
+        if one is ">" or one is "<" or one is "=" or one is "^" or one is "~":
+            set start to 2
+    if start is more than n:
+        give back false
+    let body be part start to n of spec
+    if installwork_text_ends_with with body and ".*":
+        give back installwork_version_valid with (part 1 to (length of body - 2) of body)
+    give back installwork_version_valid with body

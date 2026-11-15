@@ -1,0 +1,24 @@
+# installwork.rk — one import for the whole installer framework.
+#
+#     import "installwork"
+#
+# pulls in every module in this directory. A program that only needs one piece
+# can import it directly, for example:
+#
+#     import "installwork/registry"
+#     import "installwork/resolver"
+#
+# The imports are relative to this file, so the bundle works from a checkout and
+# from a copied module directory that keeps the same layout.
+
+import "text"
+import "version"
+import "ruskfile"
+import "requirement"
+import "registry"
+import "resolver"
+import "fs"
+import "archive"
+import "state"
+import "installer"
+import "cli"

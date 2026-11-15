@@ -1,7 +1,7 @@
 //! `rusk` — the command line for the Rusk language.
 //!
 //! ```text
-//! rusk                              start the interactive session
+//! rusk                              run the nearby Ruskfile, or start the interactive session
 //! rusk repl                         start the interactive session
 //! rusk tui                          start the full-screen session
 //! rusk tui demo                     open the terminal module demo
@@ -31,6 +31,9 @@ fn main() -> ExitCode {
 
 fn run(args: &[String]) -> Result<(), String> {
     let Some(command) = args.first().map(String::as_str) else {
+        if let Some(file) = find_ruskfile() {
+            return run_baked(&file, &[], Target::host());
+        }
         return rusk::repl::run();
     };
 
@@ -59,25 +62,7 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         "run" => {
             let (input, program_args, target) = parse_run_target(&args[1..])?;
-            let bytes = bake_bytes(&input, target)?;
-            if cfg!(windows) {
-                return Err(
-                    "Rusk bakes Linux executables, and Windows can't run ELF files directly. \
-                     Use 'rusk build' and run the result in WSL or on a Linux machine."
-                        .to_string(),
-                );
-            }
-            let out = std::env::temp_dir().join(format!("rusk-run-{}", std::process::id()));
-            elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
-            let status = Command::new(&out)
-                .args(&program_args)
-                .status()
-                .map_err(|e| format!("can't run {}: {e}", out.display()))?;
-            let _ = std::fs::remove_file(&out);
-            if !status.success() {
-                std::process::exit(status.code().unwrap_or(1));
-            }
-            Ok(())
+            run_baked(&input, &program_args, target)
         }
         "check" => {
             let (input, _, target) = parse_targets(&args[1..])?;
@@ -109,7 +94,7 @@ fn print_help() {
         "rusk {VERSION} — code, baked ahead of time
 
 USAGE
-  rusk                              start the interactive session
+  rusk                              run the nearby Ruskfile, or start the interactive session
   rusk repl                         start the interactive session
   rusk tui                          start the full-screen session
   rusk tui demo                     open the terminal module demo
@@ -126,8 +111,48 @@ Targets: aarch64 or x86_64 (default: the architecture running the compiler).
 
 Rusk bakes straight to machine code in a static ELF file.
 No C, no assembler, no linker, no libc — just syscalls.
-The REPL is a tree-walking session over the same syntax and type checker."
+With no command, rusk looks for a Ruskfile here or in a parent directory
+and runs it; otherwise it starts the tree-walking interactive session."
     );
+}
+
+/// Look for a `Ruskfile` beside the current directory or in a parent. The
+/// capitalised spelling is preferred, but `ruskfile` is accepted for systems
+/// where typing capitals is awkward.
+fn find_ruskfile() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    for dir in cwd.ancestors() {
+        for name in ["Ruskfile", "ruskfile"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Bake one file, run it, and pass the remaining command-line arguments on.
+fn run_baked(input: &Path, program_args: &[String], target: Target) -> Result<(), String> {
+    let bytes = bake_bytes(input, target)?;
+    if cfg!(windows) {
+        return Err(
+            "Rusk bakes Linux executables, and Windows can't run ELF files directly. \
+             Use 'rusk build' and run the result in WSL or on a Linux machine."
+                .to_string(),
+        );
+    }
+    let out = std::env::temp_dir().join(format!("rusk-run-{}", std::process::id()));
+    elf::write(&out, &bytes).map_err(|e| format!("can't write {}: {e}", out.display()))?;
+    let status = Command::new(&out)
+        .args(program_args)
+        .status()
+        .map_err(|e| format!("can't run {}: {e}", out.display()))?;
+    let _ = std::fs::remove_file(&out);
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 /// `run` takes one file and then any number of program arguments.

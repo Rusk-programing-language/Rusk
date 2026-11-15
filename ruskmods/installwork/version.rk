@@ -1,0 +1,130 @@
+# version.rk — semantic-version parsing and matching for installwork.
+#
+# Versions are decimal, dot-separated numbers: `1`, `1.2`, `1.2.3`, or
+# `1.2.3.4`. Pre-release labels are not part of the model yet, so `1.2.3-rc1`
+# is rejected. Comparisons pad missing parts with zero, which means `1.2` and
+# `1.2.0` compare equal.
+#
+# Requirement specs understood by `installwork_version_satisfies`:
+#
+#     *              any version
+#     1.2.3          exactly 1.2.3
+#     =1.2.3         exactly 1.2.3
+#     ==1.2.3        exactly 1.2.3
+#     >=1.2.3        at least
+#     <=1.2.3        at most
+#     >1.2.3         more than
+#     <1.2.3         less than
+#     ^1.2.3         compatible: >=1.2.3 and <2.0.0 (or <0.3.0 for 0.2.x)
+#     ~1.2.3         patch-compatible: >=1.2.3 and <1.3.0
+#     1.2.*          any 1.2.x
+#     1.*            any 1.x
+
+import "text"
+
+# True when `v` is a dotted run of non-negative decimal numbers.
+to installwork_version_valid with v as a view of text:
+    let parts be installwork_text_split with v and "."
+    if length of parts is 0 or length of parts is more than 4:
+        give back false
+    for each piece in parts:
+        if length of piece is 0:
+            give back false
+        let i be 1
+        while i is at most length of piece:
+            if (installwork_text_digit with (letter i of piece)) is less than 0:
+                give back false
+            set i to i + 1
+    give back true
+
+# The dotted parts as numbers. Invalid text gives an empty list.
+to installwork_version_parts with v as a view of text:
+    let out be an empty list of numbers
+    if not (installwork_version_valid with v):
+        give back out
+    for each piece in (installwork_text_split with v and "."):
+        add (installwork_text_to_number with piece) to out
+    give back out
+
+# Part `index` (1-based), or 0 when the version has fewer parts.
+to installwork_version_part with v as a view of text and index as a number:
+    let parts be installwork_version_parts with v
+    if index is less than 1 or index is more than length of parts:
+        give back 0
+    give back item index of parts
+
+# Compare two versions: -1 when `a` is older, 0 when equal, 1 when newer.
+to installwork_version_compare with a as a view of text and b as a view of text:
+    let pa be installwork_version_parts with a
+    let pb be installwork_version_parts with b
+    let count be length of pa
+    if length of pb is more than count:
+        set count to length of pb
+    let i be 1
+    while i is at most count:
+        let x be 0
+        let y be 0
+        if i is at most length of pa:
+            set x to item i of pa
+        if i is at most length of pb:
+            set y to item i of pb
+        if x is less than y:
+            give back -1
+        if x is more than y:
+            give back 1
+        set i to i + 1
+    give back 0
+
+# True when `a` is newer than `b`.
+to installwork_version_newer with a as a view of text and b as a view of text:
+    give back (installwork_version_compare with a and b) is 1
+
+# True when `v` matches `spec`.
+to installwork_version_satisfies with v as a view of text and spec as a view of text:
+    let s be installwork_text_trim with spec
+    if s is "" or s is "*":
+        give back true
+    if length of s is at least 2 and part (length of s - 1) to (length of s) of s is ".*":
+        let prefix_text be part 1 to (length of s - 2) of s
+        if v is prefix_text:
+            give back true
+        give back (installwork_text_starts_with with v and (prefix_text + "."))
+    if length of s is at least 2 and (part 1 to 2 of s) is ">=":
+        give back (installwork_version_compare with v and (part 3 to (length of s) of s)) is at least 0
+    if length of s is at least 2 and (part 1 to 2 of s) is "<=":
+        give back (installwork_version_compare with v and (part 3 to (length of s) of s)) is at most 0
+    if length of s is at least 2 and (part 1 to 2 of s) is "==":
+        give back (installwork_version_compare with v and (part 3 to (length of s) of s)) is 0
+    if length of s is at least 1 and (letter 1 of s) is ">":
+        give back (installwork_version_compare with v and (part 2 to (length of s) of s)) is 1
+    if length of s is at least 1 and (letter 1 of s) is "<":
+        give back (installwork_version_compare with v and (part 2 to (length of s) of s)) is -1
+    if length of s is at least 1 and (letter 1 of s) is "=":
+        give back (installwork_version_compare with v and (part 2 to (length of s) of s)) is 0
+    if length of s is at least 1 and (letter 1 of s) is "^":
+        let base be part 2 to (length of s) of s
+        if (installwork_version_compare with v and base) is less than 0:
+            give back false
+        let major be installwork_version_part with base and 1
+        if major is more than 0:
+            give back (installwork_version_part with v and 1) is major
+        let minor be installwork_version_part with base and 2
+        give back (installwork_version_part with v and 1) is 0 and (installwork_version_part with v and 2) is minor
+    if length of s is at least 1 and (letter 1 of s) is "~":
+        let tilde_base be part 2 to (length of s) of s
+        if (installwork_version_compare with v and tilde_base) is less than 0:
+            give back false
+        give back (installwork_version_part with v and 1) is (installwork_version_part with tilde_base and 1) and (installwork_version_part with v and 2) is (installwork_version_part with tilde_base and 2)
+    give back (installwork_version_compare with v and s) is 0
+
+# The larger of two versions.
+to installwork_version_max with a as a view of text and b as a view of text:
+    if (installwork_version_compare with a and b) is at least 0:
+        give back copy of a
+    give back copy of b
+
+# The smaller of two versions.
+to installwork_version_min with a as a view of text and b as a view of text:
+    if (installwork_version_compare with a and b) is at most 0:
+        give back copy of a
+    give back copy of b

@@ -1,0 +1,190 @@
+# keys.rk — turn bytes from `read key` into useful key names.
+#
+# Rusk reads input one byte at a time:
+#
+#     let key be read key      # one byte as text, or "" at end of input
+#
+# That is enough for a line prompt or a "press q to quit" loop. Arrow keys and
+# function keys arrive as escape sequences (ESC `[` `A` for up, and so on), so
+# they need two more reads. Those reads block until a byte arrives, which is
+# why `wheat_keys_read_escape` is a separate call: call it only after you have
+# already seen ESC and expect a sequence. A lone Escape press cannot be told
+# apart from the start of a sequence without a timeout, and Rusk has no timer.
+#
+# Control bytes are compared by value, not by escape spelling. Rusk has no
+# `\x` escape, but it does allow a literal byte in a string, so ESC, DEL, and
+# BEL appear in this file as the bytes themselves. Editors may draw them oddly;
+# the functions below compare them to the bytes `read key` returns.
+#
+#     let key be wheat_keys_read
+#     if key is "q":
+#         stop with 0
+#     if key is ESC:
+#         say wheat_keys_read_escape
+#
+import "text"
+
+# The next byte, or "" at end of input.
+to wheat_keys_read:
+    give back read key
+
+# One line without its newline.
+to wheat_keys_read_line:
+    give back read line
+
+# Everything left on standard input.
+to wheat_keys_read_all:
+    give back read all input
+
+# True at end of input.
+to wheat_keys_is_eof with key as view of text:
+    give back key is ""
+
+# True when `key` is a single control byte (below space, or DEL).
+to wheat_keys_is_control with key as view of text:
+    if length of key is not 1:
+        give back false
+    if key is "":
+        give back true
+    give back key is less than " "
+
+# True when `key` is a printable ASCII byte.
+to wheat_keys_is_printable with key as view of text:
+    if length of key is not 1:
+        give back false
+    if key is " ":
+        give back true
+    if key is less than " ":
+        give back false
+    if key is "":
+        give back false
+    give back key is at most "~"
+
+# A name for one byte:
+#
+#     ""        eof
+#     "\n"      enter
+#     "\r"      enter
+#     "\t"      tab
+#     "\0"      nul
+#     " "       space
+#     ESC       escape
+#     DEL       backspace
+#     BEL       bell
+#     other controls  control
+#     anything else   the byte itself
+to wheat_keys_name with key as view of text:
+    if key is "":
+        give back "eof"
+    if key is "\n" or key is "\r":
+        give back "enter"
+    if key is "\t":
+        give back "tab"
+    if key is "\0":
+        give back "nul"
+    if key is " ":
+        give back "space"
+    if key is "":
+        give back "escape"
+    if key is "":
+        give back "backspace"
+    if key is "":
+        give back "bell"
+    if wheat_keys_is_control with key:
+        give back "control"
+    give back copy of key
+
+# The name of a sequence whose final byte is `third`, after ESC and `[`.
+to wheat_keys_arrow_name with third as view of text:
+    if third is "A":
+        give back "up"
+    if third is "B":
+        give back "down"
+    if third is "C":
+        give back "right"
+    if third is "D":
+        give back "left"
+    if third is "H":
+        give back "home"
+    if third is "F":
+        give back "end"
+    if third is "Z":
+        give back "shift-tab"
+    if third is "~":
+        give back "special"
+    give back "escape"
+
+# True when `name` is one of the arrow key names.
+to wheat_keys_is_arrow with name as view of text:
+    if name is "up" or name is "down" or name is "left" or name is "right":
+        give back true
+    give back false
+
+# Read the rest of an escape sequence after an ESC byte. This expects the next
+# byte to be `[` or `O`; anything else is reported as "escape" and no further
+# byte is read.
+to wheat_keys_read_escape:
+    let second be read key
+    if second is not "[" and second is not "O":
+        give back "escape"
+    give back wheat_keys_arrow_name with (read key)
+
+# Read a key and return its name, following an escape sequence when the first
+# byte is ESC. This blocks after a lone Escape press; use `wheat_keys_read`
+# when the program must react to Escape alone.
+to wheat_keys_read_named:
+    let first be read key
+    if first is "":
+        give back wheat_keys_read_escape
+    give back wheat_keys_name with first
+
+# Wait for one of `choices`, each a named key, and give back the one that was
+# pressed. Anything else is ignored. A choice of "any" accepts the next key.
+# End of input gives "eof" even when it is not in the list, so callers can stop.
+to wheat_keys_wait_for with choices as view of a list of text:
+    let accept_any be false
+    for each choice in choices:
+        if choice is "any":
+            set accept_any to true
+    while true:
+        let key be wheat_keys_read_named
+        if key is "eof":
+            give back key
+        if accept_any:
+            give back key
+        for each choice in choices:
+            if choice is key:
+                give back key
+    give back "eof"
+
+# Ask a yes/no question and wait for `y`, `n`, or Enter (yes). The prompt is
+# written without a newline, so the answer appears on the same line.
+to wheat_keys_confirm with prompt as view of text:
+    write prompt + " [Y/n] " to file "/dev/stdout"
+    let key be wheat_keys_read
+    write "\n" to file "/dev/stdout"
+    if key is "n" or key is "N":
+        give back false
+    give back true
+
+# The key names wheat understands, for help text and tests.
+to wheat_keys_names:
+    give back ["enter", "tab", "space", "escape", "backspace", "up", "down", "left", "right", "home", "end", "shift-tab", "eof"]
+
+# A short description of a named key, for a help screen.
+to wheat_keys_describe with name as view of text:
+    if name is "enter":
+        give back "accept the current line"
+    if name is "escape":
+        give back "cancel"
+    if name is "tab":
+        give back "next field"
+    if name is "up" or name is "down":
+        give back "move the selection"
+    if name is "left" or name is "right":
+        give back "move the cursor"
+    if name is "eof":
+        give back "end of input"
+    if name is "backspace":
+        give back "delete the previous character"
+    give back "no description"

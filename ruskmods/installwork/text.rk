@@ -1,0 +1,316 @@
+# text.rk — text helpers for the installwork installer framework.
+#
+# Everything here is ordinary Rusk. Public names start with `installwork_text_`
+# so the functions can share the one global namespace with the rest of the
+# standard modules. Read-only parameters are borrowed views; every function that
+# gives text back builds a fresh value.
+
+# Trim spaces, tabs, carriage returns, and newlines from both ends.
+to installwork_text_trim with s as a view of text:
+    let n be length of s
+    let start be 1
+    while start is at most n:
+        let ch be letter start of s
+        if ch is " " or ch is "\t" or ch is "\r" or ch is "\n":
+            set start to start + 1
+        otherwise:
+            break
+    let finish be n
+    while finish is at least start:
+        let tail be letter finish of s
+        if tail is " " or tail is "\t" or tail is "\r" or tail is "\n":
+            set finish to finish - 1
+        otherwise:
+            break
+    if finish is less than start:
+        give back ""
+    give back part start to finish of s
+
+# Does `s` begin with `prefix`?
+to installwork_text_starts_with with s as a view of text and prefix as a view of text:
+    let pn be length of prefix
+    if pn is more than length of s:
+        give back false
+    if pn is 0:
+        give back true
+    give back (part 1 to pn of s) is prefix
+
+# Does `s` end with `suffix`?
+to installwork_text_ends_with with s as a view of text and suffix as a view of text:
+    let sn be length of suffix
+    let n be length of s
+    if sn is more than n:
+        give back false
+    if sn is 0:
+        give back true
+    give back (part (n - sn + 1) to n of s) is suffix
+
+# The first position of `needle` in `s`, counting from 1. Gives 0 when absent.
+to installwork_text_index_of with s as a view of text and needle as a view of text:
+    let n be length of s
+    let m be length of needle
+    if m is 0:
+        give back 1
+    if m is more than n:
+        give back 0
+    let last be n - m + 1
+    let i be 1
+    while i is at most last:
+        if part i to (i + m - 1) of s is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+# Does `s` contain `needle`?
+to installwork_text_contains with s as a view of text and needle as a view of text:
+    give back (installwork_text_index_of with s and needle) is not 0
+
+# Split text on every `separator`. The separator must not be empty; an empty
+# separator gives back the whole text as one item.
+to installwork_text_split with s as a view of text and separator as a view of text:
+    let out be an empty list of text
+    let m be length of separator
+    if m is 0:
+        add (copy of s) to out
+        give back out
+    let n be length of s
+    let start be 1
+    let i be 1
+    while i is at most (n - m + 1):
+        if part i to (i + m - 1) of s is separator:
+            if i is more than start:
+                add (part start to (i - 1) of s) to out
+            otherwise:
+                add "" to out
+            set start to i + m
+            set i to i + m
+        otherwise:
+            set i to i + 1
+    if start is at most n:
+        add (part start to n of s) to out
+    otherwise:
+        add "" to out
+    give back out
+
+# Split text into non-empty words on spaces, tabs, and newlines.
+to installwork_text_words with s as a view of text:
+    let out be an empty list of text
+    let n be length of s
+    let i be 1
+    let start be 0
+    while i is at most n:
+        let ch be letter i of s
+        let space be ch is " " or ch is "\t" or ch is "\n" or ch is "\r"
+        if space:
+            if start is not 0:
+                add (part start to (i - 1) of s) to out
+                set start to 0
+        otherwise if start is 0:
+            set start to i
+        set i to i + 1
+    if start is not 0:
+        add (part start to n of s) to out
+    give back out
+
+# Split text into lines, dropping the newline and a carriage return before it.
+to installwork_text_lines with s as a view of text:
+    let out be an empty list of text
+    let n be length of s
+    let start be 1
+    let i be 1
+    while i is at most n:
+        if letter i of s is "\n":
+            let finish be i - 1
+            if finish is at least start and letter finish of s is "\r":
+                set finish to finish - 1
+            if finish is at least start:
+                add (part start to finish of s) to out
+            otherwise:
+                add "" to out
+            set start to i + 1
+        set i to i + 1
+    if start is at most n:
+        add (part start to n of s) to out
+    give back out
+
+# Join items with `separator` between them.
+to installwork_text_join with items as a view of a list of text and separator as a view of text:
+    let out be ""
+    let first be true
+    for each item_text in items:
+        if not first:
+            set out to out + separator
+        set out to out + item_text
+        set first to false
+    give back out
+
+# Repeat `s` `n` times. Zero or less gives empty text.
+to installwork_text_repeat with s as a view of text and n as a number:
+    let out be ""
+    let i be 1
+    while i is at most n:
+        set out to out + s
+        set i to i + 1
+    give back out
+
+# Replace every occurrence of `from` with `to`. An empty `from` gives `s` back.
+to installwork_text_replace with s as a view of text and from as a view of text and to as a view of text:
+    let m be length of from
+    if m is 0:
+        give back copy of s
+    let out be ""
+    let n be length of s
+    let i be 1
+    let start be 1
+    while i is at most (n - m + 1):
+        if part i to (i + m - 1) of s is from:
+            if i is more than start:
+                set out to out + (part start to (i - 1) of s)
+            set out to out + to
+            set i to i + m
+            set start to i
+        otherwise:
+            set i to i + 1
+    if start is at most n:
+        set out to out + (part start to n of s)
+    give back out
+
+# Remove one layer of double quotes or single quotes. Otherwise trim spaces.
+to installwork_text_unquote with s as a view of text:
+    let t be installwork_text_trim with s
+    let n be length of t
+    if n is at least 2:
+        let first be letter 1 of t
+        let last be letter n of t
+        if (first is "\"" and last is "\"") or (first is "'" and last is "'"):
+            give back part 2 to (n - 1) of t
+    give back t
+
+# Quote text for `/bin/sh` with single quotes, escaping embedded quotes.
+to installwork_text_quote with s as a view of text:
+    let out be "'"
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "'":
+            set out to out + "'\\''"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out + "'"
+
+# Turn a decimal digit into its number. Anything else gives -1.
+to installwork_text_digit with ch as a view of text:
+    if ch is "0":
+        give back 0
+    if ch is "1":
+        give back 1
+    if ch is "2":
+        give back 2
+    if ch is "3":
+        give back 3
+    if ch is "4":
+        give back 4
+    if ch is "5":
+        give back 5
+    if ch is "6":
+        give back 6
+    if ch is "7":
+        give back 7
+    if ch is "8":
+        give back 8
+    if ch is "9":
+        give back 9
+    give back -1
+
+# Parse a non-negative whole number. Anything else gives -1.
+to installwork_text_to_number with s as a view of text:
+    let t be installwork_text_trim with s
+    let n be length of t
+    if n is 0:
+        give back -1
+    let value be 0
+    let i be 1
+    while i is at most n:
+        let d be installwork_text_digit with (letter i of t)
+        if d is less than 0:
+            give back -1
+        set value to value * 10 + d
+        set i to i + 1
+    give back value
+
+# Render an integer as text. Rusk has no built-in number-to-text conversion,
+# so build the digits from the right and prepend each one.
+to installwork_text_from_number with n as a number:
+    if n is 0:
+        give back "0"
+    let digits be ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    let value be n
+    let negative be n is less than 0
+    if negative:
+        set value to 0 - value
+    let out be ""
+    while value is more than 0:
+        let digit be value - (value / 10) * 10
+        set out to (item (digit + 1) of digits) + out
+        set value to value / 10
+    if negative:
+        set out to "-" + out
+    give back out
+
+# A decimal size such as `1.4 KB`, for display in installer output.
+to installwork_text_size with bytes as a number:
+    if bytes is less than 1024:
+        give back (installwork_text_from_number with bytes) + " B"
+    let kb be bytes / 1024
+    if kb is less than 1024:
+        give back (installwork_text_from_number with kb) + " KB"
+    give back (installwork_text_from_number with (bytes / (1024 * 1024))) + " MB"
+
+# Join two path pieces with exactly one `/`. An empty left side gives the right
+# side; an empty right side gives the left side.
+to installwork_path_join with left as a view of text and right as a view of text:
+    if left is "":
+        give back copy of right
+    if right is "":
+        give back copy of left
+    if (letter (length of left) of left) is "/":
+        if (letter 1 of right) is "/":
+            give back left + (part 2 to (length of right) of right)
+        give back left + right
+    if (letter 1 of right) is "/":
+        give back left + right
+    give back left + "/" + right
+
+# The parent of a path. `/a` gives `/`, `a` gives `.`, and `/` gives `/`.
+to installwork_path_parent with path as a view of text:
+    let p be installwork_text_trim with path
+    let n be length of p
+    if n is 0 or p is "/":
+        give back "/"
+    while n is more than 1 and (letter n of p) is "/":
+        set n to n - 1
+    let i be n
+    while i is at least 1:
+        if (letter i of p) is "/":
+            if i is 1:
+                give back "/"
+            give back part 1 to (i - 1) of p
+        set i to i - 1
+    give back "."
+
+# The final name in a path. `/a/b` gives `b`; a trailing slash is ignored.
+to installwork_path_name with path as a view of text:
+    let p be installwork_text_trim with path
+    let n be length of p
+    while n is more than 1 and (letter n of p) is "/":
+        set n to n - 1
+    let i be n
+    while i is at least 1:
+        if (letter i of p) is "/":
+            if i is n:
+                give back ""
+            give back part (i + 1) to n of p
+        set i to i - 1
+    give back part 1 to n of p

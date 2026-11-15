@@ -1,0 +1,271 @@
+# cli.rk — a command-line front end over the installer.
+#
+# The library is usable on its own, but this module is what a `Ruskfile` or a
+# small launcher calls:
+#
+#     import "installwork/cli"
+#     installwork_cli_main
+#
+# Commands:
+#
+#     installwork install math            install the newest math
+#     installwork install math ^1.2.0     install a matching version
+#     installwork remove math
+#     installwork list
+#     installwork search text
+#     installwork info math
+#     installwork plan math ^1.2.0
+#     installwork verify
+#     installwork upgrade                 upgrade everything installed
+#     installwork upgrade math
+#     installwork pack math 1.2.0 out.rkpkg
+#     installwork index
+#     installwork tasks                   tasks in the nearby Ruskfile
+#     installwork init demo               make demo/Ruskfile and demo/src/main.rk
+#     installwork clean
+#
+# `--registry PATH` and `--prefix PATH` may appear anywhere. They can also be
+# set with `RUSK_REGISTRY` and `RUSK_PREFIX`. The prefix defaults to `~/.rusk`;
+# the registry defaults to `rusk-registry` in the current directory.
+
+import "text"
+import "requirement"
+import "version"
+import "resolver"
+import "registry"
+import "ruskfile"
+import "installer"
+import "state"
+import "fs"
+
+# The default registry root.
+to installwork_cli_default_registry:
+    let from_env be environment "RUSK_REGISTRY"
+    if from_env is not "":
+        give back from_env
+    give back "rusk-registry"
+
+# The default install prefix.
+to installwork_cli_default_prefix:
+    let from_env be environment "RUSK_PREFIX"
+    if from_env is not "":
+        give back from_env
+    let home be environment "HOME"
+    if home is "":
+        give back ".rusk"
+    give back installwork_path_join with home and ".rusk"
+
+# Split `--flag value` and `--flag=value` out of the arguments. The result is
+# `[registry, prefix, remaining...]`; command words start at item 3.
+to installwork_cli_parse with args as a view of a list of text:
+    let out be [installwork_cli_default_registry, installwork_cli_default_prefix]
+    let i be 1
+    while i is at most length of args:
+        let arg be item i of args
+        if arg is "--registry" and i is less than length of args:
+            set item 1 of out to item (i + 1) of args
+            set i to i + 2
+        otherwise if arg is "--prefix" and i is less than length of args:
+            set item 2 of out to item (i + 1) of args
+            set i to i + 2
+        otherwise if installwork_text_starts_with with arg and "--registry=":
+            set item 1 of out to part 12 to (length of arg) of arg
+            set i to i + 1
+        otherwise if installwork_text_starts_with with arg and "--prefix=":
+            set item 2 of out to part 10 to (length of arg) of arg
+            set i to i + 1
+        otherwise:
+            add arg to out
+            set i to i + 1
+    give back out
+
+# The command words after the two settings.
+to installwork_cli_words with parsed as a view of a list of text:
+    let out be an empty list of text
+    let i be 3
+    while i is at most length of parsed:
+        add (item i of parsed) to out
+        set i to i + 1
+    give back out
+
+# Join words from `start` to the end with spaces.
+to installwork_cli_join_from with words as a view of a list of text and start as a number:
+    let out be ""
+    let i be start
+    while i is at most length of words:
+        if out is not "":
+            set out to out + " "
+        set out to out + (item i of words)
+        set i to i + 1
+    give back out
+
+# Print the useful parts of an installer result. Returns an exit code.
+to installwork_cli_show with result as a view of a list of text:
+    if installwork_installer_succeeded with result:
+        let i be 2
+        while i is at most length of result:
+            say item i of result
+            set i to i + 1
+        give back 0
+    say "error: " + (installwork_installer_message with result)
+    give back 1
+
+# The help text.
+to installwork_cli_help:
+    give back "installwork — a package installer written in Rusk\n\n" + "usage: installwork [--registry PATH] [--prefix PATH] COMMAND [ARGS]\n\n" + "commands:\n" + "  install NAME [SPEC]    install a package and its dependencies\n" + "  remove NAME            remove an installed package\n" + "  upgrade [NAME]         upgrade one package, or all of them\n" + "  list                   list installed packages\n" + "  search QUERY           search the registry\n" + "  info NAME              show package metadata\n" + "  plan NAME [SPEC]       print a dependency plan without installing\n" + "  verify                 check the installed trees\n" + "  pack NAME VER OUT      pack a registry version into one file\n" + "  index                  list every package version in the registry\n" + "  tasks                  list tasks in the nearby Ruskfile\n" + "  init NAME [DIR]        write a starter project\n" + "  clean                  remove everything in the prefix\n"
+
+# Write a starter project: a Ruskfile and a hello program.
+to installwork_cli_init with name as a view of text and dir as a view of text:
+    let target be copy of dir
+    if target is "":
+        set target to copy of name
+    if not (installwork_fs_ensure_directory with (installwork_path_join with target and "src")):
+        give back installwork_installer_error with ("can't create " + target)
+    let manifest be installwork_ruskfile_template with name
+    if not (installwork_fs_write with (installwork_path_join with target and "Ruskfile") and manifest):
+        give back installwork_installer_error with "can't write the Ruskfile"
+    let program be "say \"hello from \" + package_name\n"
+    if not (installwork_fs_write with (installwork_path_join with (installwork_path_join with target and "src") and "main.rk") and program):
+        give back installwork_installer_error with "can't write src/main.rk"
+    give back ["ok", "created " + target]
+
+# Run one command. Returns the process exit code.
+#
+# A front end can call this directly, or use `installwork_cli_main` to read
+# `all arguments`.
+to installwork_cli_run with args as a view of a list of text:
+    let parsed be installwork_cli_parse with args
+    let registry be item 1 of parsed
+    let prefix be item 2 of parsed
+    let words be installwork_cli_words with parsed
+
+    if length of words is 0:
+        say installwork_cli_help
+        give back 0
+
+    let command be item 1 of words
+
+    if command is "help" or command is "--help" or command is "-h":
+        say installwork_cli_help
+        give back 0
+
+    if command is "version" or command is "--version":
+        say "installwork 0.1.0"
+        give back 0
+
+    if command is "install":
+        if length of words is less than 2:
+            say "error: install needs a package name"
+            give back 1
+        let requirement_text be installwork_cli_join_from with words and 2
+        let result_install be installwork_installer_install with registry and prefix and requirement_text
+        give back installwork_cli_show with result_install
+
+    if command is "remove":
+        if length of words is less than 2:
+            say "error: remove needs a package name"
+            give back 1
+        let result_remove be installwork_installer_remove with prefix and (item 2 of words)
+        give back installwork_cli_show with result_remove
+
+    if command is "upgrade":
+        if length of words is less than 2:
+            let result_upgrade_all be installwork_installer_upgrade_all with registry and prefix
+            give back installwork_cli_show with result_upgrade_all
+        let result_upgrade_one be installwork_installer_upgrade with registry and prefix and (item 2 of words)
+        give back installwork_cli_show with result_upgrade_one
+
+    if command is "list":
+        say installwork_installer_list with prefix
+        give back 0
+
+    if command is "search":
+        let query be installwork_cli_join_from with words and 2
+        let found be installwork_registry_search with registry and query
+        if length of found is 0:
+            say "(no matches)"
+            give back 1
+        for each name in found:
+            let latest be installwork_registry_latest with registry and name
+            say name + " " + latest
+        give back 0
+
+    if command is "info":
+        if length of words is less than 2:
+            say "error: info needs a package name"
+            give back 1
+        let result_info be installwork_installer_info with registry and prefix and (item 2 of words)
+        give back installwork_cli_show with result_info
+
+    if command is "plan":
+        if length of words is less than 2:
+            say "error: plan needs a package name"
+            give back 1
+        let plan_req be installwork_cli_join_from with words and 2
+        let plan be installwork_resolver_resolve with registry and [copy of plan_req]
+        if length of plan is 0:
+            say "error: the resolver gave no answer"
+            give back 1
+        if (item 1 of plan) is not "ok":
+            say "error: " + (item 2 of plan)
+            give back 1
+        let selections be an empty list of text
+        let i be 2
+        while i is at most length of plan:
+            add (item i of plan) to selections
+            set i to i + 1
+        say installwork_resolver_text with registry and selections
+        give back 0
+
+    if command is "verify":
+        let result_verify be installwork_installer_verify with prefix
+        give back installwork_cli_show with result_verify
+
+    if command is "pack":
+        if length of words is less than 4:
+            say "error: pack needs a name, a version, and an output path"
+            give back 1
+        let result_pack be installwork_installer_pack with registry and (item 2 of words) and (item 3 of words) and (item 4 of words)
+        give back installwork_cli_show with result_pack
+
+    if command is "index":
+        say installwork_registry_index with registry
+        give back 0
+
+    if command is "tasks":
+        let path be installwork_ruskfile_find
+        if path is "":
+            say "error: no Ruskfile found"
+            give back 1
+        let body be read file path
+        let tasks be installwork_ruskfile_tasks with body
+        if length of tasks is 0:
+            say "(no tasks in " + path + ")"
+            give back 0
+        for each task in tasks:
+            say task
+        give back 0
+
+    if command is "init":
+        if length of words is less than 2:
+            say "error: init needs a project name"
+            give back 1
+        let dir be ""
+        if length of words is at least 3:
+            set dir to item 3 of words
+        let result_init be installwork_cli_init with (item 2 of words) and dir
+        give back installwork_cli_show with result_init
+
+    if command is "clean":
+        let result_clean be installwork_installer_clean with prefix
+        give back installwork_cli_show with result_clean
+
+    say "error: I don't know the command '" + command + "'"
+    say installwork_cli_help
+    give back 1
+
+# Read `all arguments` and stop with the resulting status.
+to installwork_cli_main:
+    let status be installwork_cli_run with all arguments
+    if status is not 0:
+        stop with status

@@ -1,0 +1,180 @@
+# app.rk — the pieces a small interactive program repeats.
+#
+# This is not a framework and not an event loop. Rusk programs are plain
+# sequences of statements, so the useful thing to share is the rendering: a
+# menu with a pointer, a checklist, a prompt line, a dialog, a status bar, and
+# a full-frame redraw.
+#
+# Every function returns text. Pair one with `wheat_console_clear` and
+# `wheat_console_write` when you want a screen. Pair it with `say` when you
+# want a log.
+#
+#     let choice be wheat_app_menu with ["install", "remove", "quit"] and 1 and 30
+#     wheat_console_write with (wheat_console_clear + choice)
+#
+# Key handling lives in `keys.rk`.
+
+import "text"
+import "measure"
+import "box"
+import "panel"
+import "table"
+import "console"
+
+# A list of menu rows with a pointer on the selected one. `selected` is 1-based;
+# out-of-range values simply move the pointer off every row.
+to wheat_app_menu with options as view of a list of text and selected as number and width as number:
+    let out be ""
+    let i be 1
+    for each option in options:
+        let pointer be "  "
+        if i is selected:
+            set pointer to "▶ "
+        let label be wheat_text_pad_right with (wheat_text_crop with option and (width - 3)) and (width - 3)
+        set out to out + pointer + label
+        if i is less than length of options:
+            set out to out + "\n"
+        set i to i + 1
+    give back out
+
+# A checklist. `checked` holds one number per item; anything above zero draws a
+# cross, zero draws an empty box. Missing entries count as unchecked.
+to wheat_app_checklist with items as view of a list of text and checked as view of a list of numbers and width as number:
+    let out be ""
+    let i be 1
+    for each item in items:
+        let mark be " "
+        if i is at most length of checked:
+            if (item i of checked) is more than 0:
+                set mark to "x"
+        let label be wheat_text_pad_right with (wheat_text_crop with item and (width - 4)) and (width - 4)
+        set out to out + "[" + mark + "] " + label
+        if i is less than length of items:
+            set out to out + "\n"
+        set i to i + 1
+    give back out
+
+# A count of checked items and the total, such as `2 of 5 selected`.
+to wheat_app_checked_count with checked as view of a list of numbers:
+    let total be length of checked
+    let yes be 0
+    for each mark in checked:
+        if mark is more than 0:
+            set yes to yes + 1
+    give back (wheat_text_from_number with yes) + " of " + (wheat_text_from_number with total) + " selected"
+
+# An input line: a label, the value, and a block cursor when the field is
+# focused. The cursor is a plain `█`, which is visible in every terminal.
+to wheat_app_prompt_line with label as view of text and value as view of text and focused as truth value:
+    let cursor be ""
+    if focused:
+        set cursor to "█"
+    give back label + ": " + value + cursor
+
+# A password-style prompt that shows one `*` per byte. It is a display helper
+# only; it does not read or hide input.
+to wheat_app_secret_line with label as view of text and value as view of text and focused as truth value:
+    let cursor be ""
+    if focused:
+        set cursor to "█"
+    give back label + ": " + (text_repeat with "*" and (length of value)) + cursor
+
+# A status bar with left and right text, padded to `width`. The right text is
+# dropped when there is no room for it.
+to wheat_app_status with left as view of text and right as view of text and width as number:
+    let bar_width be width
+    if bar_width is at most 0:
+        set bar_width to 80
+    let right_width be wheat_text_width with right
+    if right_width + 1 is at least bar_width:
+        give back wheat_text_pad_right with (wheat_text_crop with left and bar_width) and bar_width
+    let left_width be bar_width - right_width - 1
+    give back (wheat_text_pad_right with (wheat_text_crop with left and left_width) and left_width) + " " + right
+
+# A dialog box with a title, a message, and a row of buttons. `selected` is
+# 1-based and the selected button is drawn in `[brackets]`.
+to wheat_app_dialog with title as view of text and message as view of text and buttons as view of a list of text and selected as number and width as number:
+    let body be message + "\n\n"
+    let i be 1
+    for each button in buttons:
+        if i is selected:
+            set body to body + "[" + button + "]"
+        otherwise:
+            set body to body + " " + button + " "
+        if i is less than length of buttons:
+            set body to body + "  "
+        set i to i + 1
+    give back wheat_panel_full with title and "" and body and width and "center" and 1 and "rounded"
+
+# A full frame: a title rule at the top, the body, and a status bar as the
+# last line. The body is padded or cropped to make the total `height` lines.
+to wheat_app_frame with title as view of text and body as view of text and status as view of text and width as number and height as number:
+    let frame_width be width
+    if frame_width is at most 0:
+        set frame_width to wheat_console_columns
+    let frame_height be height
+    if frame_height is at most 0:
+        set frame_height to wheat_console_rows
+    let out be wheat_console_rule with title and frame_width and "light"
+    set out to out + "\n"
+    let room be frame_height - 2
+    if room is less than 0:
+        set room to 0
+    let filled be wheat_layout_fill_body with body and room
+    set out to out + filled
+    if room is more than 0:
+        set out to out + "\n"
+    give back out + (wheat_app_status with "" and status and frame_width)
+
+# Pad or crop a body to `height` lines, without importing layout.rk and
+# without its trailing-blank trimming.
+to wheat_layout_fill_body with body as view of text and height as number:
+    if height is at most 0:
+        give back ""
+    let lines be wheat_text_lines with body
+    let out be ""
+    let i be 1
+    while i is at most height:
+        if i is more than 1:
+            set out to out + "\n"
+        if i is at most length of lines:
+            set out to out + (item i of lines)
+        set i to i + 1
+    give back out
+
+# Draw a body and return the bytes that clear the screen first.
+to wheat_app_redraw with body as view of text:
+    give back (wheat_console_clear) + body
+
+# Move to the top-left without clearing, then draw a body. This flickers less
+# than a clear when every line is padded to the same width.
+to wheat_app_refresh with body as view of text:
+    give back (wheat_console_home) + body
+
+# A horizontal pair of key and action, e.g. for a help row.
+to wheat_app_keymap with keys as view of a list of text and actions as view of a list of text:
+    let rows be an empty list of list of text
+    let i be 1
+    while i is at most length of keys and i is at most length of actions:
+        add [copy of (item i of keys), copy of (item i of actions)] to rows
+        set i to i + 1
+    give back wheat_table with ["key", "action"] and rows and "plain"
+
+# A banner: a title over a subtitle, centred in `width`, with a rule between.
+to wheat_app_banner with title as view of text and subtitle as view of text and width as number:
+    let banner_width be width
+    if banner_width is at most 0:
+        set banner_width to 60
+    let out be wheat_text_pad_center with title and banner_width
+    set out to out + "\n" + (wheat_console_rule with "" and banner_width and "double")
+    if subtitle is not "":
+        set out to out + "\n" + (wheat_text_pad_center with subtitle and banner_width)
+    give back out
+
+# A menu, a status bar, and a keymap, to show the pieces together.
+to wheat_app_demo:
+    let out be wheat_app_banner with "wheat" and "a small terminal kit" and 40
+    set out to out + "\n\n" + (wheat_app_menu with ["install", "remove", "quit"] and 1 and 30)
+    set out to out + "\n\n" + (wheat_app_status with "ready" and "3 items" and 40)
+    set out to out + "\n\n" + (wheat_app_keymap with ["up/down", "enter", "q"] and ["move", "choose", "quit"])
+    give back out

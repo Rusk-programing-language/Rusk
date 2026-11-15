@@ -1,0 +1,174 @@
+# ruskfile.rk — read and write `Ruskfile` project files.
+#
+# A Ruskfile is ordinary Rusk source with a small metadata convention:
+#
+#     # Ruskfile
+#     let package_name be "demo"
+#     let package_version be "1.2.0"
+#     let package_entry be "src/main.rk"
+#     let package_description be "A tiny demo"
+#     let package_license be "MIT"
+#     let package_requires be ["math >=1.0.0", "text ^2.1.0"]
+#
+#     to build:
+#         say run command "rusk build src/main.rk -o bin/demo"
+#
+#     build
+#
+# Because it is a real Rusk program, `rusk` with no file name can find it and
+# run it. The installer reads the `let package_... be ...` lines to learn the
+# package's metadata. There is no TOML and no separate manifest language.
+
+import "text"
+import "version"
+
+# The text after `let NAME be ` on the first matching top-level line.
+to installwork_ruskfile_value with body as a view of text and name as a view of text:
+    let prefix be "let " + name + " be "
+    let pn be length of prefix
+    for each line in (installwork_text_lines with body):
+        let t be installwork_text_trim with line
+        if not (installwork_text_starts_with with t and "#"):
+            if installwork_text_starts_with with t and prefix:
+                give back installwork_text_trim with (part (pn + 1) to (length of t) of t)
+    give back ""
+
+# A metadata value as text, with one layer of quotes removed.
+to installwork_ruskfile_text with body as a view of text and name as a view of text:
+    give back installwork_text_unquote with (installwork_ruskfile_value with body and name)
+
+# A metadata list such as `["a", "b"]`. Commas separate items; quoted items may
+# not contain a comma. A missing value gives an empty list.
+to installwork_ruskfile_list with body as a view of text and name as a view of text:
+    let raw be installwork_ruskfile_value with body and name
+    let n be length of raw
+    if n is less than 2:
+        give back an empty list of text
+    if not ((letter 1 of raw) is "[" and (letter n of raw) is "]"):
+        give back an empty list of text
+    let inner be part 2 to (n - 1) of raw
+    let out be an empty list of text
+    for each piece in (installwork_text_split with inner and ","):
+        let item be installwork_text_unquote with (installwork_text_trim with piece)
+        if item is not "":
+            add item to out
+    give back out
+
+# The package name.
+to installwork_ruskfile_name with body as a view of text:
+    give back installwork_ruskfile_text with body and "package_name"
+
+# The package version.
+to installwork_ruskfile_version with body as a view of text:
+    give back installwork_ruskfile_text with body and "package_version"
+
+# The program entry point, relative to the Ruskfile.
+to installwork_ruskfile_entry with body as a view of text:
+    give back installwork_ruskfile_text with body and "package_entry"
+
+# A one-line description.
+to installwork_ruskfile_description with body as a view of text:
+    give back installwork_ruskfile_text with body and "package_description"
+
+# The license name.
+to installwork_ruskfile_license with body as a view of text:
+    give back installwork_ruskfile_text with body and "package_license"
+
+# Dependency requirements, each written `name spec`.
+to installwork_ruskfile_requires with body as a view of text:
+    give back installwork_ruskfile_list with body and "package_requires"
+
+# The names of the `to NAME:` tasks declared by the file.
+to installwork_ruskfile_tasks with body as a view of text:
+    let out be an empty list of text
+    for each line in (installwork_text_lines with body):
+        let t be installwork_text_trim with line
+        if installwork_text_starts_with with t and "to ":
+            if installwork_text_ends_with with t and ":":
+                let rest be part 4 to (length of t) of t
+                let cut be installwork_text_index_of with rest and " "
+                if cut is 0:
+                    add (part 1 to (length of rest - 1) of rest) to out
+                otherwise:
+                    add (part 1 to (cut - 1) of rest) to out
+    give back out
+
+# Walk from `start` towards the root and give back the first Ruskfile path, or
+# empty text when there is none.
+to installwork_ruskfile_find_from with start as a view of text:
+    let dir be installwork_text_trim with start
+    if dir is "":
+        set dir to environment "PWD"
+    if dir is "":
+        give back ""
+    let guard be 0
+    while length of dir is more than 0 and guard is less than 256:
+        let capital be installwork_path_join with dir and "Ruskfile"
+        if file exists capital:
+            give back capital
+        let lower be installwork_path_join with dir and "ruskfile"
+        if file exists lower:
+            give back lower
+        let parent be installwork_path_parent with dir
+        if parent is dir:
+            give back ""
+        set dir to parent
+        set guard to guard + 1
+    give back ""
+
+# Look for a Ruskfile from the current working directory upward.
+to installwork_ruskfile_find:
+    give back installwork_ruskfile_find_from with (environment "PWD")
+
+# Read a Ruskfile. A missing path gives empty text.
+to installwork_ruskfile_read with path as a view of text:
+    if not (file exists path):
+        give back ""
+    give back read file path
+
+# Metadata problems as a list of sentences. An empty list means the file is
+# ready to install.
+to installwork_ruskfile_validate with body as a view of text:
+    let out be an empty list of text
+    let name be installwork_ruskfile_name with body
+    let version be installwork_ruskfile_version with body
+    let entry be installwork_ruskfile_entry with body
+    if name is "":
+        add "the Ruskfile has no package_name" to out
+    if version is "":
+        add "the Ruskfile has no package_version" to out
+    otherwise if not (installwork_version_valid with version):
+        add "package_version is not a dotted number" to out
+    if entry is "":
+        add "the Ruskfile has no package_entry" to out
+    for each req in (installwork_ruskfile_requires with body):
+        let spec be installwork_text_split with req and " "
+        if length of spec is less than 2:
+            add ("the requirement '" + req + "' needs a version spec") to out
+    give back out
+
+# Render a Ruskfile from its parts.
+to installwork_ruskfile_render with name as a view of text and version as a view of text and description as a view of text and entry as a view of text and license as a view of text and requires as a view of a list of text:
+    let out be "# Ruskfile — project metadata and tasks.\n"
+    set out to out + "let package_name be \"" + name + "\"\n"
+    set out to out + "let package_version be \"" + version + "\"\n"
+    set out to out + "let package_description be \"" + description + "\"\n"
+    set out to out + "let package_entry be \"" + entry + "\"\n"
+    set out to out + "let package_license be \"" + license + "\"\n"
+    set out to out + "let package_requires be ["
+    let first be true
+    for each req in requires:
+        if not first:
+            set out to out + ", "
+        set out to out + "\"" + req + "\""
+        set first to false
+    set out to out + "]\n\n"
+    set out to out + "to build:\n    say \"building \" + package_name\n    say run command \"rusk build " + entry + " -o bin/" + name + "\"\n\n"
+    set out to out + "to test:\n    say \"testing \" + package_name\n\n"
+    set out to out + "to clean:\n    say run command \"rm -rf bin\"\n\n"
+    set out to out + "# Default task.\nbuild\n"
+    give back out
+
+# A starter Ruskfile for a new package.
+to installwork_ruskfile_template with name as a view of text:
+    give back installwork_ruskfile_render with name and "0.1.0" and "A Rusk package" and "src/main.rk" and "MIT" and (an empty list of text)

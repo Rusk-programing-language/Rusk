@@ -1,0 +1,99 @@
+# measure.rk — how wide is a thing, and how many lines does it need?
+#
+# Rich has a Measurement object because layout needs to ask renderables for a
+# minimum and maximum width. Rusk keeps it simpler: text already has a width,
+# and blocks are measured from their lines. These helpers are the arithmetic
+# that panels, columns, and tables share.
+
+import "text"
+
+# Number of lines in a block of text. A trailing newline does not add an empty
+# line.
+to wheat_measure_height with body as view of text:
+    give back length of (wheat_text_lines with body)
+
+# The width of the widest line.
+to wheat_measure_width with body as view of text:
+    let widest be 0
+    for each line in (wheat_text_lines with body):
+        let width be wheat_text_width with line
+        if width is more than widest:
+            set widest to width
+    give back widest
+
+# The widest line itself, useful for a caption or a border title.
+to wheat_measure_longest_line with body as view of text:
+    let best be ""
+    let widest be -1
+    for each line in (wheat_text_lines with body):
+        let width be wheat_text_width with line
+        if width is more than widest:
+            set widest to width
+            set best to copy of line
+    give back best
+
+# Crop or pad every line to exactly `width` cells. This is the workhorse for
+# panels and tables.
+to wheat_measure_fit with body as view of text and width as a number:
+    let out be an empty list of text
+    for each line in (wheat_text_lines with body):
+        add (wheat_text_pad_right with (wheat_text_crop with line and width) and width) to out
+    give back wheat_text_join with out and "\n"
+
+# Wrap every line to at most `width` cells.
+to wheat_measure_wrap with body as view of text and width as a number:
+    give back wheat_text_wrap with body and width
+
+# Column widths for rows of cells. Each row is a list of text; short rows are
+# treated as having empty trailing cells. The result is a list of numbers.
+to wheat_measure_columns with rows as view of a list of list of text:
+    let widths be an empty list of numbers
+    for each row in rows:
+        let i be 1
+        while i is at most length of row:
+            while length of widths is less than i:
+                add 0 to widths
+            let cell_width be wheat_text_width with (item i of row)
+            if cell_width is more than (item i of widths):
+                set item i of widths to cell_width
+            set i to i + 1
+    give back widths
+
+# Total width of columns plus `gap` between them. One column has no gap.
+to wheat_measure_total with widths as view of a list of numbers and gap as a number:
+    let total be 0
+    let i be 1
+    while i is at most length of widths:
+        set total to total + (item i of widths)
+        set i to i + 1
+    if length of widths is more than 1:
+        set total to total + gap * (length of widths - 1)
+    give back total
+
+# Scale a list of widths down so their total fits `available`. Every column
+# keeps at least one cell. The last column absorbs rounding so the total is
+# exact when there is room.
+to wheat_measure_fit_columns with widths as view of a list of numbers and available as a number:
+    let out be an empty list of numbers
+    let total be wheat_measure_total with widths and 0
+    if total is at most available:
+        for each width in widths:
+            add width to out
+        give back out
+    let give_each be available / (length of widths)
+    if give_each is less than 1:
+        set give_each to 1
+    for each width in widths:
+        if width is less than give_each:
+            add width to out
+        otherwise:
+            add give_each to out
+    give back out
+
+# True when every line fits inside `width`.
+to wheat_measure_fits with body as view of text and width as a number:
+    give back (wheat_measure_width with body) is at most width
+
+# A one-line summary such as `12 cells x 3 lines`.
+to wheat_measure_describe with body as view of text:
+    give back (wheat_text_from_number with (wheat_measure_width with body)) + " cells x " + (wheat_text_from_number with (wheat_measure_height with body)) + " lines"

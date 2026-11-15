@@ -1,0 +1,318 @@
+# installer.rk — resolve, copy, record, and remove packages.
+#
+# The installer ties the registry, resolver, state file, and file helpers
+# together. A prefix is a directory the user owns; nothing is written outside
+# it. Installing a package means:
+#
+#   1. resolve the requirement and its dependencies,
+#   2. check the installed set for version conflicts,
+#   3. order the plan so dependencies come first,
+#   4. copy each registry tree to PREFIX/lib/name/version,
+#   5. add a `name version` record to PREFIX/installed.rk,
+#   6. optionally write a launcher to PREFIX/bin/name.
+#
+# Results are lists of text that begin with `"ok"` or `"error"`, the same shape
+# the resolver uses:
+#
+#     ["ok", "text 2.1.0", "math 1.2.0"]
+#     ["error", "prefix has math 1.0.0 but math 1.2.0 is already installed"]
+
+import "text"
+import "version"
+import "requirement"
+import "registry"
+import "resolver"
+import "ruskfile"
+import "fs"
+import "archive"
+import "state"
+
+# A successful result with one line per installed package.
+to installwork_installer_ok:
+    let out be ["ok"]
+    give back out
+
+# A failed result with one sentence.
+to installwork_installer_error with message as a view of text:
+    let out be ["error"]
+    add (copy of message) to out
+    give back out
+
+# True when a result list starts with "ok".
+to installwork_installer_succeeded with result as a view of a list of text:
+    if length of result is 0:
+        give back false
+    give back (item 1 of result) is "ok"
+
+# The message from a failed result, or empty text.
+to installwork_installer_message with result as a view of a list of text:
+    if length of result is less than 2:
+        give back ""
+    give back item 2 of result
+
+# The text of a result, one line per part.
+to installwork_installer_result_text with result as a view of a list of text:
+    give back installwork_text_join with result and "\n"
+
+# Install one requirement.
+to installwork_installer_install with root as a view of text and prefix as a view of text and requirement_text as a view of text:
+    let requirements be [copy of requirement_text]
+    give back installwork_installer_install_all with root and prefix and requirements
+
+# Install a list of requirements together.
+to installwork_installer_install_all with root as a view of text and prefix as a view of text and requirements as a view of a list of text:
+    if not (installwork_fs_ensure_directory with prefix):
+        give back installwork_installer_error with ("can't create the prefix at " + prefix)
+
+    let plan be installwork_resolver_resolve with root and requirements
+    if not (installwork_installer_succeeded with plan):
+        give back plan
+
+    let selections be an empty list of text
+    let i be 2
+    while i is at most length of plan:
+        add (item i of plan) to selections
+        set i to i + 1
+
+    let conflict be installwork_installer_conflict with root and prefix and selections
+    if conflict is not "":
+        give back installwork_installer_error with conflict
+
+    let ordered be installwork_resolver_order with root and selections
+    let out be ["ok"]
+    let installed_here be an empty list of text
+
+    for each selection in ordered:
+        let name be installwork_resolver_selection_name with selection
+        let version be installwork_resolver_selection_version with selection
+        let target be installwork_state_package_dir with prefix and name and version
+        let source be installwork_registry_dir with root and name and version
+
+        let replaced be installwork_state_version with prefix and name
+        if replaced is version:
+            add (name + " " + version + " (already installed)") to out
+        otherwise:
+            if not (installwork_fs_remove_tree with target):
+                give back installwork_installer_rollback with prefix and installed_here and ("can't clear " + target)
+            if not (installwork_fs_ensure_parent with target):
+                give back installwork_installer_rollback with prefix and installed_here and ("can't create " + target)
+            if not (installwork_fs_copy_tree with source and target):
+                give back installwork_installer_rollback with prefix and installed_here and ("can't copy " + name + " " + version)
+            if not (installwork_state_add with prefix and name and version):
+                give back installwork_installer_rollback with prefix and installed_here and ("can't record " + name + " " + version)
+            if replaced is not "" and replaced is not version:
+                let old be installwork_state_package_dir with prefix and name and replaced
+                installwork_fs_remove_tree with old
+            add (name + " " + version) to out
+            add (name + " " + version) to installed_here
+
+        let entry be installwork_installer_entry with root and name and version
+        if entry is not "":
+            installwork_installer_write_launcher with prefix and name and version and entry
+
+    give back out
+
+# The entry point declared by a package version, or empty text.
+to installwork_installer_entry with root as a view of text and name as a view of text and version as a view of text:
+    if installwork_registry_exists with root and name and version:
+        give back installwork_ruskfile_entry with (installwork_registry_read with root and name and version)
+    give back ""
+
+# Check the plan against packages already installed. A dependency that is not
+# in the plan must be installed at a version the new package accepts.
+to installwork_installer_conflict with root as a view of text and prefix as a view of text and selections as a view of a list of text:
+    let names be installwork_resolver_name_list with selections
+    for each selection in selections:
+        let name be installwork_resolver_selection_name with selection
+        let version be installwork_resolver_selection_version with selection
+        for each requirement_text in (installwork_registry_requires with root and name and version):
+            let dep be installwork_requirement_name with requirement_text
+            let spec be installwork_requirement_spec with requirement_text
+            if installwork_resolver_has with names and dep:
+                let planned be installwork_resolver_selected_version with selections and dep
+                if not (installwork_version_satisfies with planned and spec):
+                    give back ("the plan picks " + dep + " " + planned + " but " + name + " needs " + spec)
+            otherwise:
+                let present be installwork_state_version with prefix and dep
+                if present is "":
+                    give back (name + " " + version + " needs " + dep + ", which is not installed")
+                if not (installwork_version_satisfies with present and spec):
+                    give back (name + " " + version + " needs " + dep + " " + spec + " but " + present + " is installed")
+    give back ""
+
+# Undo a failed install by removing trees copied in this run.
+to installwork_installer_rollback with prefix as a view of text and installed_here as a view of a list of text and message as a view of text:
+    for each selection in installed_here:
+        let name be installwork_resolver_selection_name with selection
+        let version be installwork_resolver_selection_version with selection
+        installwork_fs_remove_tree with (installwork_state_package_dir with prefix and name and version)
+        installwork_state_remove with prefix and name
+    give back installwork_installer_error with message
+
+# Write a launcher script for a package. The script runs the package entry
+# through `rusk`, keeping the package tree as the working directory's import
+# root is not required: Rusk resolves imports relative to the file.
+to installwork_installer_write_launcher with prefix as a view of text and name as a view of text and version as a view of text and entry as a view of text:
+    let bin be installwork_state_bin with prefix
+    if not (installwork_fs_ensure_directory with bin):
+        give back false
+    let package_path be installwork_state_package_dir with prefix and name and version
+    let script be "#!/bin/sh\n"
+    set script to script + "# launcher written by installwork\n"
+    set script to script + "exec rusk run " + (installwork_text_quote with (installwork_path_join with package_path and entry)) + " \"$@\"\n"
+    let path be installwork_path_join with bin and name
+    if not (installwork_fs_write with path and script):
+        give back false
+    run command ("chmod +x " + (installwork_text_quote with path) + " 2>/dev/null")
+    give back true
+
+# Remove an installed package and its launcher.
+to installwork_installer_remove with prefix as a view of text and name as a view of text:
+    let version be installwork_state_version with prefix and name
+    if version is "":
+        give back installwork_installer_error with (name + " is not installed")
+    let dir be installwork_state_package_dir with prefix and name and version
+    if not (installwork_fs_remove_tree with dir):
+        give back installwork_installer_error with ("can't remove " + dir)
+    remove file (installwork_path_join with (installwork_state_bin with prefix) and name)
+    installwork_state_remove with prefix and name
+    give back ["ok", "removed " + name + " " + version]
+
+# Upgrade one installed package to the newest version in the registry.
+to installwork_installer_upgrade with root as a view of text and prefix as a view of text and name as a view of text:
+    let current be installwork_state_version with prefix and name
+    if current is "":
+        give back installwork_installer_error with (name + " is not installed")
+    let latest be installwork_registry_latest with root and name
+    if latest is "":
+        give back installwork_installer_error with ("the registry has no " + name)
+    if latest is current:
+        give back ["ok", name + " " + current + " (already newest)"]
+    let result be installwork_installer_install with root and prefix and (name + " " + latest)
+    if installwork_installer_succeeded with result:
+        let out be ["ok", "upgraded " + name + " " + current + " -> " + latest]
+        let i be 2
+        while i is at most length of result:
+            add (item i of result) to out
+            set i to i + 1
+        give back out
+    give back result
+
+# Upgrade every installed package. Failures are reported but do not stop the
+# remaining upgrades. The first line is "ok" if at least one thing changed or
+# everything was current; otherwise "error".
+to installwork_installer_upgrade_all with root as a view of text and prefix as a view of text:
+    let out be ["ok"]
+    let failures be 0
+    for each record in (installwork_state_read with prefix):
+        let cut be installwork_text_index_of with record and " "
+        if cut is not 0:
+            let name be part 1 to (cut - 1) of record
+            let result be installwork_installer_upgrade with root and prefix and name
+            if installwork_installer_succeeded with result:
+                let i be 2
+                while i is at most length of result:
+                    add (item i of result) to out
+                    set i to i + 1
+            otherwise:
+                set failures to failures + 1
+                add (installwork_installer_message with result) to out
+    if failures is more than 0 and length of out is 1:
+        set item 1 of out to "error"
+    give back out
+
+# A readable list of installed packages, with sizes when the trees are present.
+to installwork_installer_list with prefix as a view of text:
+    let records be installwork_state_read with prefix
+    if length of records is 0:
+        give back "(nothing installed in " + prefix + ")\n"
+    let out be ""
+    for each record in records:
+        let cut be installwork_text_index_of with record and " "
+        let name be part 1 to (cut - 1) of record
+        let version be part (cut + 1) to (length of record) of record
+        let dir be installwork_state_package_dir with prefix and name and version
+        let size be installwork_fs_tree_size with dir
+        set out to out + name + " " + version + " (" + (installwork_text_size with size) + ")\n"
+    give back out
+
+# Details about the newest registry version of a package, or the installed one
+# when the registry does not have it.
+to installwork_installer_info with root as a view of text and prefix as a view of text and name as a view of text:
+    let version be installwork_registry_latest with root and name
+    let source be "registry"
+    if version is "":
+        set version to installwork_state_version with prefix and name
+        set source to "installed"
+    if version is "":
+        give back installwork_installer_error with ("no package named " + name)
+    let body be installwork_registry_read with root and name and version
+    if source is "installed":
+        set body to read file (installwork_path_join with (installwork_state_package_dir with prefix and name and version) and "Ruskfile")
+    if body is "":
+        give back installwork_installer_error with ("can't read the Ruskfile for " + name + " " + version)
+    let out be ["ok"]
+    add ("name: " + name) to out
+    add ("version: " + version) to out
+    add ("source: " + source) to out
+    let description be installwork_ruskfile_description with body
+    if description is not "":
+        add ("description: " + description) to out
+    let license be installwork_ruskfile_license with body
+    if license is not "":
+        add ("license: " + license) to out
+    let entry be installwork_ruskfile_entry with body
+    if entry is not "":
+        add ("entry: " + entry) to out
+    for each requirement_text in (installwork_ruskfile_requires with body):
+        add ("requires: " + requirement_text) to out
+    give back out
+
+# Check every record against the prefix: the tree must exist, and its Ruskfile
+# must agree with the recorded name and version.
+to installwork_installer_verify with prefix as a view of text:
+    let out be ["ok"]
+    let problems be 0
+    for each record in (installwork_state_read with prefix):
+        let cut be installwork_text_index_of with record and " "
+        if cut is 0:
+            set problems to problems + 1
+            add ("unreadable record: " + record) to out
+        otherwise:
+            let name be part 1 to (cut - 1) of record
+            let version be part (cut + 1) to (length of record) of record
+            let dir be installwork_state_package_dir with prefix and name and version
+            if not (installwork_fs_is_directory with dir):
+                set problems to problems + 1
+                add ("missing tree: " + name + " " + version) to out
+            otherwise:
+                let body be read file (installwork_path_join with dir and "Ruskfile")
+                if body is "":
+                    set problems to problems + 1
+                    add ("missing Ruskfile: " + name + " " + version) to out
+                otherwise if (installwork_ruskfile_name with body) is not name:
+                    set problems to problems + 1
+                    add ("name mismatch: " + name + " " + version) to out
+                otherwise if (installwork_ruskfile_version with body) is not version:
+                    set problems to problems + 1
+                    add ("version mismatch: " + name + " " + version) to out
+    if problems is more than 0:
+        set item 1 of out to "error"
+    otherwise if length of out is 1:
+        add "every installed package is intact" to out
+    give back out
+
+# Pack one registry package version into a single archive file.
+to installwork_installer_pack with root as a view of text and name as a view of text and version as a view of text and out_path as a view of text:
+    if not (installwork_registry_exists with root and name and version):
+        give back installwork_installer_error with ("the registry has no " + name + " " + version)
+    let body be installwork_archive_pack with (installwork_registry_dir with root and name and version)
+    if not (installwork_archive_write with out_path and body):
+        give back installwork_installer_error with ("can't write " + out_path)
+    give back ["ok", copy of out_path]
+
+# Remove every package recorded in a prefix.
+to installwork_installer_clean with prefix as a view of text:
+    if not (installwork_state_clear with prefix):
+        give back installwork_installer_error with ("can't clean " + prefix)
+    give back ["ok", "cleaned " + prefix]

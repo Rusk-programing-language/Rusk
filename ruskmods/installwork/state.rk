@@ -1,0 +1,151 @@
+# state.rk — remember which packages are installed in a prefix.
+#
+# An install prefix looks like this:
+#
+#     PREFIX/
+#       installed.rk          the installed-package records
+#       lib/
+#         math/1.2.0/         copied package tree
+#       bin/
+#         math                optional launcher
+#
+# `installed.rk` is plain text, one `name version` per line. It is written in
+# the same `name version` shape the resolver uses, so the two can be compared
+# without a second format. Lines starting with `#` are comments.
+#
+# Writes go to a temporary file and are renamed into place, so an interrupted
+# install does not leave a half-written record file.
+
+import "text"
+import "fs"
+
+# The path of the record file for a prefix.
+to installwork_state_path with prefix as a view of text:
+    give back installwork_path_join with prefix and "installed.rk"
+
+# The directory holding package trees.
+to installwork_state_lib with prefix as a view of text:
+    give back installwork_path_join with prefix and "lib"
+
+# The directory holding launchers.
+to installwork_state_bin with prefix as a view of text:
+    give back installwork_path_join with prefix and "bin"
+
+# Where one package version lives inside a prefix.
+to installwork_state_package_dir with prefix as a view of text and name as a view of text and version as a view of text:
+    give back installwork_path_join with (installwork_path_join with (installwork_state_lib with prefix) and name) and version
+
+# Read the installed records as `name version` strings, in file order.
+to installwork_state_read with prefix as a view of text:
+    let out be an empty list of text
+    let path be installwork_state_path with prefix
+    if not (file exists path):
+        give back out
+    let body be read file path
+    for each line in (installwork_text_lines with body):
+        let t be installwork_text_trim with line
+        if t is not "" and not (installwork_text_starts_with with t and "#"):
+            add t to out
+    give back out
+
+# Write records back, with a small comment header. Returns false when the
+# destination cannot be created.
+to installwork_state_write with prefix as a view of text and records as a view of a list of text:
+    if not (installwork_fs_ensure_directory with prefix):
+        give back false
+    let body be "# packages installed by installwork\n"
+    for each record in records:
+        set body to body + record + "\n"
+    let path be installwork_state_path with prefix
+    let temp be path + ".tmp"
+    if not (installwork_fs_write with temp and body):
+        give back false
+    rename temp to path
+    give back true
+
+# The version recorded for `name`, or empty text.
+to installwork_state_version with prefix as a view of text and name as a view of text:
+    for each record in (installwork_state_read with prefix):
+        let cut be installwork_text_index_of with record and " "
+        if cut is not 0:
+            if (part 1 to (cut - 1) of record) is name:
+                give back part (cut + 1) to (length of record) of record
+    give back ""
+
+# True when the prefix has a record for `name`.
+to installwork_state_has with prefix as a view of text and name as a view of text:
+    give back (installwork_state_version with prefix and name) is not ""
+
+# How many packages are recorded.
+to installwork_state_count with prefix as a view of text:
+    give back length of (installwork_state_read with prefix)
+
+# Record `name version`, replacing any earlier version of the same name. The
+# list stays sorted by name so the file is stable between runs.
+to installwork_state_add with prefix as a view of text and name as a view of text and version as a view of text:
+    let out be an empty list of text
+    for each record in (installwork_state_read with prefix):
+        let cut be installwork_text_index_of with record and " "
+        if cut is 0:
+            add record to out
+        otherwise if (part 1 to (cut - 1) of record) is not name:
+            add record to out
+    add (name + " " + version) to out
+    give back installwork_state_write with prefix and (installwork_state_sort with out)
+
+# Drop the record for `name`. A name that is not recorded is not an error.
+to installwork_state_remove with prefix as a view of text and name as a view of text:
+    let out be an empty list of text
+    for each record in (installwork_state_read with prefix):
+        let cut be installwork_text_index_of with record and " "
+        if cut is 0:
+            add record to out
+        otherwise if (part 1 to (cut - 1) of record) is not name:
+            add record to out
+    give back installwork_state_write with prefix and out
+
+# Sort `name version` records by name then version.
+to installwork_state_sort with records as a list of text:
+    let n be length of records
+    for each i from 2 to n:
+        let j be i
+        while j is more than 1:
+            let left be item (j - 1) of records
+            let right be item j of records
+            if right is less than left:
+                set item (j - 1) of records to right
+                set item j of records to left
+                set j to j - 1
+            otherwise:
+                break
+    give back records
+
+# A readable listing of installed packages.
+to installwork_state_listing with prefix as a view of text:
+    let records be installwork_state_read with prefix
+    if length of records is 0:
+        give back "(nothing installed)\n"
+    let out be ""
+    for each record in records:
+        set out to out + record + "\n"
+    give back out
+
+# Remove every package tree recorded in the prefix, then empty the record file.
+# Files outside the recorded package directories are left alone.
+to installwork_state_clear with prefix as a view of text:
+    for each record in (installwork_state_read with prefix):
+        let cut be installwork_text_index_of with record and " "
+        if cut is not 0:
+            let name be part 1 to (cut - 1) of record
+            let version be part (cut + 1) to (length of record) of record
+            let package_path be installwork_state_package_dir with prefix and name and version
+            if not (installwork_fs_remove_tree with package_path):
+                give back false
+            remove file (installwork_path_join with (installwork_state_bin with prefix) and name)
+    let lib be installwork_state_lib with prefix
+    for each entry in (installwork_fs_entries with lib):
+        let holder be installwork_path_join with lib and entry
+        if installwork_fs_is_directory with holder:
+            if length of (installwork_fs_entries with holder) is 0:
+                remove directory holder
+    give back installwork_state_write with prefix and (an empty list of text)

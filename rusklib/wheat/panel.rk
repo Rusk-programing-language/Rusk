@@ -1,0 +1,155 @@
+# panel.rk — a boxed block of text with a title, padding, and alignment.
+#
+# A panel is the everyday wheat container. It is `box.rk` plus the layout rules
+# a report needs:
+#
+#     ╭─ Installed ─────────────────╮
+#     │                             │
+#     │  math 1.2.0                 │
+#     │  text 2.1.0                 │
+#     │                             │
+#     │                    2 items  │
+#     ╰─────────────────────────────╯
+#
+# The title sits in the top border, the body is padded on all four sides, and
+# an optional subtitle is right-aligned on the last content row.
+#
+# Alignment is one of `left`, `center`, or `right`. It applies to each body
+# line independently, so a short line moves without disturbing the rest.
+
+import "text"
+import "measure"
+import "box"
+
+# Pad a line on the left or right, or both, to `width` cells.
+to wheat_panel_align_line with line as view of text and width as a number and align as view of text:
+    if align is "right":
+        give back wheat_text_pad_left with line and width
+    if align is "center" or align is "centre":
+        give back wheat_text_pad_center with line and width
+    give back wheat_text_pad_right with line and width
+
+# Align every line of a block to `width` cells.
+to wheat_panel_align with body as view of text and width as a number and align as view of text:
+    let out be an empty list of text
+    for each line in (wheat_text_lines with body):
+        add (wheat_panel_align_line with line and width and align) to out
+    give back wheat_text_join with out and "\n"
+
+# Put `padding` blank lines above and below, so a body has breathing room. The
+# left and right padding is added by the box.
+to wheat_panel_vertical_pad with body as view of text and padding as a number:
+    let pad be padding
+    if pad is less than 0:
+        set pad to 0
+    let out be ""
+    let i be 1
+    while i is at most pad:
+        set out to out + "\n"
+        set i to i + 1
+    set out to out + body
+    set i to 1
+    while i is at most pad:
+        set out to out + "\n"
+        set i to i + 1
+    give back out
+
+# Crop or pad a block to exactly `height` lines. Extra lines are dropped from
+# the bottom; missing lines are added as blanks.
+to wheat_panel_fit_height with body as view of text and height as a number:
+    if height is at most 0:
+        give back copy of body
+    let lines be wheat_text_lines with body
+    let out be an empty list of text
+    let i be 1
+    while i is at most height:
+        if i is at most length of lines:
+            add (item i of lines) to out
+        otherwise:
+            add "" to out
+        set i to i + 1
+    give back wheat_text_join with out and "\n"
+
+# How wide a panel needs to be for `body` and `padding`.
+to wheat_panel_natural_width with body as view of text and padding as a number:
+    give back (wheat_measure_width with body) + 2 + padding * 2
+
+# A padded panel without a title. A width of 0 means "as wide as the body".
+to wheat_panel with body as view of text and width as a number and kind as view of text:
+    let pad be 1
+    let box_width be width
+    if box_width is at most 0:
+        set box_width to wheat_panel_natural_width with body and pad
+    let inner be box_width - 2 - pad * 2
+    if inner is less than 1:
+        set inner to 1
+    let padded be wheat_panel_vertical_pad with (wheat_panel_align with body and inner and "left") and pad
+    give back wheat_box_around with padded and box_width and kind
+
+# A padded panel with a title in the top border.
+to wheat_panel_titled with title as view of text and body as view of text and width as a number and kind as view of text:
+    let pad be 1
+    let box_width be width
+    if box_width is at most 0:
+        set box_width to wheat_panel_natural_width with body and pad
+        let title_width be (wheat_text_width with title) + 4
+        if title_width is more than box_width:
+            set box_width to title_width
+    let inner be box_width - 2 - pad * 2
+    if inner is less than 1:
+        set inner to 1
+    let padded be wheat_panel_vertical_pad with (wheat_panel_align with body and inner and "left") and pad
+    give back wheat_box_titled with title and padded and box_width and kind
+
+# The full panel: title, aligned body, optional subtitle, padding on all four
+# sides, and a frame. A width of 0 means "as wide as the widest line".
+#
+# `subtitle` is right-aligned on the row after the body, separated from it by
+# one blank row when there is room. It is a good place for a count or a
+# timestamp.
+to wheat_panel_full with title as view of text and subtitle as view of text and body as view of text and width as a number and align as view of text and padding as a number and kind as view of text:
+    let pad be padding
+    if pad is less than 0:
+        set pad to 0
+    let box_width be width
+    if box_width is at most 0:
+        set box_width to wheat_panel_natural_width with body and pad
+        let title_width be (wheat_text_width with title) + 4
+        if title_width is more than box_width:
+            set box_width to title_width
+        if subtitle is not "":
+            let subtitle_width be (wheat_text_width with subtitle) + 4
+            if subtitle_width is more than box_width:
+                set box_width to subtitle_width
+    if box_width is less than 4:
+        set box_width to 4
+    let inner be box_width - 2 - pad * 2
+    if inner is less than 1:
+        set inner to 1
+    let content be wheat_panel_align with body and inner and align
+    if subtitle is not "":
+        set content to content + "\n" + (wheat_panel_align with subtitle and inner and "right")
+    set content to wheat_panel_vertical_pad with content and pad
+    if title is "":
+        give back wheat_box_around with content and box_width and kind
+    give back wheat_box_titled with title and content and box_width and kind
+
+# A panel whose width is the detected terminal width, useful for a full-width
+# section of a report.
+to wheat_panel_wide with title as view of text and body as view of text and kind as view of text:
+    give back wheat_panel_titled with title and body and (wheat_console_width_hint) and kind
+
+# The terminal width without importing console.rk, kept tiny on purpose.
+to wheat_console_width_hint:
+    let raw be environment "COLUMNS"
+    if raw is not "":
+        let n be wheat_text_to_number with raw
+        if n is more than 0:
+            give back n
+    give back 80
+
+# Two panels stacked, to show alignment and the subtitle row.
+to wheat_panel_demo:
+    let left be wheat_panel_full with "Left" and "3 lines" and "one\ntwo\nthree" and 28 and "left" and 1 and "light"
+    let right be wheat_panel_full with "Right" and "right aligned" and "short\nlonger line" and 28 and "right" and 1 and "rounded"
+    give back left + "\n" + right

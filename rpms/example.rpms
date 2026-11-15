@@ -8,7 +8,7 @@ version: 0.1.0
 summary: Text helpers written in Rusk
 license: MIT
 kind: module
-entry: ruskmods/text.rk
+entry: rusklib/wheat/text.rk
 
 # A package that ships a runnable program would use:
 # kind: program
