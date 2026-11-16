@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.1.6
+# The Rusk Language — Specification v1.1.7
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
 emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.1.6, Linux on AArch64 and x86-64, plus experimental Windows
+Status: **v1.1.7, Linux on AArch64 and x86-64, plus experimental Windows
 x86-64 output**. The compiler also builds and runs on Windows x86-64. Toast
 files (`.tst`) can hold finished images for several targets. Everything here is
 implemented and tested; anything not here does not exist yet.
@@ -888,7 +888,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.6 — an English-like language
+Rusk 1.1.7 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1103,23 +1103,36 @@ The runtime maps a small set of system calls onto `kernel32.dll`:
 
 | Rusk operation | Windows call |
 |---|---|
-| write to standard output or error | `GetStdHandle`, `WriteFile` |
-| read from standard input | `GetStdHandle`, `ReadFile` |
+| write to standard output, standard error, or a file | `GetStdHandle`, `WriteFile` |
+| read from standard input or a file | `GetStdHandle`, `ReadFile` |
+| open a regular file | `CreateFileA` |
+| close a file handle | `CloseHandle` |
 | exit | `ExitProcess` |
 | heap growth | `VirtualAlloc` |
-| raw terminal mode | a successful no-op |
-| command line for `argv[0]` | `GetCommandLineA` |
+| raw terminal mode | `GetConsoleMode`, `SetConsoleMode` |
+| command-line arguments | `GetCommandLineA` |
+| environment variables | `GetEnvironmentStringsA` |
 
-Every other system call — file I/O, directory calls, process launch, sockets —
-branches to a stub that prints
+The startup thunk splits the command line into `argv` using everyday Windows
+double-quote rules: whitespace separates words unless it is inside quotes, a
+quote toggles quoting, and an empty quoted word is preserved. There is no
+backslash-escape handling. At most 1024 words are kept; further words are
+dropped. Environment entries are copied in their `NAME=value` form, so
+`environment "NAME"` works for any variable Windows provides.
+
+`read file` and `write ... to file` work on regular files.
+`CreateFileA` supplies the handle used by `ReadFile`, `WriteFile`, and
+`CloseHandle`; the fixed scratch buffer for a path is still 4 KiB. `file exists`,
+directory calls, process launch, and sockets branch to a stub that prints
 `burnt: this Windows build does not support that feature yet` and exits with
-status 1. A Windows program sees zero arguments beyond `argv[0]`, an empty
-environment, and a no-op raw terminal mode. These are deliberate limits of the
-first Windows milestone, not bugs in the language.
+status 1. Raw terminal mode changes console input only when standard input is a
+console; a redirected pipe is left alone. These are deliberate limits of the
+experimental target, not bugs in the language.
 
 Because the Windows image is a PE file, `rusk run --target windows` refuses to
 start it on a Linux host. Build the `.exe` and run it on Windows. There is no
-Windows-host execution path in this release, and no Wine-based test in CI.
+Windows-host execution path in this release, and no Wine-based test in CI;
+generated `.exe` behaviour is checked with an x86-64 emulator in development.
 
 Because there is no libc, Linux output and file I/O are direct Linux syscalls.
 AArch64 uses `x8` for the number: `write` is `64`, `exit` is `93`, `read` is
@@ -1226,11 +1239,12 @@ value; the ownership pass is what prevents it from being moved or changed.
   full-screen session falls back to the line-oriented REPL.
 - Linux is the supported output platform, on AArch64 and x86-64. Windows
   x86-64 output is experimental and console-only: it maps console I/O, exit,
-  the heap, and the command-line pointer, but not file I/O, directories,
-  process launch, sockets, environment variables, arguments beyond `argv[0]`,
-  or raw terminal mode. There is no macOS or 32-bit output. The compiler host
-  can be Linux or Windows x86-64; on Windows, `rusk build` and `rusk check`
-  work, but `rusk run` cannot start the Linux ELF natively. The x86-64 backend
+  the heap, arguments, the environment, regular files, and raw terminal mode,
+  but not `file exists`, directories, process launch, or sockets. A Windows
+  program sees at most 1024 command-line words and uses simplified double-quote
+  rules. There is no macOS or 32-bit output. The compiler host can be Linux or
+  Windows x86-64; on Windows, `rusk build` and `rusk check` work, but `rusk run`
+  cannot start the Linux ELF natively. The x86-64 backend
   allocates registers within straight-line blocks and spills at branches and
   calls, so it is close to the AArch64 output but is not a global register
   allocator yet.
@@ -1246,8 +1260,10 @@ function values in lists, functions that give back functions, a
 register-allocating x86-64 encoder, a relocation-aware data layout, and a
 self-hosting interpreter. v1.1.3 added the systems core: directory and process
 operations, the whole command line as a list, a growable heap, and 128
-parameters. v1.1.5 added IPv4 TCP sockets and raw terminal input. v1.1.6 adds
-toast files and an experimental Windows x86-64 output. What remains:
+parameters. v1.1.5 added IPv4 TCP sockets and raw terminal input. v1.1.6 added
+toast files and an experimental Windows x86-64 output. v1.1.7 fleshed out that
+Windows target with arguments, the environment, regular files, and raw terminal
+mode. What remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression
@@ -1257,7 +1273,6 @@ toast files and an experimental Windows x86-64 output. What remains:
 - broader systems primitives: threads, signals, and a package registry. IPv6,
   UDP, DNS, and TLS are also outside the current socket surface.
 - reusing memory for joined text instead of only list and input buffers.
-- Windows parity beyond the first console milestone: parsed arguments, the
-  environment, file and directory I/O, process launch, sockets, raw terminal
-  mode, and relocatable images. Toast files are not a linker and do not
-  combine images.
+- Windows parity beyond the current console milestone: `file exists`,
+  directories, process launch, sockets, and relocatable images. Toast files are
+  not a linker and do not combine images.

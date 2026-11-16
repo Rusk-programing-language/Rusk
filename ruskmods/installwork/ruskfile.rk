@@ -155,17 +155,21 @@ to installwork_ruskfile_render with name as a view of text and version as a view
     set out to out + "let package_description be \"" + description + "\"\n"
     set out to out + "let package_entry be \"" + entry + "\"\n"
     set out to out + "let package_license be \"" + license + "\"\n"
-    set out to out + "let package_requires be ["
-    let first be true
-    for each req in requires:
-        if not first:
-            set out to out + ", "
-        set out to out + "\"" + req + "\""
-        set first to false
-    set out to out + "]\n\n"
-    set out to out + "to build:\n    say \"building \" + package_name\n    say run command \"rusk build " + entry + " -o bin/" + name + "\"\n\n"
+    set out to out + "let package_requires be "
+    if length of requires is 0:
+        set out to out + "an empty list of text\n\n"
+    otherwise:
+        set out to out + "["
+        let first be true
+        for each req in requires:
+            if not first:
+                set out to out + ", "
+            set out to out + "\"" + req + "\""
+            set first to false
+        set out to out + "]\n\n"
+    set out to out + "to build:\n    say \"building \" + package_name\n    make directory \"bin\"\n    let status be run command \"rusk build " + entry + " -o bin/" + name + "\"\n    if status is not 0:\n        warn \"build failed\"\n\n"
     set out to out + "to test:\n    say \"testing \" + package_name\n\n"
-    set out to out + "to clean:\n    say run command \"rm -rf bin\"\n\n"
+    set out to out + "to clean:\n    let status be run command \"rm -rf bin\"\n\n"
     set out to out + "# Default task.\nbuild\n"
     give back out
 

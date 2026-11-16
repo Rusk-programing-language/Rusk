@@ -3,10 +3,11 @@
 A hands-on guide to **Rusk**, an English-like language that bakes ahead of
 time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
-runtime, no libc, and no dependencies. v1.1.6 also adds portable `.tst` toast
-files and an experimental Windows x86-64 `.exe` target.
+runtime, no libc, and no dependencies. v1.1.6 added portable `.tst` toast files
+and an experimental Windows x86-64 `.exe` target; v1.1.7 extends that target
+with arguments, the environment, regular files, and raw terminal mode.
 
-This guide is for v1.1.6. For the exact language rules, see
+This guide is for v1.1.7. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -24,8 +25,10 @@ This guide is for v1.1.6. For the exact language rules, see
 10. [The interactive session](#10-the-interactive-session)
 11. [The full-screen session](#11-the-full-screen-session)
 12. [Errors and troubleshooting](#12-errors-and-troubleshooting)
-13. [Project layout and testing](#13-project-layout-and-testing)
-14. [Limits and roadmap](#14-limits-and-roadmap)
+13. [Projects and Ruskfiles](#13-projects-and-ruskfiles)
+14. [What ships with Rusk](#14-what-ships-with-rusk)
+15. [Project layout and testing](#15-project-layout-and-testing)
+16. [Limits and roadmap](#16-limits-and-roadmap)
 
 ---
 
@@ -108,7 +111,7 @@ with `curl.exe`, unpacks it with `tar.exe`, and adds it to the user `PATH`:
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
-# $tag = 'v1.1.6'   # uncomment to pin a release
+# $tag = 'v1.1.7'   # uncomment to pin a release
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -132,7 +135,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.6 — code, baked ahead of time
+rusk 1.1.7 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -249,7 +252,7 @@ cannot be combined with other code.
 $ rusk toast hello.rk
 toasted hello.rk -> hello.tst (34.2 KB, aarch64, x86_64, 0 dependencies)
 $ rusk check hello.tst
-hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.1.6)
+hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.1.7)
   aarch64: 6.8 KB code, 355 B data, 1088.2 KB zeroed
   x86_64: 25.8 KB code, 355 B data, 1088.2 KB zeroed
 $ rusk run hello.tst              # runs the host image
@@ -280,20 +283,27 @@ $ rusk build hello.rk --target windows
 baked hello.rk -> hello.exe (29.0 KB, native windows-x86_64, 0 dependencies)
 ```
 
-The `.exe` imports from `kernel32.dll` and maps a small set of operations onto
+The `.exe` imports from `kernel32.dll` and maps a useful slice of Rusk onto
 Windows: console output and input through `GetStdHandle` and `WriteFile`/
 `ReadFile`, process exit through `ExitProcess`, heap growth through
-`VirtualAlloc`, and the command line through `GetCommandLineA`.
+`VirtualAlloc`, the command line through `GetCommandLineA`, the environment
+through `GetEnvironmentStringsA`, regular files through `CreateFileA`,
+`ReadFile`, `WriteFile`, and `CloseHandle`, and raw terminal mode through
+`GetConsoleMode` and `SetConsoleMode`.
 
 `rusk run --target windows` is refused, because a Linux host cannot execute a
 PE file. Build the `.exe` and run it on Windows.
 
-This is a first milestone, not parity. On Windows:
+The target is still experimental, not parity. On Windows:
 
-- only `argv[0]` is visible; later arguments are not parsed
-- the environment is empty
-- raw terminal mode is a successful no-op
-- file I/O, directory calls, process launch, and sockets print
+- up to 1024 command-line words are visible; quotes group words with the
+  everyday Windows rules (whitespace separates, quotes toggle, no backslash
+  escapes), and any extra words are dropped
+- `environment NAME` reads the real Windows environment block
+- `read file`, `write ... to file`, and file handles work for regular files
+- `turn on raw terminal` and `turn off raw terminal` change console input mode;
+  a redirected pipe is left alone
+- `file exists`, directory calls, process launch, and sockets print
   `burnt: this Windows build does not support that feature yet` and exit 1
 - the image is fixed-base with no base relocations, so Windows must load it at
   its preferred address
@@ -1037,7 +1047,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.6 — an English-like language
+Rusk 1.1.7 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1146,7 +1156,160 @@ and you can continue typing.
 - **Text positions look odd** — `length of`, `letter`, and `part` count bytes,
   not Unicode characters.
 
-## 13. Project layout and testing
+## 13. Projects and Ruskfiles
+
+A `Ruskfile` is a project manifest **and** a task runner in one ordinary Rusk
+source file. There is no TOML, no YAML, and no second configuration language to
+learn: the metadata is a few `let package_...` lines, and tasks are plain
+functions.
+
+### A small project
+
+```text
+demo/
+  Ruskfile
+  src/main.rk
+```
+
+`src/main.rk`:
+
+```rusk
+say "hello from demo"
+```
+
+`Ruskfile`:
+
+```rusk
+# Ruskfile — metadata and tasks
+let package_name be "demo"
+let package_version be "1.0.0"
+let package_entry be "src/main.rk"
+let package_description be "A tiny demo"
+let package_license be "MIT"
+let package_requires be ["math >=1.0.0"]
+
+to build:
+    make directory "bin"
+    let status be run command "rusk build src/main.rk -o bin/demo"
+    if status is not 0:
+        warn "build failed"
+
+to test:
+    let status be run command "rusk run tests/main.rk"
+
+to clean:
+    let status be run command "rm -rf bin"
+
+# The default task.
+build
+```
+
+Run it with no arguments from the project directory:
+
+```console
+$ rusk
+building demo
+baked src/main.rk -> bin/demo (6.8 KB, native aarch64, 0 dependencies)
+$ ./bin/demo
+hello from demo
+```
+
+`rusk` searches the current directory and then each parent directory for
+`Ruskfile` (falling back to the lowercase `ruskfile`) and runs the first one it
+finds. `rusk repl` and `rusk tui` always start the session, even inside a
+project, and `rusk <file>` still runs an explicit file.
+
+### How tasks work
+
+Because a Ruskfile is a Rusk program, a task is just a function and the last
+line is the task that runs. In the example, `build` calls `to build:`. Change
+that line to `test` or `clean` to run a different task. The Ruskfile decides,
+which keeps the behavior plain and predictable.
+
+Two conventions make the file a manifest as well as a program:
+
+| Name | Meaning |
+|---|---|
+| `package_name` | package name |
+| `package_version` | version text |
+| `package_entry` | entry program, relative to the Ruskfile |
+| `package_description` | one-line description |
+| `package_license` | license name |
+| `package_requires` | list such as `["math >=1.0.0", "text ^2.1.0"]` |
+
+The installer reads those names. Nothing else is special: you can add helper
+functions, constants, and imports like any other program.
+
+### Creating a project with installwork
+
+The bundled installer framework can write a starter project and show the tasks
+it finds. A launcher for its command line is a two-line Rusk program:
+
+```rusk
+# installwork.rk
+import "installwork/cli"
+installwork_cli_main
+```
+
+```console
+$ rusk build installwork.rk -o installwork
+$ ./installwork init demo
+created demo
+$ ./installwork tasks
+build
+test
+clean
+$ ./installwork plan demo
+```
+
+`installwork init NAME [DIR]` writes `NAME/Ruskfile` and `NAME/src/main.rk`.
+The registry is a local directory tree, not a server; `--registry PATH` and
+`--prefix PATH` (or `RUSK_REGISTRY` / `RUSK_PREFIX`) choose where it looks and
+installs. The default prefix is `~/.rusk`.
+
+## 14. What ships with Rusk
+
+Everything in this section is present in the v1.1.6 tree. It is ordinary Rusk
+source, not compiler magic, so it carries forward from release to release and
+you can read or copy it.
+
+| Path | What it is |
+|---|---|
+| `ruskmods/` | standard modules: `math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`, `shutils` |
+| `ruskmods/installwork/` | package registry, version requirements, dependency resolver, archives, install prefix, and the `installwork` CLI |
+| `rusklib/files.rk` | file and directory helpers that copy, size, and walk trees |
+| `rusklib/rusklib.rk` | one import that pulls in the whole helper bundle |
+| `rusklib/wheat/` | **wheat**, the terminal UI library: widths, colours, styles, boxes, tables, progress bars, panels, layout, and themes |
+| `selfhost/interpreter.rk` | an integer-expression interpreter written in Rusk and compiled by Rusk |
+| `toastset` | the POSIX-shell installer that downloads a release and upgrades it in place |
+| `src/repl.rs`, `src/tui.rs` | the line session and the full-screen terminal session |
+| `examples/` | small runnable programs used by the guide and tests |
+
+### wheat
+
+`wheat` is the bundled terminal UI library. It is inspired by Python's Rich but
+much smaller, and every module is a `.rk` file with no dependencies and no
+compiler support. You import the bundle or a single module:
+
+```rusk
+import "wheat"
+
+say wheat_panel_full with "Installed" and "2 items" and "math 1.2.0" and 0 and "left" and 1 and "rounded"
+say wheat_table with ["name", "version"] and [["math", "1.2.0"]] and "grid"
+say wheat_bar_labelled with "build" and 5 and 20 and 40
+```
+
+`WHEAT_COLOR=none` turns escape codes off, and `standard`, `256`, and
+`truecolor` choose a colour depth. The same code renders in a pipe with colour
+disabled, which is handy for logs and tests.
+
+The installer, the wheat library, the Ruskfile task runner, and the
+`installwork/` package framework all landed in the v1.1.6 tree, on top of the
+v1.1.5 networking/terminal work and the earlier language releases. `cargo test`
+builds and exercises the language they are written in, and the files above are
+the supported copies — there is no separate download.
+
+## 15. Project layout and testing
 
 ```text
 Cargo.toml            package metadata and the rusk binary
@@ -1206,14 +1369,15 @@ cargo run -- run examples/lists.rk
 cargo test --quiet
 ```
 
-## 14. Limits and roadmap
+## 16. Limits and roadmap
 
 Implemented and checked:
 
 - Static ELF64 output for Linux, on AArch64 or x86-64, with no libc
 - Portable `.tst` toast files holding one image per target
 - Experimental PE32+ `.exe` output for Windows x86-64, with console I/O, exit,
-  a `VirtualAlloc` heap, and a clear message for everything else
+  a `VirtualAlloc` heap, arguments, the environment, regular files, raw terminal
+  mode, and a clear message for everything else
 - English expressions, conditions, loops, and functions
 - Constants, text operations, and imports
 - Homogeneous lists, including nested lists, with `item`, `set item`, `add`,
@@ -1249,9 +1413,8 @@ Not implemented yet:
 - Threads, signals, GUI toolkits, and a networked package registry (the
   `installwork/` registry is a local directory tree, not a server)
 - IPv6, UDP, DNS, TLS, socket timeouts, and non-blocking sockets
-- Windows beyond the first console milestone: parsed arguments, the
-  environment, file and directory I/O, process launch, sockets, raw terminal
-  mode, and relocatable images
+- Windows beyond the current console milestone: `file exists`, directories,
+  process launch, sockets, and relocatable images
 - A toast linker; a toast is a whole program, not a relocatable object
 
 Backend limits worth knowing:

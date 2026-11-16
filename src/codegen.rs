@@ -164,13 +164,18 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
 
     if target.is_windows() {
         cg.asm.windows_start("_start");
+        cg.emit_windows_prepare();
     }
     cg.asm.label("_start");
     // Remember where the kernel put argc, argv, and envp before using the stack.
-    // `str` cannot name SP, so copy it through a scratch register first.
-    cg.asm.mov_data_addr(X1, ARGS_SP_OFFSET);
-    cg.asm.add_imm(X2, SP, 0);
-    cg.asm.str(X2, X1, 0);
+    // `str` cannot name SP, so copy it through a scratch register first. The
+    // Windows startup thunk builds a portable argv/envp table instead, because
+    // a PE entry point receives no arguments.
+    if !target.is_windows() {
+        cg.asm.mov_data_addr(X1, ARGS_SP_OFFSET);
+        cg.asm.add_imm(X2, SP, 0);
+        cg.asm.str(X2, X1, 0);
+    }
     // `run command` launches `/bin/sh -c`; the two words it needs never move.
     cg.asm.mov_data_addr(X1, RUN_SH_OFFSET);
     cg.asm.mov_imm64(X2, 0x0068_732f_6e69_622f); // "/bin/sh\0"
@@ -2731,6 +2736,187 @@ impl Codegen {
         a.ldr(X20, SP, 8);
         a.ldr(X30, SP, 16);
         a.add_imm(SP, SP, 32);
+        a.ret();
+    }
+
+    /// `win_prepare`: the Windows startup thunk. A PE entry point receives no
+    /// arguments, so this asks `kernel32.dll` for the command line and the
+    /// environment block, copies them into the data area, and lays out an
+    /// `argc/argv/envp` table shaped like the Linux initial stack.
+    ///
+    /// Quoting follows the everyday Windows rules: whitespace separates words
+    /// unless it is inside double quotes, and a quote toggles quoting. Empty
+    /// quoted arguments are preserved.
+    fn emit_windows_prepare(&mut self) {
+        use crate::x86_64::{
+            WIN_ARGS_MAX, WIN_ARGS_OFFSET, WIN_ARGS_STR_CAPACITY, WIN_ARGS_STR_OFFSET,
+            WIN_CONSOLE_MODE_OFFSET, WIN_ENV_BLOCK_OFFSET, WIN_ENV_CAPACITY, WIN_ENV_MAX,
+        };
+
+        let a = &mut self.asm;
+        a.label("win_prepare");
+
+        // Turn on virtual-terminal processing for stdout when it is a console,
+        // so ANSI colour and cursor escapes keep working.
+        a.mov_imm64(X0, (-11i64) as u64); // STD_OUTPUT_HANDLE
+        a.win_call_args("GetStdHandle", 1);
+        a.win_result();
+        a.mov_reg_reg(X19, X0);
+        a.mov_reg_reg(X0, X19);
+        a.mov_data_addr(X1, WIN_CONSOLE_MODE_OFFSET);
+        a.win_call_args("GetConsoleMode", 2);
+        a.win_result();
+        a.cmp_reg_reg(X0, XZR);
+        a.bcond_label(CC_EQ, "win_vt_done");
+        a.mov_reg_reg(X0, X19);
+        a.mov_data_addr(X1, WIN_CONSOLE_MODE_OFFSET);
+        a.ldr(X1, X1, 0);
+        a.movz_reg(X2, 4); // ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        a.orr_reg_reg(X1, X1, X2);
+        a.win_call_args("SetConsoleMode", 2);
+        a.label("win_vt_done");
+
+        // Split the command line into argv entries.
+        a.win_call_args("GetCommandLineA", 0);
+        a.win_result();
+        a.mov_reg_reg(X19, X0); // source cursor
+        a.mov_data_addr(X26, WIN_ARGS_OFFSET);
+        a.str(XZR, X26, 0); // argc
+        a.add_imm(X27, X26, 8); // next argv slot
+        a.mov_data_addr(X20, WIN_ARGS_STR_OFFSET); // destination cursor
+        a.mov_data_addr(X29, WIN_ARGS_STR_OFFSET + WIN_ARGS_STR_CAPACITY);
+        a.movz_reg(X21, 0); // argc
+        a.movz_reg(X22, 0); // inside quotes
+        a.movz_reg(X23, 0); // token started
+        a.mov_reg_reg(X28, X20); // token start
+
+        a.label("win_args_loop");
+        a.ldrb(X24, X19, 0);
+        a.cmp_reg_reg(X24, XZR);
+        a.bcond_label(CC_EQ, "win_args_end");
+        a.movz_reg(X25, 32); // space
+        a.cmp_reg_reg(X24, X25);
+        a.bcond_label(CC_EQ, "win_args_space");
+        a.movz_reg(X25, 9); // tab
+        a.cmp_reg_reg(X24, X25);
+        a.bcond_label(CC_EQ, "win_args_space");
+        a.movz_reg(X25, 34); // double quote
+        a.cmp_reg_reg(X24, X25);
+        a.bcond_label(CC_EQ, "win_args_quote");
+
+        a.label("win_args_char");
+        a.cmp_reg_reg(X23, XZR);
+        a.bcond_label(CC_NE, "win_args_char_store");
+        a.mov_reg_reg(X28, X20);
+        a.movz_reg(X23, 1);
+        a.label("win_args_char_store");
+        a.cmp_reg_reg(X20, X29);
+        a.bcond_label(CC_GE, "win_args_end");
+        a.strb(X24, X20, 0);
+        a.add_imm(X20, X20, 1);
+        a.add_imm(X19, X19, 1);
+        a.b_label("win_args_loop");
+
+        a.label("win_args_space");
+        a.cmp_reg_reg(X22, XZR);
+        a.bcond_label(CC_NE, "win_args_char");
+        a.cmp_reg_reg(X23, XZR);
+        a.bcond_label(CC_EQ, "win_args_space_advance");
+        a.strb(XZR, X20, 0); // terminate the finished word
+        a.add_imm(X20, X20, 1); // leave the NUL behind the next word
+        a.mov_imm64(X25, WIN_ARGS_MAX);
+        a.cmp_reg_reg(X21, X25);
+        a.bcond_label(CC_GE, "win_args_end");
+        a.str(X28, X27, 0);
+        a.add_imm(X27, X27, 8);
+        a.add_imm(X21, X21, 1);
+        a.movz_reg(X23, 0);
+        a.label("win_args_space_advance");
+        a.add_imm(X19, X19, 1);
+        a.b_label("win_args_loop");
+
+        a.label("win_args_quote");
+        a.cmp_reg_reg(X23, XZR);
+        a.bcond_label(CC_NE, "win_args_quote_toggle");
+        a.mov_reg_reg(X28, X20);
+        a.movz_reg(X23, 1);
+        a.label("win_args_quote_toggle");
+        a.cmp_reg_reg(X22, XZR);
+        a.bcond_label(CC_EQ, "win_args_quote_open");
+        a.movz_reg(X22, 0);
+        a.b_label("win_args_quote_done");
+        a.label("win_args_quote_open");
+        a.movz_reg(X22, 1);
+        a.label("win_args_quote_done");
+        a.add_imm(X19, X19, 1);
+        a.b_label("win_args_loop");
+
+        a.label("win_args_end");
+        a.cmp_reg_reg(X23, XZR);
+        a.bcond_label(CC_EQ, "win_args_store_null");
+        a.strb(XZR, X20, 0);
+        a.mov_imm64(X25, WIN_ARGS_MAX);
+        a.cmp_reg_reg(X21, X25);
+        a.bcond_label(CC_GE, "win_args_store_null");
+        a.str(X28, X27, 0);
+        a.add_imm(X27, X27, 8);
+        a.add_imm(X21, X21, 1);
+        a.label("win_args_store_null");
+        a.str(XZR, X27, 0); // argv terminator
+        a.str(X21, X26, 0); // argc
+                            // Environment pointers follow the argv terminator, giving the same
+                            // `[argc][argv...][NULL][envp...][NULL]` shape as the Linux stack.
+        a.add_imm(X27, X27, 8);
+        a.mov_reg_reg(X26, X27);
+
+        // The rest of the runtime reads one pointer that looks like the Linux
+        // initial stack pointer.
+        a.mov_data_addr(X1, ARGS_SP_OFFSET);
+        a.mov_data_addr(X2, WIN_ARGS_OFFSET);
+        a.str(X2, X1, 0);
+
+        // Environment: copy the block and point at each `NAME=value` entry.
+        a.win_call_args("GetEnvironmentStringsA", 0);
+        a.win_result();
+        a.mov_reg_reg(X19, X0);
+        a.mov_data_addr(X20, WIN_ENV_BLOCK_OFFSET);
+        a.movz_reg(X21, 0); // entries
+        a.mov_imm64(X27, WIN_ENV_MAX);
+        a.mov_data_addr(X29, WIN_ENV_BLOCK_OFFSET + WIN_ENV_CAPACITY - 2);
+
+        a.label("win_env_entry");
+        a.cmp_reg_reg(X19, XZR);
+        a.bcond_label(CC_EQ, "win_env_done");
+        a.cmp_reg_reg(X20, X29);
+        a.bcond_label(CC_GE, "win_env_done");
+        a.ldrb(X24, X19, 0);
+        a.cmp_reg_reg(X24, XZR);
+        a.bcond_label(CC_EQ, "win_env_done");
+        a.cmp_reg_reg(X21, X27);
+        a.bcond_label(CC_GE, "win_env_done");
+        a.str(X20, X26, 0);
+        a.add_imm(X26, X26, 8);
+        a.add_imm(X21, X21, 1);
+
+        a.label("win_env_copy");
+        a.cmp_reg_reg(X24, XZR);
+        a.bcond_label(CC_EQ, "win_env_entry_done");
+        a.strb(X24, X20, 0);
+        a.add_imm(X20, X20, 1);
+        a.add_imm(X19, X19, 1);
+        a.ldrb(X24, X19, 0);
+        a.b_label("win_env_copy");
+
+        a.label("win_env_entry_done");
+        a.strb(XZR, X20, 0);
+        a.add_imm(X20, X20, 1);
+        a.add_imm(X19, X19, 1);
+        a.b_label("win_env_entry");
+
+        a.label("win_env_done");
+        a.strb(XZR, X20, 0);
+        a.strb(XZR, X20, 1);
+        a.str(XZR, X26, 0); // envp terminator
         a.ret();
     }
 

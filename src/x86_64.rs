@@ -46,11 +46,36 @@ pub const VREG_OFFSET: u64 = 0x11_0000;
 pub const VREG_OFFSET_SLACK: u64 = 256;
 
 /// Scratch slots in the writable data area used by the Windows runtime
-/// wrappers: a saved standard handle, the byte count from `WriteFile`, and the
-/// byte count from `ReadFile`.
+/// wrappers: a saved standard handle, the byte count from `WriteFile`, the
+/// byte count from `ReadFile`, the console mode saved when the terminal enters
+/// raw mode, a working console mode, and a flag that mirrors `RAW_FLAG_OFFSET`.
 const WIN_HANDLE_OFFSET: u64 = 0x8100;
 const WIN_WRITTEN_OFFSET: u64 = 0x8108;
 const WIN_READ_OFFSET: u64 = 0x8110;
+pub const WIN_CONSOLE_MODE_OFFSET: u64 = 0x8118;
+const WIN_CONSOLE_RAW_OFFSET: u64 = 0x8120;
+const WIN_CONSOLE_SAVED_OFFSET: u64 = 0x8128;
+
+/// A synthetic `argc, argv, envp` table, laid out like the Linux initial stack
+/// so the rest of the runtime can read it unchanged:
+///
+/// ```text
+/// [argc][argv[0]]...[NULL][envp[0]]...[NULL]
+/// ```
+///
+/// `argv` pointers live in the table; the strings behind them are copied to
+/// [`WIN_ARGS_STR_OFFSET`]. Environment entries keep their `NAME=value` form
+/// in [`WIN_ENV_BLOCK_OFFSET`] and are pointed at by [`WIN_ENV_PTRS_OFFSET`].
+pub const WIN_ARGS_OFFSET: u64 = 0x9000;
+/// Up to this many command-line words are exposed. Windows limits a command
+/// line to 32 KiB, so this only truncates pathological inputs.
+pub const WIN_ARGS_MAX: u64 = 1024;
+pub const WIN_ARGS_STR_OFFSET: u64 = 0x2_0000;
+/// Argument text lives below the virtual-register file at `0x11_0000`.
+pub const WIN_ARGS_STR_CAPACITY: u64 = 0xE_0000;
+pub const WIN_ENV_BLOCK_OFFSET: u64 = 0x10_0000;
+pub const WIN_ENV_CAPACITY: u64 = 0x6000;
+pub const WIN_ENV_MAX: u64 = 0x9000 / 8;
 
 // AArch64 syscall numbers are what the code generator emits. x86-64 uses its
 // own numbers, so `mov_imm64(X8, ...)` translates them for us.
@@ -77,6 +102,9 @@ const AARCH64_LISTEN: u64 = 201;
 const AARCH64_SETSOCKOPT: u64 = 208;
 const AARCH64_IOCTL: u64 = 29;
 const AARCH64_SHUTDOWN: u64 = 210;
+/// The terminal ioctl requests the code generator emits.
+const TCGETS: u64 = 0x5401;
+const TCSETS: u64 = 0x5402;
 const X86_WRITE: u64 = 1;
 const X86_EXIT: u64 = 60;
 const X86_OPENAT: u64 = 257;
@@ -129,6 +157,13 @@ enum Fixup {
         at: usize,
         reg: u8,
     },
+}
+
+/// A stack argument for a Windows call: either a constant (written with a
+/// sign-extending 32-bit immediate) or a physical register.
+enum WinArg {
+    Imm(u32),
+    Reg(u8),
 }
 
 pub struct Asm {
@@ -238,28 +273,41 @@ impl Asm {
 
     // ---- virtual register storage ---------------------------------------
 
-    fn vreg_disp(&mut self, reg: u8) {
-        let at = self.code.len();
-        self.u32(0);
-        self.fixups.push(Fixup::Vreg { at, reg });
-    }
-
     fn load_abs(&mut self, phys: u8, reg: u8) {
-        let rex = 0x48 | (((phys >> 3) & 1) << 2);
+        // The Windows image sits above 4 GiB, so use a full 64-bit address and
+        // load through the destination register itself.
+        self.u8(0x48 | ((phys >> 3) & 1));
+        self.u8(0xB8 | (phys & 7));
+        let at = self.code.len();
+        self.u64(0);
+        self.fixups.push(Fixup::Vreg { at, reg });
+        let rex = 0x48 | (((phys >> 3) & 1) << 2) | ((phys >> 3) & 1);
+        let modrm = ((phys & 7) << 3) | (phys & 7);
         self.u8(rex);
         self.u8(0x8B);
-        self.u8(0x04 | ((phys & 7) << 3));
-        self.u8(0x25);
-        self.vreg_disp(reg);
+        self.u8(modrm);
+        if phys & 7 == 4 {
+            self.u8(0x24); // SIB: base = the register itself
+        }
     }
 
     fn store_abs(&mut self, phys: u8, reg: u8) {
-        let rex = 0x48 | (((phys >> 3) & 1) << 2);
+        // See `load_abs`: the data area is not addressable with a disp32. Save
+        // a scratch register, form the 64-bit address, store, and restore.
+        // None of these instructions touch the flags, so a pending conditional
+        // branch is unaffected.
+        let scratch = if phys == RAX { RCX } else { RAX };
+        self.u8(0x50 | (scratch & 7)); // push scratch
+        self.u8(0x48);
+        self.u8(0xB8 | (scratch & 7));
+        let at = self.code.len();
+        self.u64(0);
+        self.fixups.push(Fixup::Vreg { at, reg });
+        let rex = 0x48 | (((phys >> 3) & 1) << 2) | ((scratch >> 3) & 1);
         self.u8(rex);
         self.u8(0x89);
-        self.u8(0x04 | ((phys & 7) << 3));
-        self.u8(0x25);
-        self.vreg_disp(reg);
+        self.u8(((phys & 7) << 3) | (scratch & 7));
+        self.u8(0x58 | (scratch & 7)); // pop scratch
     }
 
     /// Write a cached value back to its home slot if it is dirty.
@@ -940,12 +988,9 @@ impl Asm {
                 Some(AARCH64_READ) => self.win_read(),
                 Some(AARCH64_EXIT) => self.win_exit(),
                 Some(AARCH64_MMAP) => self.win_mmap(),
-                Some(AARCH64_IOCTL) => {
-                    // Raw terminal mode is not implemented on Windows yet.
-                    // Report success and leave the console settings alone.
-                    self.mov_phys_imm64(RAX, 0);
-                    self.store_vreg(X0, RAX);
-                }
+                Some(AARCH64_OPENAT) => self.win_open(),
+                Some(AARCH64_CLOSE) => self.win_close(),
+                Some(AARCH64_IOCTL) => self.win_ioctl(),
                 _ => {
                     // The runtime helper prints a clear message and exits.
                     self.bl_label("windows_unsupported");
@@ -988,13 +1033,17 @@ impl Asm {
 
     /// Set up the Windows x64 stack (16-byte alignment plus 32 bytes of shadow
     /// space), call an imported function through its IAT slot, and restore the
-    /// stack exactly. The argument registers must already be loaded.
-    fn win_call(&mut self, name: &str) {
+    /// stack exactly. The argument registers must already be loaded. Extra
+    /// arguments for the callee are placed at `[rsp+32]`, `[rsp+40]`, ...
+    fn win_call_stack_mixed(&mut self, name: &str, stack_args: &[WinArg]) {
         // Any cached virtual values must reach their home slots before the
         // Windows ABI call clobbers the volatile registers.
         self.flush_all();
         self.discard_all();
         let index = self.import_index(name);
+        // 32 bytes of shadow space plus the stack arguments, kept 16-byte
+        // aligned so the call itself stays aligned.
+        let frame = (32 + stack_args.len() * 8).div_ceil(16) * 16;
         self.u8(0x41);
         self.u8(0x54); // push r12
         self.u8(0x4C);
@@ -1005,67 +1054,86 @@ impl Asm {
         self.u8(0xE4);
         self.u8(0xF0); // and rsp, -16
         self.u8(0x48);
-        self.u8(0x83);
+        self.u8(0x81);
         self.u8(0xEC);
-        self.u8(0x30); // sub rsp, 48
+        self.u32(frame as u32); // sub rsp, frame
+        for (i, value) in stack_args.iter().enumerate() {
+            let disp = (32 + i * 8) as u8;
+            match value {
+                WinArg::Imm(value) => {
+                    self.u8(0x48);
+                    self.u8(0xC7);
+                    self.u8(0x44);
+                    self.u8(0x24);
+                    self.u8(disp);
+                    self.u32(*value); // mov qword [rsp+disp], imm32
+                }
+                WinArg::Reg(phys) => {
+                    self.u8(0x48 | ((phys >> 3) & 1));
+                    self.u8(0x89);
+                    self.u8(0x44 | ((phys & 7) << 3));
+                    self.u8(0x24);
+                    self.u8(disp); // mov [rsp+disp], reg
+                }
+            }
+        }
         self.u8(0x48);
-        self.u8(0xB8); // mov rax, imm64
+        self.u8(0xB8); // mov rax, [IAT slot]
         let at = self.code.len();
         self.u64(0);
         self.import_fixups.push((at, index));
+        self.u8(0x48);
+        self.u8(0x8B);
+        self.u8(0x00); // mov rax, [rax]
         self.u8(0xFF);
         self.u8(0xD0); // call rax
         self.u8(0x48);
-        self.u8(0x83);
+        self.u8(0x81);
         self.u8(0xC4);
-        self.u8(0x30); // add rsp, 48
+        self.u32(frame as u32); // add rsp, frame
         self.u8(0x4C);
-        self.u8(0x8B);
+        self.u8(0x89);
         self.u8(0xE4); // mov rsp, r12
         self.u8(0x41);
         self.u8(0x5C); // pop r12
     }
 
+    fn win_call_stack(&mut self, name: &str, stack_args: &[u64]) {
+        let args: Vec<WinArg> = stack_args.iter().map(|v| WinArg::Imm(*v as u32)).collect();
+        self.win_call_stack_mixed(name, &args);
+    }
+
+    fn win_call(&mut self, name: &str) {
+        self.win_call_stack(name, &[]);
+    }
+
     /// A call with a fifth argument of zero at `[rsp+32]`.
     fn win_call5_null(&mut self, name: &str) {
-        self.flush_all();
-        self.discard_all();
-        let index = self.import_index(name);
-        self.u8(0x41);
-        self.u8(0x54); // push r12
-        self.u8(0x4C);
-        self.u8(0x8B);
-        self.u8(0xE4); // mov r12, rsp
+        self.win_call_stack(name, &[0]);
+    }
+
+    /// Call a `kernel32.dll` function with up to four arguments taken from the
+    /// virtual registers `X0..X3`, which the code generator uses for ordinary
+    /// helper calls. The result is left in `RAX`; pass it to
+    /// [`Asm::win_result`].
+    pub fn win_call_args(&mut self, name: &str, argc: usize) {
+        const ARG_REGS: [u8; 4] = [RCX, RDX, R8, R9];
+        const VREGS: [u8; 4] = [X0, X1, X2, X3];
+        for i in 0..argc.min(ARG_REGS.len()) {
+            self.load_vreg(ARG_REGS[i], VREGS[i]);
+        }
+        self.win_call_stack(name, &[]);
+    }
+
+    /// Move the Windows call's return value into `X0`.
+    pub fn win_result(&mut self) {
+        self.store_vreg(X0, RAX);
+    }
+
+    fn test_rax(&mut self) {
         self.u8(0x48);
-        self.u8(0x83);
-        self.u8(0xE4);
-        self.u8(0xF0); // and rsp, -16
-        self.u8(0x48);
-        self.u8(0x83);
-        self.u8(0xEC);
-        self.u8(0x30); // sub rsp, 48
-        self.u8(0x48);
-        self.u8(0xC7);
-        self.u8(0x44);
-        self.u8(0x24);
-        self.u8(0x20);
-        self.u32(0); // mov qword [rsp+32], 0
-        self.u8(0x48);
-        self.u8(0xB8); // mov rax, imm64
-        let at = self.code.len();
-        self.u64(0);
-        self.import_fixups.push((at, index));
-        self.u8(0xFF);
-        self.u8(0xD0); // call rax
-        self.u8(0x48);
-        self.u8(0x83);
-        self.u8(0xC4);
-        self.u8(0x30); // add rsp, 48
-        self.u8(0x4C);
-        self.u8(0x8B);
-        self.u8(0xE4); // mov rsp, r12
-        self.u8(0x41);
-        self.u8(0x5C); // pop r12
+        self.u8(0x85);
+        self.u8(0xC0); // test rax, rax
     }
 
     fn win_exit(&mut self) {
@@ -1076,22 +1144,25 @@ impl Asm {
     }
 
     fn win_write(&mut self) {
-        // fd 1 -> stdout, fd 2 -> stderr. Anything else is not a console fd.
+        // fd 1 -> stdout, fd 2 -> stderr, anything larger is a file handle
+        // returned by CreateFileA. fd 0 is read-only.
         let stdout = self.win_label("stdout");
         let stderr = self.win_label("stderr");
         let get = self.win_label("get_std_handle");
+        let file = self.win_label("write_file_handle");
+        let have = self.win_label("write_have_handle");
         let done = self.win_label("write_done");
         let failed = self.win_label("write_failed");
         let store = self.win_label("write_store");
 
-        self.load_vreg(RAX, X0);
-        self.cmp_rax_imm(1);
+        self.load_vreg(R10, X0);
+        self.cmp_phys_imm(R10, 1);
         self.bcond_label(CC_EQ, &stdout);
-        self.cmp_rax_imm(2);
+        self.cmp_phys_imm(R10, 2);
         self.bcond_label(CC_EQ, &stderr);
-        self.mov_rax_imm(-1);
-        self.store_vreg(X0, RAX);
-        self.b_label(&done);
+        self.cmp_phys_imm(R10, 3);
+        self.bcond_label(CC_LT, &failed);
+        self.b_label(&file);
 
         self.label(&stdout);
         self.mov_rcx_imm(-11); // STD_OUTPUT_HANDLE
@@ -1104,7 +1175,14 @@ impl Asm {
         self.win_call("GetStdHandle");
         self.win_data_addr(RDX, WIN_HANDLE_OFFSET);
         self.mov_mem_rax(RDX);
+        self.b_label(&have);
 
+        self.label(&file);
+        self.load_vreg(RAX, X0);
+        self.win_data_addr(RDX, WIN_HANDLE_OFFSET);
+        self.mov_mem_rax(RDX);
+
+        self.label(&have);
         // args: RCX=handle, RDX=buffer, R8=length, R9=&written
         self.win_data_addr(RCX, WIN_HANDLE_OFFSET);
         self.load_mem_rcx_ptr(RCX);
@@ -1129,26 +1207,29 @@ impl Asm {
     }
 
     fn win_read(&mut self) {
-        // Only stdin is mapped for now.
+        // fd 0 is the console's standard input; anything else is a file
+        // handle returned by CreateFileA.
         let stdin = self.win_label("stdin");
+        let have = self.win_label("read_have_handle");
         let failed = self.win_label("read_failed");
         let store = self.win_label("read_store");
         let done = self.win_label("read_done");
 
-        self.load_vreg(RAX, X0);
-        self.u8(0x48);
-        self.u8(0x85);
-        self.u8(0xC0); // test rax, rax
+        self.load_vreg(R10, X0);
+        self.cmp_phys_imm(R10, 0);
         self.bcond_label(CC_EQ, &stdin);
-        self.mov_rax_imm(-1);
-        self.store_vreg(X0, RAX);
-        self.b_label(&done);
+        self.load_vreg(RAX, X0);
+        self.win_data_addr(RDX, WIN_HANDLE_OFFSET);
+        self.mov_mem_rax(RDX);
+        self.b_label(&have);
 
         self.label(&stdin);
         self.mov_rcx_imm(-10); // STD_INPUT_HANDLE
         self.win_call("GetStdHandle");
         self.win_data_addr(RDX, WIN_HANDLE_OFFSET);
         self.mov_mem_rax(RDX);
+
+        self.label(&have);
         self.win_data_addr(RCX, WIN_HANDLE_OFFSET);
         self.load_mem_rcx_ptr(RCX);
         self.load_vreg(RDX, X1);
@@ -1169,6 +1250,163 @@ impl Asm {
         self.store_vreg(X0, RAX);
 
         self.label(&done);
+    }
+
+    fn win_open(&mut self) {
+        // CreateFileA(path, access, share, NULL, disposition, attrs, NULL).
+        // Rusk only opens regular files for reading or writing; directory and
+        // pipe flags stay unsupported and simply fail at the API.
+        let readonly = self.win_label("open_readonly");
+        let no_create = self.win_label("open_no_create");
+        let ready = self.win_label("open_ready");
+        let failed = self.win_label("open_failed");
+        let store = self.win_label("open_store");
+
+        // Access: GENERIC_READ, plus GENERIC_WRITE when O_WRONLY/O_RDWR is set.
+        self.load_vreg(R10, X2);
+        self.mov_phys_imm64(RDX, 0x8000_0000); // GENERIC_READ
+        self.test_phys_imm(R10, 3); // O_WRONLY | O_RDWR
+        self.bcond_label(CC_EQ, &readonly);
+        self.mov_phys_imm64(RDX, 0xC000_0000); // GENERIC_READ | GENERIC_WRITE
+
+        // Disposition: OPEN_EXISTING, OPEN_ALWAYS with O_CREAT, and
+        // CREATE_ALWAYS when O_TRUNC is also set.
+        self.label(&readonly);
+        self.mov_rax_imm(3); // OPEN_EXISTING
+        self.load_vreg(R10, X2);
+        self.test_phys_imm(R10, 0x40); // O_CREAT
+        self.bcond_label(CC_EQ, &no_create);
+        self.mov_rax_imm(4); // OPEN_ALWAYS
+        self.load_vreg(R10, X2);
+        self.test_phys_imm(R10, 0x200); // O_TRUNC
+        self.bcond_label(CC_EQ, &ready);
+        self.mov_rax_imm(2); // CREATE_ALWAYS
+        self.label(&ready);
+        self.label(&no_create);
+
+        // args: RCX=path, RDX=access, R8=share, R9=security, stack=rest.
+        self.load_vreg(RCX, X1);
+        self.mov_r8_imm(3); // FILE_SHARE_READ | FILE_SHARE_WRITE
+        self.mov_r9_imm(0);
+        self.win_call_stack_mixed(
+            "CreateFileA",
+            &[WinArg::Reg(RAX), WinArg::Imm(0x80), WinArg::Imm(0)],
+        );
+
+        self.cmp_rax_imm(-1); // INVALID_HANDLE_VALUE
+        self.bcond_label(CC_EQ, &failed);
+        self.test_rax();
+        self.bcond_label(CC_EQ, &failed);
+        self.b_label(&store);
+
+        self.label(&failed);
+        self.mov_rax_imm(-1);
+        self.label(&store);
+        self.store_vreg(X0, RAX);
+    }
+
+    fn win_close(&mut self) {
+        let failed = self.win_label("close_failed");
+        let done = self.win_label("close_done");
+        self.load_vreg(RCX, X0);
+        self.win_call("CloseHandle");
+        self.test_rax();
+        self.bcond_label(CC_EQ, &failed);
+        self.mov_rax_imm(0);
+        self.b_label(&done);
+        self.label(&failed);
+        self.mov_rax_imm(-1);
+        self.label(&done);
+        self.store_vreg(X0, RAX);
+    }
+
+    fn win_ioctl(&mut self) {
+        // Linux's TCGETS/TCSETS pair becomes GetConsoleMode/SetConsoleMode.
+        // `raw_terminal_on` calls TCGETS and then TCSETS, so the first TCSETS
+        // enters raw mode and a later one restores the saved mode.
+        let get = self.win_label("ioctl_get");
+        let set = self.win_label("ioctl_set");
+        let restore = self.win_label("ioctl_restore");
+        let failed = self.win_label("ioctl_failed");
+        let done = self.win_label("ioctl_done");
+
+        self.load_vreg(R10, X1);
+        self.cmp_phys_imm(R10, TCGETS as i32);
+        self.bcond_label(CC_EQ, &get);
+        self.cmp_phys_imm(R10, TCSETS as i32);
+        self.bcond_label(CC_EQ, &set);
+        self.b_label(&failed);
+
+        self.label(&get);
+        self.win_console_handle();
+        self.win_data_addr(RCX, WIN_HANDLE_OFFSET);
+        self.load_mem_rcx_ptr(RCX);
+        self.win_data_addr(RDX, WIN_CONSOLE_SAVED_OFFSET);
+        self.win_call("GetConsoleMode");
+        self.test_rax();
+        self.bcond_label(CC_EQ, &failed);
+        self.mov_rax_imm(0);
+        self.b_label(&done);
+
+        self.label(&set);
+        self.win_data_addr(RAX, WIN_CONSOLE_RAW_OFFSET);
+        self.load_mem_rax(RAX);
+        self.test_rax();
+        self.bcond_label(CC_NE, &restore);
+
+        // Raw mode: drop ENABLE_PROCESSED_INPUT, ENABLE_LINE_INPUT, and
+        // ENABLE_ECHO_INPUT, and ask for VT input sequences.
+        self.win_console_handle();
+        self.win_data_addr(RAX, WIN_CONSOLE_SAVED_OFFSET);
+        self.load_mem_rax(RAX);
+        self.mov_phys_imm64(RCX, !0x7u64);
+        self.and_phys_reg(RAX, RCX);
+        self.mov_phys_imm64(RCX, 0x200); // ENABLE_VIRTUAL_TERMINAL_INPUT
+        self.or_phys_reg(RAX, RCX);
+        self.win_data_addr(RDX, WIN_CONSOLE_MODE_OFFSET);
+        self.mov_mem_rax(RDX);
+        self.win_data_addr(RCX, WIN_HANDLE_OFFSET);
+        self.load_mem_rcx_ptr(RCX);
+        self.win_data_addr(RDX, WIN_CONSOLE_MODE_OFFSET);
+        self.load_mem_phys(RDX, RDX);
+        self.win_call("SetConsoleMode");
+        self.test_rax();
+        self.bcond_label(CC_EQ, &failed);
+        self.win_store_slot(WIN_CONSOLE_RAW_OFFSET, 1);
+        self.mov_rax_imm(0);
+        self.b_label(&done);
+
+        self.label(&restore);
+        self.win_console_handle();
+        self.win_data_addr(RCX, WIN_HANDLE_OFFSET);
+        self.load_mem_rcx_ptr(RCX);
+        self.win_data_addr(RDX, WIN_CONSOLE_SAVED_OFFSET);
+        self.load_mem_phys(RDX, RDX);
+        self.win_call("SetConsoleMode");
+        self.test_rax();
+        self.bcond_label(CC_EQ, &failed);
+        self.win_store_slot(WIN_CONSOLE_RAW_OFFSET, 0);
+        self.mov_rax_imm(0);
+        self.b_label(&done);
+
+        self.label(&failed);
+        self.mov_rax_imm(-1);
+        self.label(&done);
+        self.store_vreg(X0, RAX);
+    }
+
+    /// Load `STD_INPUT_HANDLE` into the handle slot.
+    fn win_console_handle(&mut self) {
+        self.mov_rcx_imm(-10);
+        self.win_call("GetStdHandle");
+        self.win_data_addr(RDX, WIN_HANDLE_OFFSET);
+        self.mov_mem_rax(RDX);
+    }
+
+    fn win_store_slot(&mut self, offset: u64, value: i32) {
+        self.mov_rax_imm(value);
+        self.win_data_addr(RDX, offset);
+        self.mov_mem_rax(RDX);
     }
 
     fn win_mmap(&mut self) {
@@ -1228,6 +1466,46 @@ impl Asm {
         self.u8(value as u8);
     }
 
+    /// `cmp r/m64, imm32` for any physical register. Used right before a
+    /// `bcond_label`, whose flush only emits moves and preserves the flags.
+    fn cmp_phys_imm(&mut self, phys: u8, value: i32) {
+        self.u8(0x48 | ((phys >> 3) & 1));
+        self.u8(0x81);
+        self.u8(0xF8 | (phys & 7));
+        self.u32(value as u32);
+    }
+
+    /// `test r/m64, imm32` for any physical register.
+    fn test_phys_imm(&mut self, phys: u8, value: i32) {
+        self.u8(0x48 | ((phys >> 3) & 1));
+        self.u8(0xF7);
+        self.u8(0xC0 | (phys & 7));
+        self.u32(value as u32);
+    }
+
+    fn and_phys_reg(&mut self, dst: u8, src: u8) {
+        let rex = 0x48 | (((src >> 3) & 1) << 2) | ((dst >> 3) & 1);
+        self.u8(rex);
+        self.u8(0x21);
+        self.u8(0xC0 | ((src & 7) << 3) | (dst & 7));
+    }
+
+    fn or_phys_reg(&mut self, dst: u8, src: u8) {
+        let rex = 0x48 | (((src >> 3) & 1) << 2) | ((dst >> 3) & 1);
+        self.u8(rex);
+        self.u8(0x09);
+        self.u8(0xC0 | ((src & 7) << 3) | (dst & 7));
+    }
+
+    /// `mov dst, [base]` for arbitrary physical registers (base must not be
+    /// RSP; the scratch slots are addressed through RAX/RCX/RDX).
+    fn load_mem_phys(&mut self, dst: u8, base: u8) {
+        let rex = 0x48 | (((dst >> 3) & 1) << 2) | ((base >> 3) & 1);
+        self.u8(rex);
+        self.u8(0x8B);
+        self.u8(((dst & 7) << 3) | (base & 7));
+    }
+
     fn mov_mem_rax(&mut self, base: u8) {
         self.u8(0x48 | ((base >> 3) & 1));
         self.u8(0x89);
@@ -1246,55 +1524,17 @@ impl Asm {
         self.u8(0x08 | (base & 7));
     }
 
-    /// Build a minimal initial stack for the Windows entry point:
-    ///
-    /// ```text
-    /// [argc = 1][argv[0] = GetCommandLineA()][argv NULL][envp NULL]
-    /// ```
-    ///
-    /// Command-line arguments beyond `argv[0]` and environment variables are
-    /// not parsed yet. The program sees zero arguments and an empty
-    /// environment; both are documented limitations of the first Windows
-    /// milestone.
+    /// Emit the PE entry point. Windows hands a PE entry point no arguments,
+    /// so the prologue calls `win_prepare` (emitted by the code generator) to
+    /// build the synthetic `argc/argv/envp` table, then jumps into the shared
+    /// `_start` path with an aligned stack.
     pub fn windows_start(&mut self, start: &str) {
         self.label("_pe_start");
-        self.u8(0x41);
-        self.u8(0x54); // push r12
-        self.u8(0x4C);
-        self.u8(0x8B);
-        self.u8(0xE4); // mov r12, rsp
         self.u8(0x48);
         self.u8(0x83);
         self.u8(0xE4);
         self.u8(0xF0); // and rsp, -16
-        self.u8(0x48);
-        self.u8(0x81);
-        self.u8(0xEC);
-        self.u32(0x80); // sub rsp, 128
-        self.win_call("GetCommandLineA");
-        // [rsp+0] = 1, [rsp+8] = command line, [rsp+16] = NULL, [rsp+24] = NULL
-        self.u8(0x48);
-        self.u8(0xC7);
-        self.u8(0x04);
-        self.u8(0x24);
-        self.u32(1); // mov qword [rsp], 1
-        self.u8(0x48);
-        self.u8(0x89);
-        self.u8(0x44);
-        self.u8(0x24);
-        self.u8(0x08); // mov [rsp+8], rax
-        self.u8(0x48);
-        self.u8(0xC7);
-        self.u8(0x44);
-        self.u8(0x24);
-        self.u8(0x10);
-        self.u32(0); // mov qword [rsp+16], 0
-        self.u8(0x48);
-        self.u8(0xC7);
-        self.u8(0x44);
-        self.u8(0x24);
-        self.u8(0x18);
-        self.u32(0); // mov qword [rsp+24], 0
+        self.bl_label("win_prepare");
         self.b_label(start);
     }
 
@@ -1372,7 +1612,7 @@ impl Asm {
                 }
                 Fixup::Vreg { at, reg } => {
                     let addr = data_base + VREG_OFFSET + (*reg as u64) * 8;
-                    self.patch_u32(*at, addr as u32);
+                    self.patch_u64(*at, addr);
                 }
             }
         }
@@ -1398,6 +1638,20 @@ mod tests {
     fn bytes(a: Asm) -> Vec<u8> {
         let (text, _) = a.finish();
         text
+    }
+
+    /// True if the text contains the save-scratch / movabs / store / restore
+    /// sequence used to write a virtual register back to its home slot.
+    fn has_absolute_store(text: &[u8]) -> bool {
+        text.windows(15).any(|w| {
+            (w[0] == 0x50 || w[0] == 0x51)
+                && w[1] == 0x48
+                && w[2] == 0xB8
+                && w[11] & 0xF8 == 0x48
+                && w[12] == 0x89
+                && w[13] & 0xC7 == 0
+                && (w[14] == 0x58 || w[14] == 0x59)
+        })
     }
 
     #[test]
@@ -1480,14 +1734,83 @@ mod tests {
     }
 
     #[test]
-    fn windows_start_asks_for_the_command_line() {
+    fn windows_start_calls_the_prepare_thunk() {
         let mut a = Asm::new_windows();
         a.windows_start("_start");
+        a.label("win_prepare");
+        a.ret();
         a.label("_start");
         a.ret();
 
-        assert_eq!(a.import_names(), vec!["GetCommandLineA".to_string()]);
+        assert!(a.import_names().is_empty());
         let (text, _) = a.finish_with_bss(0);
+        assert_eq!(&text[0..4], &[0x48, 0x83, 0xE4, 0xF0], "align the stack");
+        assert_eq!(text[4], 0xE8, "call win_prepare");
+        assert!(!text.windows(2).any(|w| w == [0x0F, 0x05]), "no syscall");
+    }
+
+    #[test]
+    fn windows_file_calls_become_kernel32_calls() {
+        let mut a = Asm::new_windows();
+        // openat, write, read, and close through handles.
+        a.mov_imm64(X0, 0);
+        a.mov_imm64(X1, 0x1000);
+        a.mov_imm64(X2, 577);
+        a.mov_imm64(X8, AARCH64_OPENAT);
+        a.svc();
+        a.mov_imm64(X0, 0x100);
+        a.mov_imm64(X1, 0x2000);
+        a.mov_imm64(X2, 5);
+        a.mov_imm64(X8, AARCH64_WRITE);
+        a.svc();
+        a.mov_imm64(X0, 0x100);
+        a.mov_imm64(X1, 0x2000);
+        a.mov_imm64(X2, 5);
+        a.mov_imm64(X8, AARCH64_READ);
+        a.svc();
+        a.mov_imm64(X0, 0x100);
+        a.mov_imm64(X8, AARCH64_CLOSE);
+        a.svc();
+
+        assert_eq!(
+            a.import_names(),
+            vec![
+                "CreateFileA".to_string(),
+                "GetStdHandle".to_string(),
+                "WriteFile".to_string(),
+                "ReadFile".to_string(),
+                "CloseHandle".to_string()
+            ]
+        );
+        let (text, _) = a.finish_with_bss(0x3000);
+        assert!(!text.windows(2).any(|w| w == [0x0F, 0x05]), "no syscall");
+        assert!(
+            text.windows(2).any(|w| w == [0xFF, 0xD0]),
+            "imports are called through rax"
+        );
+    }
+
+    #[test]
+    fn windows_raw_terminal_uses_console_mode() {
+        let mut a = Asm::new_windows();
+        a.mov_imm64(X0, 0);
+        a.mov_imm64(X1, TCGETS);
+        a.mov_imm64(X8, AARCH64_IOCTL);
+        a.svc();
+        a.mov_imm64(X0, 0);
+        a.mov_imm64(X1, TCSETS);
+        a.mov_imm64(X8, AARCH64_IOCTL);
+        a.svc();
+
+        assert_eq!(
+            a.import_names(),
+            vec![
+                "GetStdHandle".to_string(),
+                "GetConsoleMode".to_string(),
+                "SetConsoleMode".to_string()
+            ]
+        );
+        let (text, _) = a.finish_with_bss(0x2000);
         assert!(!text.windows(2).any(|w| w == [0x0F, 0x05]), "no syscall");
     }
 
@@ -1576,11 +1899,9 @@ mod tests {
         a.mov_imm64(X0, 5);
         a.add_imm(X0, X0, 1);
         let text = bytes(a);
-        // No absolute-memory store between the two operations: the allocator
-        // kept the value in a physical register.
-        assert!(!text
-            .windows(8)
-            .any(|w| w[0] == 0x48 && w[1] == 0x89 && w[3] == 0x25));
+        // No home-slot store between the two operations: the allocator kept
+        // the value in a physical register.
+        assert!(!has_absolute_store(&text));
     }
 
     #[test]
@@ -1591,10 +1912,8 @@ mod tests {
         a.label("end");
         a.ret();
         let text = bytes(a);
-        // Any absolute store of a 64-bit register: REX.W, MOV, modrm SIB 25.
-        assert!(text
-            .windows(8)
-            .any(|w| w[0] == 0x48 && w[1] == 0x89 && w[3] == 0x25));
+        // The branch flushes the cached value back to its home slot.
+        assert!(has_absolute_store(&text));
     }
 
     #[test]

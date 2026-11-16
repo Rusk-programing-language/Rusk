@@ -354,6 +354,8 @@ fn a_toast_can_hold_an_experimental_windows_image() {
     for needle in [
         b"kernel32.dll".as_slice(),
         b"GetStdHandle",
+        b"GetCommandLineA",
+        b"GetEnvironmentStringsA",
         b"WriteFile",
         b"ExitProcess",
     ] {

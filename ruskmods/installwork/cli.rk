@@ -124,7 +124,7 @@ to installwork_cli_init with name as a view of text and dir as a view of text:
     let manifest be installwork_ruskfile_template with name
     if not (installwork_fs_write with (installwork_path_join with target and "Ruskfile") and manifest):
         give back installwork_installer_error with "can't write the Ruskfile"
-    let program be "say \"hello from \" + package_name\n"
+    let program be "say \"hello from " + name + "\"\n"
     if not (installwork_fs_write with (installwork_path_join with (installwork_path_join with target and "src") and "main.rk") and program):
         give back installwork_installer_error with "can't write src/main.rk"
     give back ["ok", "created " + target]
