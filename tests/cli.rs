@@ -401,3 +401,114 @@ fn an_unknown_target_is_rejected() {
         "{stderr}"
     );
 }
+
+#[test]
+fn rdb_steps_and_prints_names_over_a_pipe() {
+    use std::io::Write;
+
+    let dir = std::env::temp_dir().join(format!("rusk-cli-rdb-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("debug.rk");
+    std::fs::write(&file, "let x be 1\nsay x\n").unwrap();
+
+    let mut child = Command::new(rusk())
+        .arg("rdb")
+        .arg(&file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("rusk should start");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"step\nprint x\nquit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("2 top-level statements"), "{stdout}");
+    assert!(stdout.contains("stopped at line 2"), "{stdout}");
+    assert!(stdout.contains("x = 1"), "{stdout}");
+}
+
+#[test]
+fn errors_get_numbers_over_a_pipe_without_a_question() {
+    use std::io::Write;
+
+    let mut child = Command::new(rusk())
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("rusk should start");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"say missing_name\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("E01"), "{stderr}");
+    assert!(stderr.contains("line 1"), "{stderr}");
+    assert!(stderr.contains("hint:"), "{stderr}");
+    assert!(!stderr.contains("Do you want to edit"), "{stderr}");
+}
+
+#[test]
+fn logo_uses_the_platform_asset() {
+    let out = Command::new(rusk())
+        .arg("logo")
+        .output()
+        .expect("rusk should start");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if cfg!(windows) {
+        assert!(stdout.starts_with("<svg"), "{stdout}");
+    } else {
+        assert!(stdout.contains("█"), "{stdout}");
+    }
+}
+
+#[test]
+fn the_repl_can_start_rdb_with_a_colon_command() {
+    use std::io::Write;
+
+    let mut child = Command::new(rusk())
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("rusk should start");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"let x be 1\n:rdb\nstep\nprint x\nquit\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("rdb — Rusk debugger"), "{stdout}");
+    assert!(stdout.contains("x = 1"), "{stdout}");
+}
+
+#[test]
+fn toastset_documents_the_optional_windows_startup_shortcut() {
+    let installer = include_str!("../toastset");
+    assert!(installer.contains("--no-startup"));
+    assert!(installer.contains("TOASTSET_NO_STARTUP"));
+    assert!(
+        installer.contains("Add Rusk to the Windows Startup folder so the prompt opens at login?")
+    );
+    assert!(installer.contains("Rusk.lnk"));
+}

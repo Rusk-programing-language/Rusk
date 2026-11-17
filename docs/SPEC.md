@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.1.7
+# The Rusk Language — Specification v1.2.0
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
 emits native machine code directly. This document describes exactly what v1.1
 accepts and what it guarantees.
 
-Status: **v1.1.7, Linux on AArch64 and x86-64, plus experimental Windows
+Status: **v1.2.0, Linux on AArch64 and x86-64, plus experimental Windows
 x86-64 output**. The compiler also builds and runs on Windows x86-64. Toast
 files (`.tst`) can hold finished images for several targets. Everything here is
 implemented and tested; anything not here does not exist yet.
@@ -888,7 +888,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.7 — an English-like language
+Rusk 1.2.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -913,7 +913,63 @@ finishes it.
 :vars            show the names the session remembers
 :functions       show the functions the session remembers
 :load <file.rk>  run a file in the session
+:rdb [file.rk]   start rdb on a file, or on the last code submitted
+:step            rdb: run one top-level statement
+:continue        rdb: run to a breakpoint or the end
+:break N         rdb: stop before line N
+:delete N        rdb: remove a breakpoint ('delete all' clears them)
+:breaks          rdb: list breakpoints
+:list [N]        rdb: show source lines around N
+:where           rdb: show the current file, line, and statement number
+:print NAME      rdb: show a name the program has made
+:repl            leave rdb
 ```
+
+On a terminal the prompt runs in raw mode and colours keywords, text, numbers,
+comments, names, and operators while the line is typed. Arrows move one
+character; Ctrl/Alt+Left and Ctrl/Alt+Right (or Alt-b/Alt-f) move one word.
+Home/End jump, Up/Down recall history, and Ctrl-A/E/U/K/W/L edit the line.
+Over a pipe the editor falls back to cooked line input with no prompts.
+
+### `rdb`
+
+`:rdb` starts the debugger on the last submitted source; `:rdb file.rk` loads a
+file. `rusk rdb [file.rk]` starts the same debugger from a shell. The debugger
+submits one top-level statement at a time through the same session evaluator,
+so values, functions, imports, and type rules are unchanged. A function
+definition is one statement; calls inside it are not stepped into.
+
+At an `(rdb)` prompt the colon is optional for `step`, `continue`, `break N`,
+`delete N`, `breaks`, `list`, `where`, `print NAME`, `vars`, `functions`,
+`load FILE`, and `quit`. `help` lists them. A breakpoint stops before the
+statement containing its line number. `continue` runs to the next breakpoint or
+to the end; `step` runs exactly one statement. `quit` returns to `rusk>`.
+
+### Numbered diagnostics
+
+Errors are wrapped in a diagnostic before they are shown:
+
+```text
+E01  syntax error  line 2
+  this text never gets closed — add a closing '"'
+  2 | say "oops
+  hint: Text starts and ends with a double quote. Close it on the same line...
+```
+
+Codes count upwards in a session (`E01`, `E02`, …). Categories are
+`syntax error`, `type error`, `ownership error`, `runtime error`,
+`import error`, and `usage error`. The report includes the line number and the
+source line when the pipeline or caller knows them, followed by an explanation
+and a hint. It then asks:
+
+```text
+Do you want to edit this code using the REPL y/n
+```
+
+`y` reopens the offending block at the prompt with the cursor ready. The
+question is skipped when stdin is not a terminal. The numbering and wording are
+a presentation layer over the pipeline's existing `Result<_, String>` errors;
+they do not change which stage rejects a program.
 
 The session is a tree-walking evaluator over the same AST, not a machine-code
 backend. Every submission is still lexed, parsed, type checked, and ownership

@@ -20,7 +20,9 @@
 # script from Git Bash, MSYS2, or Cygwin and installs rusk.exe.
 #
 # Unless --no-modify-path or an explicit --bin-dir is used, toastset also adds
-# its bin directory to the shell profile and, on Windows, to the user PATH.
+# its bin directory to the shell profile and, on Windows, to the user PATH. On
+# Windows it asks before creating a Startup-folder shortcut to rusk.exe, which
+# opens the prompt at login. Use --no-startup to skip that question.
 #
 # Environment:
 #   TOASTSET_VERSION   release to install (default: latest)
@@ -29,6 +31,8 @@
 #   TOASTSET_BIN_DIR   where to put the `rusk` binary
 #   TOASTSET_NO_MODIFY_PATH=1
 #                      do not edit a shell profile or the Windows PATH
+#   TOASTSET_NO_STARTUP=1
+#                      do not ask about or create the Windows Startup shortcut
 #
 # Rusk is distributed under the MIT license.
 
@@ -44,11 +48,15 @@ TOASTSET_HOME="${TOASTSET_HOME:-$HOME/.toastset}"
 BIN_DIR="${TOASTSET_BIN_DIR:-}"
 VERIFY=1
 MODIFY_PATH=1
+STARTUP=1
 EXPLICIT_BIN_DIR=0
 PATH_UPDATED=0
 PATH_PROFILE=""
+STARTUP_LINK_ADDED=0
+STARTUP_LINK_PATH=""
 [ -n "${TOASTSET_BIN_DIR:-}" ] && EXPLICIT_BIN_DIR=1
 [ "${TOASTSET_NO_MODIFY_PATH:-0}" = "1" ] && MODIFY_PATH=0
+[ "${TOASTSET_NO_STARTUP:-0}" = "1" ] && STARTUP=0
 
 # The download bar only uses color when stderr is a terminal and the user has
 # not asked for plain output.
@@ -86,13 +94,15 @@ OPTIONS:
   --bin-dir DIR       install the `rusk` binary into DIR
   --no-verify         skip SHA-256 verification
   --no-modify-path    do not edit a shell or Windows PATH setting
+  --no-startup        do not ask about the Windows Startup shortcut
   --uninstall         remove a previous toastset installation
   -h, --help          show this help
 
 Termux, Alpine, and other musl-based systems automatically get the static
 musl build, which runs without the glibc loader. Windows users should run this
-script from Git Bash, MSYS2, or Cygwin; it installs rusk.exe and updates both
-the shell profile and the Windows user PATH.
+script from Git Bash, MSYS2, or Cygwin; it installs rusk.exe, updates both the
+shell profile and the Windows user PATH, and asks before adding a shortcut to
+the Startup folder so the prompt opens at login.
 
 If Rusk is already installed, toastset replaces it with the requested or
 latest version (an in-place upgrade).
@@ -258,6 +268,36 @@ windows_path() {
     fi
 }
 
+find_powershell() {
+    if command -v powershell.exe >/dev/null 2>&1; then
+        printf '%s\n' powershell.exe
+    elif command -v pwsh >/dev/null 2>&1; then
+        printf '%s\n' pwsh
+    else
+        return 1
+    fi
+}
+
+# A question for changes people may not expect, such as starting rusk at
+# login. Read from /dev/tty when the installer itself arrived on stdin via
+# curl | sh, so piped installation can still answer interactively.
+confirm() {
+    question="$1"
+    if [ -t 0 ]; then
+        printf '%s [y/N] ' "$question"
+        IFS= read -r answer || return 1
+    elif [ -r /dev/tty ]; then
+        printf '%s [y/N] ' "$question" >/dev/tty
+        IFS= read -r answer </dev/tty || return 1
+    else
+        return 1
+    fi
+    case "$answer" in
+        y | Y | yes | YES | Yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 is_termux() {
     [ -n "${TERMUX_VERSION:-}" ] && return 0
     case "${PREFIX:-}" in *com.termux*) return 0 ;; esac
@@ -359,11 +399,7 @@ add_to_windows_path() {
     [ "$MODIFY_PATH" = "1" ] || return 0
     [ "$EXPLICIT_BIN_DIR" = "1" ] && return 0
 
-    if command -v powershell.exe >/dev/null 2>&1; then
-        ps="powershell.exe"
-    elif command -v pwsh >/dev/null 2>&1; then
-        ps="pwsh"
-    else
+    if ! ps="$(find_powershell)"; then
         warn "I couldn't find PowerShell; add the Rusk bin directory to PATH yourself"
         return 0
     fi
@@ -386,8 +422,82 @@ add_to_windows_path() {
     esac
 }
 
+add_to_windows_startup() {
+    is_windows || return 0
+    case "$TARGET" in *-windows-*) ;; *) return 0 ;; esac
+    [ "$STARTUP" = "1" ] || return 0
+
+    if ! ps="$(find_powershell)"; then
+        warn "I couldn't find PowerShell; no Startup shortcut was created"
+        return 0
+    fi
+    if ! confirm "Add Rusk to the Windows Startup folder so the prompt opens at login?"; then
+        info "skipped the Startup shortcut"
+        return 0
+    fi
+
+    win_exe="$(windows_path "$BIN_DIR/rusk.exe")"
+    result="$(TOASTSET_WIN_EXE="$win_exe" "$ps" -NoProfile -NonInteractive -Command '
+try {
+    $exe = $env:TOASTSET_WIN_EXE
+    $folder = [Environment]::GetFolderPath("Startup")
+    if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { "missing-exe"; exit }
+    if (-not $folder -or -not (Test-Path -LiteralPath $folder)) { "no-folder"; exit }
+    $link = Join-Path $folder "Rusk.lnk"
+    $wsh = New-Object -ComObject WScript.Shell
+    $shortcut = $wsh.CreateShortcut($link)
+    $shortcut.TargetPath = $exe
+    $shortcut.WorkingDirectory = Split-Path -Parent $exe
+    $shortcut.Description = "Rusk compiler prompt"
+    $shortcut.IconLocation = "$exe,0"
+    $shortcut.Save()
+    if (Test-Path -LiteralPath $link) { "added" } else { "failed" }
+} catch {
+    "error: " + $_.Exception.Message
+}
+' 2>/dev/null | tr -d '\r')" || result="error: PowerShell failed"
+    case "$result" in
+        added)
+            STARTUP_LINK_ADDED=1
+            STARTUP_LINK_PATH="$win_exe"
+            info "added a Rusk shortcut to the Windows Startup folder"
+            ;;
+        missing-exe)
+            warn "I couldn't find $win_exe; no Startup shortcut was created"
+            ;;
+        no-folder)
+            warn "I couldn't find your Windows Startup folder; no shortcut was created"
+            ;;
+        error:* | failed | *)
+            warn "I couldn't create the Startup shortcut ($result). If Windows asked for permission, allow the shortcut or create it yourself in shell:startup pointing at $win_exe"
+            ;;
+    esac
+}
+
+remove_windows_startup() {
+    is_windows || return 0
+    if ! ps="$(find_powershell)"; then
+        return 0
+    fi
+    result="$("$ps" -NoProfile -NonInteractive -Command '
+try {
+    $folder = [Environment]::GetFolderPath("Startup")
+    if (-not $folder -or -not (Test-Path -LiteralPath $folder)) { "none"; exit }
+    $link = Join-Path $folder "Rusk.lnk"
+    if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force; "removed" } else { "none" }
+} catch {
+    "error: " + $_.Exception.Message
+}
+' 2>/dev/null | tr -d '\r')" || result="error: PowerShell failed"
+    case "$result" in
+        removed) info "removed the Rusk shortcut from the Windows Startup folder" ;;
+        error:*) warn "I couldn't remove the Rusk Startup shortcut ($result)" ;;
+    esac
+}
+
 uninstall() {
     [ -n "$BIN_DIR" ] || BIN_DIR="$TOASTSET_HOME/bin"
+    remove_windows_startup
     rm -f "$BIN_DIR/rusk" "$BIN_DIR/rusk.exe"
     rm -rf "$TOASTSET_HOME"
     info "removed Rusk from $BIN_DIR and $TOASTSET_HOME"
@@ -418,6 +528,7 @@ while [ "$#" -gt 0 ]; do
             ;;
         --no-verify) VERIFY=0; shift ;;
         --no-modify-path) MODIFY_PATH=0; shift ;;
+        --no-startup) STARTUP=0; shift ;;
         --uninstall) uninstall; exit 0 ;;
         -h | --help) usage; exit 0 ;;
         *) die "I don't know '$1' — run 'toastset --help'" ;;
@@ -529,6 +640,7 @@ printf '%s\n' "$VERSION" >"$TOASTSET_HOME/version"
 
 add_to_profile
 add_to_windows_path
+add_to_windows_startup
 
 if [ "$EXISTING" = "1" ]; then
     if [ -n "$PREVIOUS_VERSION" ] && [ "$PREVIOUS_VERSION" != "$VERSION" ]; then
@@ -554,6 +666,11 @@ case ":$PATH:" in
         say "  $(path_line)"
         ;;
 esac
+if [ "$STARTUP_LINK_ADDED" = "1" ]; then
+    say ""
+    say "Rusk will open at login through the Startup shortcut."
+    say "  target: $STARTUP_LINK_PATH"
+fi
 say ""
 say "Try it:"
 say "  rusk version"

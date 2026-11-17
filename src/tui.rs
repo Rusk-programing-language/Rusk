@@ -222,6 +222,10 @@ pub enum Key {
     Insert,
     Left,
     Right,
+    /// Left with a word modifier (Ctrl/Alt + Left).
+    WordLeft,
+    /// Right with a word modifier (Ctrl/Alt + Right).
+    WordRight,
     Up,
     Down,
     Home,
@@ -321,12 +325,25 @@ impl KeyDecoder {
                 }
                 let params = self.pending[2..end].to_vec();
                 let final_byte = self.pending[end];
+                let by_word = params.contains(&b';');
                 self.pending.drain(..=end);
                 Some(match final_byte {
                     b'A' => Key::Up,
                     b'B' => Key::Down,
-                    b'C' => Key::Right,
-                    b'D' => Key::Left,
+                    b'C' => {
+                        if by_word {
+                            Key::WordRight
+                        } else {
+                            Key::Right
+                        }
+                    }
+                    b'D' => {
+                        if by_word {
+                            Key::WordLeft
+                        } else {
+                            Key::Left
+                        }
+                    }
                     b'H' => Key::Home,
                     b'F' => Key::End,
                     b'Z' => Key::BackTab,
@@ -351,9 +368,20 @@ impl KeyDecoder {
                 })
             }
             _ => {
-                // A lone escape before an ordinary character.
+                // A lone escape before an ordinary character. Alt-b and Alt-f
+                // are the readline spellings for word movement.
+                let next = self.pending[1];
                 self.pending.remove(0);
-                Some(Key::Esc)
+                if next == b'b' || next == b'f' {
+                    self.pending.remove(0);
+                    Some(if next == b'b' {
+                        Key::WordLeft
+                    } else {
+                        Key::WordRight
+                    })
+                } else {
+                    Some(Key::Esc)
+                }
             }
         }
     }

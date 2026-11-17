@@ -11,12 +11,15 @@
 //! bytes, not Unicode scalars, or the REPL would disagree with a baked program.
 
 use crate::ast::*;
+use crate::debugger::Debugger;
+use crate::diagnostics::{Diagnostic, Reporter, EDIT_QUESTION};
+use crate::editor::{count_chars, insert_char, remove_char, word_left, word_right, Editor};
 use crate::tui::{Ansi, Color, Key, RawMode, Terminal, BANNER};
 use crate::types::{self, Sig};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::rc::Rc;
@@ -140,7 +143,7 @@ enum Connection {
     Listener(TcpListener),
 }
 
-struct Session {
+pub(crate) struct Session {
     stmts: Vec<Stmt>,
     globals: HashMap<String, Value>,
     constants: HashSet<String>,
@@ -155,6 +158,10 @@ struct Session {
     stop: Option<i32>,
     line: usize,
     depth: usize,
+    /// The last code submitted at the prompt, so `:rdb` can debug it.
+    last_source: String,
+    /// The active debugger, if `:rdb` was used.
+    debug: Option<Box<Debugger>>,
     /// Sockets and listeners opened by the session, numbered like descriptors.
     connections: HashMap<i64, Connection>,
     next_connection: i64,
@@ -164,7 +171,7 @@ struct Session {
 }
 
 impl Session {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Session {
             stmts: Vec::new(),
             globals: HashMap::new(),
@@ -176,6 +183,8 @@ impl Session {
             stop: None,
             line: 0,
             depth: 0,
+            last_source: String::new(),
+            debug: None,
             connections: HashMap::new(),
             next_connection: 3,
             raw_mode: None,
@@ -189,6 +198,8 @@ impl Session {
         self.funcs.clear();
         self.sigs.clear();
         self.stop = None;
+        self.last_source.clear();
+        self.debug = None;
         self.connections.clear();
         self.raw_mode = None;
     }
@@ -202,12 +213,12 @@ impl Session {
     }
 
     /// Collect everything the session prints instead of writing it to stdout.
-    fn begin_capture(&mut self) {
+    pub(crate) fn begin_capture(&mut self) {
         self.capture = Some(Vec::new());
     }
 
     /// Stop collecting and return what was printed as text.
-    fn end_capture(&mut self) -> String {
+    pub(crate) fn end_capture(&mut self) -> String {
         let bytes = self.capture.take().unwrap_or_default();
         String::from_utf8_lossy(&bytes).into_owned()
     }
@@ -226,7 +237,7 @@ impl Session {
         }
     }
 
-    fn write_line(&mut self, text: &str) {
+    pub(crate) fn write_line(&mut self, text: &str) {
         match self.capture.as_mut() {
             Some(buffer) => {
                 let _ = buffer.write_all(text.as_bytes());
@@ -285,7 +296,8 @@ impl Session {
     }
 
     /// Like `submit`, but resolves `import` paths relative to `base` first.
-    fn submit_at(&mut self, src: &str, base: Option<&Path>) -> Result<(), String> {
+    pub(crate) fn submit_at(&mut self, src: &str, base: Option<&Path>) -> Result<(), String> {
+        self.last_source = src.to_string();
         let program = crate::imports::expand(src, base)?;
         if program.stmts.is_empty() {
             return Ok(());
@@ -1385,6 +1397,12 @@ impl Session {
                 Ok(true)
             }
             "load" => {
+                if self.debug_active() {
+                    for line in self.debug_line(&format!("load {rest}"))? {
+                        self.write_line(&line);
+                    }
+                    return Ok(true);
+                }
                 if rest.is_empty() {
                     return Err("':load' needs a file name".to_string());
                 }
@@ -1395,54 +1413,132 @@ impl Session {
                     .map_err(|e| format!("in {rest}: {e}"))?;
                 Ok(true)
             }
+            "rdb" => {
+                for line in self.start_debugger(rest)? {
+                    self.write_line(&line);
+                }
+                Ok(true)
+            }
+            "repl" => {
+                if self.debug_active() {
+                    self.debug = None;
+                    self.write_line("back at the Rusk prompt.");
+                    Ok(true)
+                } else {
+                    Err("already at the Rusk prompt".to_string())
+                }
+            }
+            "step" | "s" | "next" | "n" | "continue" | "c" | "break" | "b" | "delete" | "d"
+            | "breaks" | "breakpoints" | "info" | "list" | "l" | "where" | "bt" | "print" | "p" => {
+                let command = if rest.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{name} {rest}")
+                };
+                for line in self.debug_line(&command)? {
+                    self.write_line(&line);
+                }
+                Ok(true)
+            }
             other => Err(format!("I don't know the command ':{other}' — try :help")),
         }
     }
 
-    fn show_vars(&mut self) {
-        let mut lines = Vec::new();
-        if self.globals.is_empty() {
-            lines.push("nothing yet.".to_string());
+    /// Start `:rdb`, on a named file or on the last code the prompt ran.
+    fn start_debugger(&mut self, rest: &str) -> Result<Vec<String>, String> {
+        let debugger = if rest.is_empty() {
+            if self.last_source.trim().is_empty() {
+                return Err("there is no code to debug yet — try :rdb <file.rk>".to_string());
+            }
+            Debugger::new(&self.last_source, None)
         } else {
-            let mut names: Vec<&String> = self.globals.keys().collect();
-            names.sort();
-            for name in names {
-                lines.push(format!("{name} = {}", self.globals[name].display()));
+            Debugger::from_file(Path::new(rest))?
+        };
+        let hello = debugger.hello();
+        self.debug = Some(Box::new(debugger));
+        Ok(hello)
+    }
+
+    pub(crate) fn debug_active(&self) -> bool {
+        self.debug.is_some()
+    }
+
+    /// Pass one line to rdb. Commands that leave the debugger clear it again.
+    pub(crate) fn debug_line(&mut self, line: &str) -> Result<Vec<String>, String> {
+        let Some(mut debugger) = self.debug.take() else {
+            return Err("no rdb session — start one with :rdb [file.rk]".to_string());
+        };
+        let result = debugger.command(self, line);
+        match result {
+            Ok((output, true)) => {
+                self.debug = Some(debugger);
+                Ok(output)
+            }
+            Ok((output, false)) => {
+                self.debug = None;
+                Ok(output)
+            }
+            Err(e) => {
+                self.debug = Some(debugger);
+                Err(e)
             }
         }
-        for line in lines {
+    }
+
+    /// How a name looks at the prompt, for `rdb print`.
+    pub(crate) fn value_display(&self, name: &str) -> Option<String> {
+        self.globals.get(name).map(Value::display)
+    }
+
+    pub(crate) fn variable_lines(&self) -> Vec<String> {
+        if self.globals.is_empty() {
+            return vec!["nothing yet.".to_string()];
+        }
+        let mut names: Vec<&String> = self.globals.keys().collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| format!("{name} = {}", self.globals[name].display()))
+            .collect()
+    }
+
+    pub(crate) fn function_lines(&self) -> Vec<String> {
+        if self.funcs.is_empty() {
+            return vec!["no functions yet.".to_string()];
+        }
+        let mut names: Vec<&String> = self.funcs.keys().collect();
+        names.sort();
+        let mut lines = Vec::new();
+        for name in names {
+            let func = &self.funcs[name];
+            let params = func
+                .params
+                .iter()
+                .map(|p| format!("{} as {}", p.name, p.ty))
+                .collect::<Vec<_>>()
+                .join(" and ");
+            let gives = self
+                .sigs
+                .get(name)
+                .map(|sig| sig.ret.clone())
+                .unwrap_or(Ty::Nothing);
+            if params.is_empty() {
+                lines.push(format!("to {name}: gives back {gives}"));
+            } else {
+                lines.push(format!("to {name} with {params}: gives back {gives}"));
+            }
+        }
+        lines
+    }
+
+    fn show_vars(&mut self) {
+        for line in self.variable_lines() {
             self.write_line(&line);
         }
     }
 
     fn show_funcs(&mut self) {
-        let mut lines = Vec::new();
-        if self.funcs.is_empty() {
-            lines.push("no functions yet.".to_string());
-        } else {
-            let mut names: Vec<&String> = self.funcs.keys().collect();
-            names.sort();
-            for name in names {
-                let func = &self.funcs[name];
-                let params = func
-                    .params
-                    .iter()
-                    .map(|p| format!("{} as {}", p.name, p.ty))
-                    .collect::<Vec<_>>()
-                    .join(" and ");
-                let gives = self
-                    .sigs
-                    .get(name)
-                    .map(|sig| sig.ret.clone())
-                    .unwrap_or(Ty::Nothing);
-                if params.is_empty() {
-                    lines.push(format!("to {name}: gives back {gives}"));
-                } else {
-                    lines.push(format!("to {name} with {params}: gives back {gives}"));
-                }
-            }
-        }
-        for line in lines {
+        for line in self.function_lines() {
             self.write_line(&line);
         }
     }
@@ -1629,50 +1725,6 @@ fn starts_indented(line: &str) -> bool {
     line.starts_with(' ') || line.starts_with('\t')
 }
 
-fn read_line<R: BufRead>(
-    reader: &mut R,
-    interactive: bool,
-    prompt: &str,
-) -> io::Result<Option<String>> {
-    if interactive {
-        print!("{prompt}");
-        io::stdout().flush()?;
-    }
-    let mut line = String::new();
-    if reader.read_line(&mut line)? == 0 {
-        return Ok(None);
-    }
-    Ok(Some(line))
-}
-
-fn trim_newline(line: &str) -> &str {
-    line.trim_end_matches(['\n', '\r'])
-}
-
-/// How many characters (not bytes) a string holds.
-fn char_count(text: &str) -> usize {
-    text.chars().count()
-}
-
-fn char_offset(text: &str, index: usize) -> usize {
-    text.char_indices()
-        .nth(index)
-        .map(|(offset, _)| offset)
-        .unwrap_or(text.len())
-}
-
-fn insert_char(text: &mut String, index: usize, ch: char) {
-    let offset = char_offset(text, index);
-    text.insert(offset, ch);
-}
-
-fn remove_char(text: &mut String, index: usize) {
-    let offset = char_offset(text, index);
-    if offset < text.len() {
-        text.remove(offset);
-    }
-}
-
 fn wrap_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
         return vec![String::new()];
@@ -1701,7 +1753,12 @@ fn append_output(transcript: &mut Vec<String>, output: &str) {
     }
 }
 
-fn submit_in_tui(session: &mut Session, transcript: &mut Vec<String>, lines: &[String]) {
+fn submit_in_tui(
+    session: &mut Session,
+    transcript: &mut Vec<String>,
+    reporter: &mut Reporter,
+    lines: &[String],
+) -> Option<Diagnostic> {
     let src = format!("{}\n", lines.join("\n"));
     session.begin_capture();
     let result = session.submit(&src);
@@ -1709,7 +1766,30 @@ fn submit_in_tui(session: &mut Session, transcript: &mut Vec<String>, lines: &[S
     append_output(transcript, &output);
     if let Err(e) = result {
         if e != STOP {
-            transcript.push(format!("burnt: {e}"));
+            let diagnostic = reporter.report(&e, Some(&src));
+            append_output(transcript, &diagnostic.render(true));
+            return Some(diagnostic);
+        }
+    }
+    None
+}
+
+fn command_in_tui(
+    session: &mut Session,
+    transcript: &mut Vec<String>,
+    reporter: &mut Reporter,
+    command: &str,
+) -> bool {
+    session.begin_capture();
+    let result = session.command(command);
+    let output = session.end_capture();
+    append_output(transcript, &output);
+    match result {
+        Ok(keep) => keep,
+        Err(e) => {
+            let diagnostic = reporter.report(&e, None);
+            append_output(transcript, &diagnostic.render(true));
+            true
         }
     }
 }
@@ -1720,6 +1800,7 @@ fn draw_tui(
     current: &str,
     cursor: usize,
     pending: &[String],
+    debug: bool,
     scroll: usize,
 ) -> Result<(), String> {
     let (screen_width, screen_height) = terminal.size();
@@ -1735,7 +1816,9 @@ fn draw_tui(
     let scroll = scroll.min(max_scroll);
     let start = max_scroll - scroll;
 
-    let prompt = if pending.is_empty() {
+    let prompt = if debug {
+        "(rdb) "
+    } else if pending.is_empty() {
         "rusk> "
     } else {
         "...   "
@@ -1758,7 +1841,7 @@ fn draw_tui(
     frame.color(Color::BrightCyan);
     frame.text(prompt);
     frame.reset();
-    frame.text(current);
+    crate::highlight::paint(&mut frame, current);
     let column = prompt.chars().count() + cursor + 1;
     frame.move_to((area + 1) as u16, column.min(width).max(1) as u16);
     frame.show_cursor();
@@ -1804,18 +1887,26 @@ pub fn run_tui() -> Result<(), String> {
     let mut current = String::new();
     let mut cursor = 0usize;
     let mut pending: Vec<String> = Vec::new();
+    let mut prefill: Vec<String> = Vec::new();
     let mut history: Vec<String> = Vec::new();
     let mut history_at: Option<usize> = None;
+    let mut edit_offer: Option<Vec<String>> = None;
+    let mut reporter = Reporter::new();
     let mut scroll = 0usize;
     let mut quit = false;
 
     while !quit {
+        if current.is_empty() && pending.is_empty() && !prefill.is_empty() {
+            current = prefill.remove(0);
+            cursor = count_chars(&current);
+        }
         draw_tui(
             &mut terminal,
             &transcript,
             &current,
             cursor,
             &pending,
+            session.debug_active(),
             scroll,
         )?;
 
@@ -1826,6 +1917,25 @@ pub fn run_tui() -> Result<(), String> {
                 return Err(format!("can't read a key: {e}"));
             }
         };
+
+        if let Some(lines) = edit_offer.take() {
+            match key {
+                Some(Key::Char('y')) | Some(Key::Char('Y')) => {
+                    prefill = lines;
+                    current.clear();
+                    cursor = 0;
+                    pending.clear();
+                    transcript.push("reopening that code for editing.".to_string());
+                    scroll = 0;
+                    continue;
+                }
+                Some(Key::Char('n')) | Some(Key::Char('N')) => {
+                    transcript.push("ok — the code is unchanged.".to_string());
+                    continue;
+                }
+                _ => {}
+            }
+        }
 
         match key {
             Some(Key::Char(ch)) => {
@@ -1839,7 +1949,13 @@ pub fn run_tui() -> Result<(), String> {
                 let line_pending = !pending.is_empty();
                 transcript.push(format!(
                     "{}{}",
-                    if line_pending { "...   " } else { "rusk> " },
+                    if session.debug_active() {
+                        "(rdb) "
+                    } else if line_pending {
+                        "...   "
+                    } else {
+                        "rusk> "
+                    },
                     line
                 ));
                 if !line.trim().is_empty() {
@@ -1847,10 +1963,43 @@ pub fn run_tui() -> Result<(), String> {
                 }
                 history_at = None;
 
-                if line_pending {
+                if session.debug_active() && !line_pending {
+                    if line.trim().is_empty() {
+                        // A bare Enter repeats the last rdb command.
+                        match session.debug_line("") {
+                            Ok(output) => append_output(&mut transcript, &output.join("\n")),
+                            Err(e) => {
+                                let diagnostic = reporter.report(&e, None);
+                                append_output(&mut transcript, &diagnostic.render(true));
+                            }
+                        }
+                    } else if let Some(command) = line.trim().strip_prefix(':') {
+                        if !command_in_tui(&mut session, &mut transcript, &mut reporter, command) {
+                            quit = true;
+                        }
+                    } else {
+                        match session.debug_line(&line) {
+                            Ok(output) => append_output(&mut transcript, &output.join("\n")),
+                            Err(e) => {
+                                let diagnostic = reporter.report(&e, None);
+                                append_output(&mut transcript, &diagnostic.render(true));
+                            }
+                        }
+                    }
+                    scroll = 0;
+                    if session.stop.is_some() {
+                        quit = true;
+                    }
+                } else if line_pending {
                     if line.trim().is_empty() {
                         let lines = std::mem::take(&mut pending);
-                        submit_in_tui(&mut session, &mut transcript, &lines);
+                        if let Some(diagnostic) =
+                            submit_in_tui(&mut session, &mut transcript, &mut reporter, &lines)
+                        {
+                            transcript.push(EDIT_QUESTION.to_string());
+                            edit_offer = Some(lines);
+                            let _ = diagnostic;
+                        }
                         scroll = 0;
                         if session.stop.is_some() {
                             quit = true;
@@ -1861,23 +2010,24 @@ pub fn run_tui() -> Result<(), String> {
                 } else if line.trim().is_empty() {
                     // An empty line at the first prompt is just a new prompt.
                 } else if let Some(command) = line.trim().strip_prefix(':') {
-                    session.begin_capture();
-                    let result = session.command(command);
-                    let output = session.end_capture();
-                    append_output(&mut transcript, &output);
-                    match result {
-                        Ok(true) => {}
-                        Ok(false) => quit = true,
-                        Err(e) => transcript.push(format!("burnt: {e}")),
-                    }
-                    if session.stop.is_some() {
+                    if !command_in_tui(&mut session, &mut transcript, &mut reporter, command) {
                         quit = true;
                     }
                     scroll = 0;
+                    if session.stop.is_some() {
+                        quit = true;
+                    }
                 } else if opens_block(&line) || starts_indented(&line) {
                     pending.push(line);
                 } else {
-                    submit_in_tui(&mut session, &mut transcript, &[line]);
+                    let lines = vec![line];
+                    if let Some(diagnostic) =
+                        submit_in_tui(&mut session, &mut transcript, &mut reporter, &lines)
+                    {
+                        transcript.push(EDIT_QUESTION.to_string());
+                        edit_offer = Some(lines);
+                        let _ = diagnostic;
+                    }
                     scroll = 0;
                     if session.stop.is_some() {
                         quit = true;
@@ -1899,10 +2049,16 @@ pub fn run_tui() -> Result<(), String> {
                 cursor = cursor.saturating_sub(1);
             }
             Some(Key::Right) => {
-                cursor = (cursor + 1).min(char_count(&current));
+                cursor = (cursor + 1).min(count_chars(&current));
+            }
+            Some(Key::WordLeft) => {
+                cursor = word_left(&current, cursor);
+            }
+            Some(Key::WordRight) => {
+                cursor = word_right(&current, cursor);
             }
             Some(Key::Home) | Some(Key::Ctrl('a')) => cursor = 0,
-            Some(Key::End) | Some(Key::Ctrl('e')) => cursor = char_count(&current),
+            Some(Key::End) | Some(Key::Ctrl('e')) => cursor = count_chars(&current),
             Some(Key::Tab) => {
                 for _ in 0..4 {
                     insert_char(&mut current, cursor, ' ');
@@ -1919,14 +2075,14 @@ pub fn run_tui() -> Result<(), String> {
                     };
                     history_at = Some(at);
                     current = history[at].clone();
-                    cursor = char_count(&current);
+                    cursor = count_chars(&current);
                 }
             }
             Some(Key::Down) => match history_at {
                 Some(index) if index + 1 < history.len() => {
                     history_at = Some(index + 1);
                     current = history[index + 1].clone();
-                    cursor = char_count(&current);
+                    cursor = count_chars(&current);
                 }
                 Some(_) => {
                     history_at = None;
@@ -1946,7 +2102,7 @@ pub fn run_tui() -> Result<(), String> {
             Some(Key::Ctrl('d')) => {
                 if current.is_empty() && pending.is_empty() {
                     quit = true;
-                } else if cursor < char_count(&current) {
+                } else if cursor < count_chars(&current) {
                     remove_char(&mut current, cursor);
                 }
             }
@@ -1961,9 +2117,17 @@ pub fn run_tui() -> Result<(), String> {
                 cursor = 0;
             }
             Some(Key::Ctrl('k')) => {
-                while cursor < char_count(&current) {
+                while cursor < count_chars(&current) {
                     remove_char(&mut current, cursor);
                 }
+            }
+            Some(Key::Ctrl('w')) => {
+                let at = word_left(&current, cursor);
+                while cursor > at {
+                    cursor -= 1;
+                    remove_char(&mut current, cursor);
+                }
+                history_at = None;
             }
             Some(Key::PageUp) => {
                 scroll = scroll.saturating_add((terminal.size().1.max(4) as usize - 2) / 2);
@@ -1990,7 +2154,18 @@ pub fn run_tui() -> Result<(), String> {
 
 /// Run the interactive session on stdin/stdout.
 pub fn run() -> Result<(), String> {
-    let interactive = io::stdin().is_terminal();
+    run_with(None)
+}
+
+/// Open the REPL with the offending code ready to edit. `line` is one-based
+/// and selects the block around it; without a line the whole source is kept.
+pub fn run_editing(source: &str, line: Option<usize>) -> Result<(), String> {
+    run_with(Some(crate::diagnostics::edit_lines(source, line)))
+}
+
+fn run_with(initial_lines: Option<Vec<String>>) -> Result<(), String> {
+    let mut editor = Editor::new();
+    let interactive = editor.is_interactive();
     if interactive {
         println!("{BANNER}");
         println!();
@@ -2001,26 +2176,66 @@ pub fn run() -> Result<(), String> {
         println!("Type :help for commands, :quit to leave.\n");
     }
 
-    let stdin = io::stdin();
     let mut session = Session::new();
     session.args = std::env::args()
         .skip(2)
         .map(|arg| arg.into_bytes())
         .collect();
+    let mut reporter = Reporter::new();
+    let mut prefill: Vec<String> = initial_lines.unwrap_or_default();
 
     loop {
-        let Some(first) = read_line(&mut stdin.lock(), interactive, "rusk> ")
+        let prompt = if session.debug_active() {
+            "(rdb) "
+        } else {
+            "rusk> "
+        };
+        let initial = if prefill.is_empty() {
+            String::new()
+        } else {
+            prefill.remove(0)
+        };
+        let Some(first) = editor
+            .read_line(prompt, &initial)
             .map_err(|e| format!("can't read the prompt: {e}"))?
         else {
             break;
         };
-        let first = trim_newline(&first);
-        if first.trim().is_empty() {
-            continue;
-        }
-        if let Some(command) = first.trim().strip_prefix(':') {
-            if !session.command(command)? {
-                break;
+        let first = first.trim_end_matches(['\n', '\r']).to_string();
+        if session.debug_active() {
+            if first.trim().is_empty() {
+                match session.debug_line("") {
+                    Ok(output) => {
+                        for line in output {
+                            session.write_line(&line);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = report_plain(&mut reporter, &mut editor, &e, None);
+                    }
+                }
+            } else if let Some(command) = first.trim().strip_prefix(':') {
+                match session.command(command) {
+                    Ok(keep) => {
+                        if !keep {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        report_plain(&mut reporter, &mut editor, &e, None);
+                    }
+                }
+            } else {
+                match session.debug_line(&first) {
+                    Ok(output) => {
+                        for line in output {
+                            session.write_line(&line);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = report_plain(&mut reporter, &mut editor, &e, None);
+                    }
+                }
             }
             if let Some(code) = session.stop {
                 io::stdout().flush().ok();
@@ -2030,27 +2245,63 @@ pub fn run() -> Result<(), String> {
             continue;
         }
 
-        let mut lines = vec![first.to_string()];
-        if opens_block(first) || starts_indented(first) {
+        if first.trim().is_empty() {
+            continue;
+        }
+        if let Some(command) = first.trim().strip_prefix(':') {
+            match session.command(command) {
+                Ok(keep) => {
+                    if !keep {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let source = format!(":{command}");
+                    if let Some(lines) = report_plain(&mut reporter, &mut editor, &e, Some(&source))
+                    {
+                        prefill = lines;
+                    }
+                }
+            }
+            if let Some(code) = session.stop {
+                io::stdout().flush().ok();
+                io::stderr().flush().ok();
+                std::process::exit(code);
+            }
+            continue;
+        }
+
+        let mut lines = vec![first.clone()];
+        if opens_block(&first) || starts_indented(&first) {
             loop {
-                let Some(more) = read_line(&mut stdin.lock(), interactive, "...   ")
+                let more_initial = if prefill.is_empty() {
+                    String::new()
+                } else {
+                    prefill.remove(0)
+                };
+                let Some(more) = editor
+                    .read_line("...   ", &more_initial)
                     .map_err(|e| format!("can't read the prompt: {e}"))?
                 else {
                     break;
                 };
-                let more = trim_newline(&more);
+                let more = more.trim_end_matches(['\n', '\r']).to_string();
                 if more.trim().is_empty() {
                     break;
                 }
-                lines.push(more.to_string());
+                lines.push(more);
             }
         }
 
         let src = format!("{}\n", lines.join("\n"));
         if let Err(e) = session.submit(&src) {
             if e != STOP {
-                eprintln!("burnt: {e}");
+                if let Some(edited) = report_plain(&mut reporter, &mut editor, &e, Some(&src)) {
+                    prefill = if edited.is_empty() { lines } else { edited };
+                }
             }
+        } else {
+            prefill.clear();
         }
         if let Some(code) = session.stop {
             io::stdout().flush().ok();
@@ -2065,6 +2316,39 @@ pub fn run() -> Result<(), String> {
     Ok(())
 }
 
+/// Show a numbered diagnostic and ask whether to edit. Returns the lines to
+/// pre-fill when the answer is yes, and `None` when the person stays put.
+fn report_plain(
+    reporter: &mut Reporter,
+    editor: &mut Editor,
+    raw: &str,
+    source: Option<&str>,
+) -> Option<Vec<String>> {
+    let diagnostic = reporter.report(raw, source);
+    eprintln!("{}", diagnostic.render(true));
+    if !editor.is_interactive() {
+        return None;
+    }
+    let answer = editor
+        .read_answer(&format!("{EDIT_QUESTION} "))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return None;
+    }
+    if let Some(source) = source {
+        let lines = crate::diagnostics::edit_lines(source, diagnostic.line);
+        if !lines.is_empty() {
+            return Some(lines);
+        }
+    }
+    diagnostic
+        .snippet
+        .map(|line| vec![line])
+        .or(Some(Vec::new()))
+}
+
 fn help_text() -> &'static str {
     "Commands
   :help            show this list
@@ -2073,9 +2357,24 @@ fn help_text() -> &'static str {
   :vars            show the names the session remembers
   :functions       show the functions the session remembers
   :load <file.rk>  run a file in this session
+  :rdb [file.rk]   debug a file, or the last code you ran
+  :step            rdb: run one top-level statement
+  :continue        rdb: run to a breakpoint or the end
+  :break N         rdb: stop before line N
+  :delete N        rdb: remove a breakpoint ('delete all' clears them)
+  :breaks          rdb: list breakpoints
+  :list [N]        rdb: show source around N
+  :where           rdb: show the current file, line, and step
+  :print NAME      rdb: show a name the program has made
+  :repl            leave rdb and return to the Rusk prompt
 
 Type Rusk at the prompt. A line ending in ':' opens a block; finish it with a
-blank line. An expression on its own line shows its value, as in Python."
+blank line. An expression on its own line shows its value, as in Python.
+In rdb, the usual words also work without a colon: step, continue, break N,
+delete N, breaks, list, where, print NAME, vars, functions, load FILE, quit.
+
+Editing: arrows move by character; Ctrl/Alt+Left and Ctrl/Alt+Right move by
+word; Home/End jump; Up/Down recall history; Tab inserts four spaces."
 }
 
 #[cfg(test)]

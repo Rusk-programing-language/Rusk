@@ -4,10 +4,11 @@ A hands-on guide to **Rusk**, an English-like language that bakes ahead of
 time. You write `.rk` files, the compiler emits AArch64 or x86-64 machine code
 directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies. v1.1.6 added portable `.tst` toast files
-and an experimental Windows x86-64 `.exe` target; v1.1.7 extends that target
-with arguments, the environment, regular files, and raw terminal mode.
+and an experimental Windows x86-64 `.exe` target; v1.1.7 extended that target
+with arguments, the environment, regular files, and raw terminal mode. v1.2.0
+adds the `rdb` debugger, live coloured editing, and numbered diagnostics.
 
-This guide is for v1.1.7. For the exact language rules, see
+This guide is for v1.2.0. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -102,7 +103,16 @@ bar appears while the archive downloads.
 On Windows (x86-64), run the same installer from Git Bash, MSYS2, or Cygwin.
 It installs `rusk.exe`, adds the bin directory to your shell profile, and
 updates the Windows user `PATH` via PowerShell. New terminals then find `rusk`
-automatically. Use `--no-modify-path` to skip both profile and `PATH` edits, or
+automatically. It also asks:
+
+```text
+Add Rusk to the Windows Startup folder so the prompt opens at login? [y/N]
+```
+
+Answering `y` creates `Rusk.lnk` in your personal Startup folder, pointing at
+the installed `rusk.exe` so future upgrades still use the new binary. `n`
+skips it; `--no-startup` skips the question. `toastset --uninstall` removes the
+shortcut. Use `--no-modify-path` to skip profile and `PATH` edits, or
 `--bin-dir` to pick the installation directory.
 
 Without Git Bash, paste this into PowerShell. It downloads the Windows release
@@ -111,7 +121,7 @@ with `curl.exe`, unpacks it with `tar.exe`, and adds it to the user `PATH`:
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
-# $tag = 'v1.1.7'   # uncomment to pin a release
+# $tag = 'v1.2.0'   # uncomment to pin a release
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -135,7 +145,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.1.7 — code, baked ahead of time
+rusk 1.2.0 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -179,6 +189,7 @@ rusk                              run the nearby Ruskfile, or start the session
 rusk repl                         start the interactive session
 rusk tui                          start the full-screen session
 rusk tui demo                     open the terminal module demo
+rusk rdb [file.rk]                debug a file one statement at a time
 rusk build <file.rk|file.tst> [-o <out>] [--target <arch>]
                                   bake a native executable, or wrap a toast image
 rusk toast <file.rk> [-o <out.tst>] [--target <arch>]...
@@ -188,6 +199,7 @@ rusk run   [--target <arch>] <file.rk|file.tst> [args...]
 rusk check <file.rk|file.tst> [--target <arch>]
                                   bake without writing an executable, or verify a toast
 rusk version
+rusk logo                         print the platform logo (SVG on Windows)
 rusk help
 ```
 
@@ -252,7 +264,7 @@ cannot be combined with other code.
 $ rusk toast hello.rk
 toasted hello.rk -> hello.tst (34.2 KB, aarch64, x86_64, 0 dependencies)
 $ rusk check hello.tst
-hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.1.7)
+hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.2.0)
   aarch64: 6.8 KB code, 355 B data, 1088.2 KB zeroed
   x86_64: 25.8 KB code, 355 B data, 1088.2 KB zeroed
 $ rusk run hello.tst              # runs the host image
@@ -1047,7 +1059,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.7 — an English-like language
+Rusk 1.2.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1074,7 +1086,47 @@ Commands:
 :vars            show the names the session remembers
 :functions       show the functions the session remembers
 :load <file.rk>  run a file in the session
+:rdb [file.rk]   start rdb on a file, or the last code you ran
+:step            run one top-level statement
+:continue        run to a breakpoint or the end
+:break N         stop before line N
+:delete N        remove a breakpoint ('delete all' clears them)
+:breaks          list breakpoints
+:list [N]        show source around N
+:where           show the current file, line, and step
+:print NAME      show a name the program has made
+:repl            leave rdb
 ```
+
+On a terminal the line prompt colours keywords, text, numbers, comments,
+names, and operators as each character is typed. Arrows move one character;
+Ctrl/Alt+Left and Ctrl/Alt+Right move one word. Home/End jump, Up/Down recall
+history, Tab inserts four spaces, and Ctrl-U/K/W erase parts of the line.
+
+### The `rdb` debugger
+
+`:rdb` starts the debugger on the last code submitted; `:rdb file.rk` opens a
+file, and `rusk rdb file.rk` starts the same prompt from a shell. The debugger
+runs one **top-level statement** at a time. A whole function definition is one
+step; calls inside it are not stepped into yet. At an `(rdb)` prompt the colon
+is optional:
+
+```console
+(rdb) break 4
+breakpoint set at line 4.
+(rdb) continue
+stopped at line 4: say "two"
+next: step, continue, list, where, print NAME, or quit.
+(rdb) print x
+x = 1
+(rdb) step
+line 4 ran; the program has finished.
+(rdb) quit
+leaving rdb.
+```
+
+`list [N]`, `where`, `vars`, `functions`, and `load FILE` work as their names
+suggest. An empty line repeats the last debugger command.
 
 Piped input skips the banner and prompts, so `rusk < program.rk` also works.
 
@@ -1098,13 +1150,50 @@ writing escape sequences.
 
 ## 12. Errors and troubleshooting
 
+### Numbered diagnostics
+
+Every error shown by the REPL or the CLI gets a session code, a category, and
+the line it came from. When the offending source is known, the line itself and
+a hint are printed too:
+
+```console
+$ rusk repl
+rusk> say "oops
+E01  syntax error  line 1
+  this text never gets closed — add a closing '"'
+  1 | say "oops
+  hint: Text starts and ends with a double quote. Close it on the same line...
+Do you want to edit this code using the REPL y/n y
+```
+
+Answering `y` reopens that code at the prompt with the cursor ready; `n`
+leaves it alone. The question is skipped when stdin is a pipe, so scripts are
+unchanged. Codes count upwards during a REPL session (`E01`, `E02`, …) and
+start again for a new process.
+
+Categories are `syntax error`, `type error`, `ownership error`, `runtime
+error`, `import error`, and `usage error`:
+
+| Kind | Typical cause |
+|---|---|
+| Syntax | A missing quote, word, colon, or consistent indent |
+| Type | A value of the wrong kind, or an unknown name |
+| Ownership | A moved or read-only value used as an owner |
+| Runtime | A bad list index, division by zero, or a stopped program |
+| Import | A missing or cyclic import |
+| Usage | An unknown command or option |
+
 ### Bake-time errors
 
-Bake-time errors are reported with a line number and no executable is written:
+The numbered report replaces the old bare `burnt:` line, but the wrapped
+pipeline message is still shown:
 
 ```console
 $ rusk build bad.rk
-burnt: line 3: I don't know a thing called 'x'
+E01  type error  line 3
+  I don't know a thing called 'x'
+  3 | say x
+  hint: Declare the name first with 'let name be ...', or check the spelling.
 ```
 
 Common causes:
@@ -1122,16 +1211,14 @@ Common causes:
 
 ### Runtime errors
 
-Runtime errors print `burnt: line N: ...` on standard error and exit with
-status 1:
+Runtime errors stop the program. They are reported through the same numbered
+diagnostics (category `runtime error`) and exit with status 1:
 
 ```console
-burnt: line 4: an item outside the list
-burnt: line 5: there's nothing to remove
-burnt: line 2: division by zero
-burnt: line 7: recursion went too deep
-burnt: line 9: the program ran out of memory
-burnt: line 11: I can't list that directory
+E01  runtime error  line 4
+  an item outside the list
+  4 | say list item 9 of things
+  hint: List positions start at 1 and stop at 'length of the list'.
 ```
 
 A runtime error stops the program. In the REPL/TUI, the session stays alive

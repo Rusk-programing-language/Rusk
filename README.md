@@ -28,6 +28,16 @@ syscalls.
 
 ## Status
 
+v1.2.0 is the debugging-and-errors release. The prompt colours Rusk code as
+you type it, moves by word with Ctrl/Alt+Left and Ctrl/Alt+Right, and has a
+built-in `rdb` debugger: `:rdb [file.rk]` or `rusk rdb [file.rk]` steps
+top-level statements, with breakpoints, step/continue, `list`, `where`, and
+`print NAME`. Mistakes now get numbered codes (`E01`, `E02`, …), a category,
+the line, an explanation, and a `Do you want to edit this code using the REPL
+y/n` question that reopens the offending code with the cursor ready. Windows
+packages ship [`assets/rusk-logo.svg`](assets/rusk-logo.svg); `rusk logo`
+prints that SVG on Windows and the ASCII wordmark elsewhere.
+
 v1.1.7 is a Windows-focused patch on v1.1.6. The experimental Windows x86-64
 target now parses the command line into `all arguments` and `argument N` (up to
 1024 words, with everyday double-quote rules), reads the environment through
@@ -119,7 +129,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.1.7
+sh toastset --version 1.2.0
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -132,10 +142,15 @@ the script again upgrades the installed copy in place.
 On Windows, run the same command from Git Bash, MSYS2, or Cygwin. `toastset`
 installs `rusk.exe`, adds its bin directory to your shell profile, and updates
 the Windows user `PATH` through PowerShell, so new terminals find `rusk`
-without any manual setup. Pass `--no-modify-path` (or `TOASTSET_NO_MODIFY_PATH=1`)
-to leave profiles alone, or `--bin-dir` to choose the directory yourself. A
-plain PowerShell or `cmd.exe` session has no `sh`, so use Git Bash, MSYS2, or
-Cygwin for the installer.
+without any manual setup. It then asks `Add Rusk to the Windows Startup folder
+so the prompt opens at login? [y/N]` before creating `Rusk.lnk` in your personal
+Startup folder; the shortcut points at the installed executable, so upgrades
+keep working. Answering `n` skips it, and `--no-startup` (or
+`TOASTSET_NO_STARTUP=1`) skips the question entirely. `toastset --uninstall`
+removes the shortcut as well. Pass `--no-modify-path` (or
+`TOASTSET_NO_MODIFY_PATH=1`) to leave profiles alone, or `--bin-dir` to choose
+the directory yourself. A plain PowerShell or `cmd.exe` session has no `sh`, so
+use Git Bash, MSYS2, or Cygwin for the installer.
 
 If you do not want Git Bash, paste this into a normal PowerShell window on
 Windows 10 or 11. It asks GitHub for the latest release, downloads the Windows
@@ -146,7 +161,7 @@ build with `curl.exe`, unpacks it with `tar.exe`, and adds it to your user
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
 # To pin a release instead of taking the latest, replace the line above with:
-# $tag = 'v1.1.7'
+# $tag = 'v1.2.0'
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -181,7 +196,7 @@ for each target. A toast defaults to both Linux architectures:
 $ rusk toast hello.rk
 toasted hello.rk -> hello.tst (34.2 KB, aarch64, x86_64, 0 dependencies)
 $ rusk check hello.tst
-hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.1.7)
+hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.2.0)
   aarch64: 6.8 KB code, 355 B data, 1088.2 KB zeroed
   x86_64: 25.8 KB code, 355 B data, 1088.2 KB zeroed
 $ rusk run hello.tst             # runs the host image
@@ -564,7 +579,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.1.7 — an English-like language
+Rusk 1.2.0 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -590,7 +605,36 @@ positions count bytes just like a baked program.
 :vars            show the names the session remembers
 :functions       show the functions the session remembers
 :load <file.rk>  run a file in the session
+:rdb [file.rk]   step through a file, or the last code you ran
+:step            rdb: run one top-level statement
+:continue        rdb: run to the next breakpoint or the end
+:break N         rdb: stop before line N
+:delete N        rdb: remove a breakpoint ('delete all' clears them)
+:breaks          rdb: list breakpoints
+:list [N]        rdb: show source around N
+:where           rdb: show the current file, line, and step
+:print NAME      rdb: show a name the program has made
+:repl            leave rdb
 ```
+
+On a terminal the prompt colours keywords, text, numbers, comments, names, and
+operators as the line is typed. Arrows move one character; Ctrl/Alt+Left and
+Ctrl/Alt+Right move one word. Home/End jump, Up/Down recall history, Tab inserts
+four spaces, and Ctrl-C, Ctrl-U, Ctrl-K, Ctrl-W, and Ctrl-L edit the line.
+
+Mistakes are printed as `E01`, `E02`, … with the kind of error, the line, the
+source, a hint, and the question `Do you want to edit this code using the REPL
+y/n`. Answering `y` puts that code back at the prompt with the cursor ready.
+The same report is used by `rusk build`, `rusk run`, and `rusk check`; over a
+pipe the question is skipped.
+
+`rdb` works one **top-level statement** at a time. Function definitions run as
+one step, and calls inside them are not stepped into yet. Without the colon,
+the same words work at an `(rdb)` prompt: `step`, `continue`, `break N`,
+`delete N`, `breaks`, `list`, `where`, `print NAME`, `vars`, `functions`,
+`load FILE`, and `quit`. `rusk rdb file.rk` starts that prompt from a shell.
+`rusk logo` prints the ASCII wordmark on Unix and the bundled SVG logo on
+Windows.
 
 Piped input skips the banner and prompts, so `rusk < program.rk` works too.
 
@@ -679,6 +723,11 @@ ownership   one owner per text value and list
 |---|---|
 | `src/imports.rs` | Find files, expand plain/named/selective imports, detect cycles, include once |
 | `src/lexer.rs` | Source to tokens; keywords are plain words matched by the parser |
+| `src/highlight.rs` | Source colouring for the interactive editor |
+| `src/editor.rs` | Raw-mode line editing and word movement at the prompt |
+| `src/diagnostics.rs` | Numbered, explained errors and the edit-after-error question |
+| `src/debugger.rs` | `rdb` stepper, breakpoints, and source listing |
+| `src/logo.rs` | The bundled SVG logo and the platform wordmark |
 | `src/parser.rs` | Recursive descent over the English grammar |
 | `src/types.rs` | Type checking and return-kind inference (fixed point) |
 | `src/ownership.rs` | Flow-sensitive single-owner checking for text and lists |
@@ -751,7 +800,7 @@ Runtime facts worth knowing:
   relocation pass. Data addresses are patched into the finished machine code,
   so growing the text section moves the data instead of colliding with it.
 
-## What v1.1.7 doesn't do yet
+## What v1.2.0 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -794,7 +843,7 @@ Honest list, so the docs don't lie:
   They cannot be combined, patched, or linked with other code, and they carry
   no signature. A toast holds at most 8 target images.
 - GUI toolkits, pthread-style threads, and a package registry are not in this
-  release. They are later layers, not a claim of v1.1.7.
+  release. They are later layers, not a claim of v1.2.0.
 - The x86-64 register allocator works within straight-line blocks and spills at
   every branch and call. It is much closer to AArch64 than the old
   memory-backed encoder, but it is not a global allocator yet.

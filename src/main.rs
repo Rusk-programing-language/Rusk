@@ -5,14 +5,16 @@
 //! rusk repl                         start the interactive session
 //! rusk tui                          start the full-screen session
 //! rusk tui demo                     open the terminal module demo
+//! rusk rdb [file.rk]                debug a file one statement at a time
 //! rusk build <file.rk> [-o <out>]   bake a native executable
 //! rusk run   [--target <arch>] <file.rk> [args...]
 //!                                   bake and run it, passing arguments on
 //! rusk check <file.rk>              bake without writing anything
 //! rusk version
+//! rusk logo                        print the platform logo (SVG on Windows)
 //! ```
 
-use rusk::{elf, toast, Target};
+use rusk::{diagnostics, elf, toast, Target};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -23,10 +25,44 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("burnt: {e}");
+            let source = cli_source(&args, &e);
+            let mut reporter = diagnostics::Reporter::new();
+            let diagnostic = reporter.report(&e, source.as_deref());
+            eprintln!("{}", diagnostic.render(true));
+            if let Some(source) = source {
+                if diagnostics::wants_to_edit() {
+                    if let Err(again) = rusk::repl::run_editing(&source, diagnostic.line) {
+                        eprintln!("burnt: {again}");
+                    }
+                }
+            }
             ExitCode::FAILURE
         }
     }
+}
+
+/// Find the source behind a command-line mistake so the report can show the
+/// line and, when the person says yes, reopen it in the REPL.
+fn cli_source(args: &[String], error: &str) -> Option<String> {
+    if let Some(rest) = error.strip_prefix("in ") {
+        if let Some((path, _)) = rest.split_once(':') {
+            if let Ok(source) = std::fs::read_to_string(path.trim()) {
+                return Some(source);
+            }
+        }
+    }
+    for arg in args {
+        if arg.starts_with('-') {
+            continue;
+        }
+        let path = Path::new(arg);
+        if path.is_file() {
+            if let Ok(source) = std::fs::read_to_string(path) {
+                return Some(source);
+            }
+        }
+    }
+    None
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -45,6 +81,16 @@ fn run(args: &[String]) -> Result<(), String> {
             } else {
                 rusk::repl::run_tui()
             }
+        }
+        "rdb" | "debug" => {
+            if args.len() > 2 {
+                return Err(format!(
+                    "rdb takes one file at a time, but found '{}'",
+                    args[2]
+                ));
+            }
+            let file = args.get(1).map(PathBuf::from);
+            rusk::debugger::run_cli(file)
         }
         "build" => {
             let (input, output, target) = parse_targets(&args[1..])?;
@@ -99,6 +145,10 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("rusk {VERSION} — code, baked ahead of time");
             Ok(())
         }
+        "logo" => {
+            println!("{}", rusk::logo::text());
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -118,6 +168,8 @@ USAGE
   rusk repl                         start the interactive session
   rusk tui                          start the full-screen session
   rusk tui demo                     open the terminal module demo
+  rusk rdb [file.rk]                debug a file one statement at a time; in the
+                                    REPL, :rdb [file.rk] does the same
   rusk build <file.rk|file.tst> [-o <out>] [--target <arch>]
                                     bake a native executable, or wrap a toast image
   rusk toast <file.rk> [-o <out.tst>] [--target <arch>]...
@@ -127,6 +179,7 @@ USAGE
   rusk check <file.rk|file.tst> [--target <arch>]
                                     bake without writing an executable, or verify a toast
   rusk version
+  rusk logo                         print the platform logo (SVG on Windows)
   rusk help
 
 Targets: aarch64 or x86_64 (default: the architecture running the compiler).

@@ -89,6 +89,8 @@ jobs:
           cp "target/${{ matrix.target }}/release/rusk" "dist/${name}/rusk"
           cp toastset "dist/${name}/toastset"
           cp README.md LICENSE* "dist/${name}/" 2>/dev/null || true
+          mkdir -p "dist/${name}/assets"
+          cp assets/rusk-logo.svg "dist/${name}/assets/rusk-logo.svg"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           echo "asset=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
@@ -133,6 +135,8 @@ jobs:
           Copy-Item "toastset" "dist/$name/toastset"
           Copy-Item "README.md" "dist/$name/"
           Copy-Item "LICENSE" "dist/$name/" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "dist/$name/assets" | Out-Null
+          Copy-Item "assets/rusk-logo.svg" "dist/$name/assets/rusk-logo.svg"
           tar -C dist -czf "dist/$name.tar.gz" $name
           "asset=dist/$name.tar.gz" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
@@ -146,7 +150,7 @@ jobs:
 
   release:
     name: publish GitHub release
-    needs: build
+    needs: [build, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
