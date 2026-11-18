@@ -1,0 +1,25 @@
+# app.rk — tiny application loops for simple windows.
+
+import "window"
+import "event"
+import "constants"
+import "label"
+
+# Open a window and wait until it is closed.
+to simple_app_run with title as view of text and width as a number and height as a number:
+    let window be simple_window_start with title and width and height
+    let running be true
+    while running:
+        let event be simple_event_wait
+        if event is simple_event_close:
+            set running to false
+    simple_window_exit
+
+# A one-label greeting window that closes on the first event.
+to simple_app_greet with title as view of text and name as view of text:
+    let window be simple_window with title and 360 and 140
+    let greeting be "Hello, " + name + "!"
+    let message be simple_label with window and greeting and 24 and 24 and 320 and 40
+    simple_window_open with window
+    let event be simple_event_wait
+    simple_window_exit

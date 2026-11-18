@@ -1,0 +1,35 @@
+# dnd.rk — text and path payloads for drag-and-drop-style programs.
+#
+# The native event queue does not carry mouse drags. These helpers give a
+# program a small, explicit payload format it can pass between controls.
+
+import "textbox"
+
+to simple_dnd_text with text as view of text:
+    give back "text:" + text
+
+to simple_dnd_file with path as view of text:
+    give back "file:" + path
+
+to simple_dnd_is_text with payload as view of text:
+    give back simple_text_starts_with with payload and "text:"
+
+to simple_dnd_is_file with payload as view of text:
+    give back simple_text_starts_with with payload and "file:"
+
+to simple_dnd_text_value with payload as view of text:
+    if not simple_dnd_is_text with payload:
+        give back ""
+    give back part 6 to length of payload of payload
+
+to simple_dnd_file_value with payload as view of text:
+    if not simple_dnd_is_file with payload:
+        give back ""
+    give back part 6 to length of payload of payload
+
+to simple_dnd_display with payload as view of text:
+    if simple_dnd_is_text with payload:
+        give back "Text: " + (simple_dnd_text_value with payload)
+    if simple_dnd_is_file with payload:
+        give back "File: " + (simple_dnd_file_value with payload)
+    give back copy of payload

@@ -1,0 +1,28 @@
+# progress.rk — text progress bars drawn in a label.
+
+import "textbox"
+import "label"
+import "control"
+
+# A bar such as "[####----] 50%". A zero total gives an empty bar.
+to simple_progress_text with value as a number and total as a number and width as a number:
+    if total is 0:
+        give back "[" + (simple_text_repeat with "-" and width) + "] 0%"
+    let filled be value * width / total
+    if filled is less than 0:
+        set filled to 0
+    if filled is more than width:
+        set filled to width
+    let bar be simple_text_repeat with "#" and filled
+    let space be simple_text_repeat with "-" and (width - filled)
+    let percent be value * 100 / total
+    let number be simple_number_text with percent
+    give back "[" + bar + space + "] " + number + "%"
+
+to simple_progress_label with window as a number and rect as a view of a list of numbers and value as a number and total as a number and width as a number:
+    let caption be simple_progress_text with value and total and width
+    give back simple_label_at with window and caption and rect
+
+to simple_progress_set with bar as a number and value as a number and total as a number and width as a number:
+    let caption be simple_progress_text with value and total and width
+    simple_control_set_text with bar and caption

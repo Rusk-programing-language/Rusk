@@ -240,6 +240,21 @@ impl<'a> Checker<'a> {
                 Self::line_at(*line, self.expr(socket, scope, Use::Read))?;
             }
             Stmt::RawTerminal { .. } => {}
+            Stmt::GuiShow(window, line) => {
+                Self::line_at(*line, self.expr(window, scope, Use::Read))?;
+            }
+            Stmt::GuiSetText {
+                control,
+                text,
+                line,
+            } => {
+                Self::line_at(*line, self.expr(control, scope, Use::Read))?;
+                Self::line_at(*line, self.expr(text, scope, Use::Read))?;
+            }
+            Stmt::GuiMessage(text, line) => {
+                Self::line_at(*line, self.expr(text, scope, Use::Read))?;
+            }
+            Stmt::GuiPump(_) | Stmt::GuiClose(_) => {}
             Stmt::If {
                 cond,
                 then,
@@ -440,6 +455,34 @@ impl<'a> Checker<'a> {
             Expr::Listen(port) | Expr::Accept(port) => self.expr(port, scope, Use::Read)?,
             Expr::ReadFrom { socket, .. } => self.expr(socket, scope, Use::Read)?,
             Expr::AllArguments => {}
+            Expr::GuiWindow {
+                title,
+                width,
+                height,
+            } => {
+                self.expr(title, scope, Use::Read)?;
+                self.expr(width, scope, Use::Read)?;
+                self.expr(height, scope, Use::Read)?;
+            }
+            Expr::GuiControl {
+                window,
+                text,
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                self.expr(window, scope, Use::Read)?;
+                self.expr(text, scope, Use::Read)?;
+                self.expr(x, scope, Use::Read)?;
+                self.expr(y, scope, Use::Read)?;
+                self.expr(width, scope, Use::Read)?;
+                self.expr(height, scope, Use::Read)?;
+            }
+            Expr::GuiNextEvent | Expr::GuiEventControl => {}
+            Expr::GuiControlText(control) => self.expr(control, scope, Use::Read)?,
+            Expr::GuiConfirm(text) => self.expr(text, scope, Use::Read)?,
             Expr::Call(name, args) => {
                 // A borrowed parameter is a read-only view of its argument, so
                 // passing an owned value to it does not move the value.

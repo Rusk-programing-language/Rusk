@@ -28,6 +28,13 @@ syscalls.
 
 ## Status
 
+v1.2.1 adds `fastlib/simple`, a native GUI library written in Rusk. A small set
+of GUI primaries creates real Win32 windows, buttons, labels, and fields on
+Windows x86-64; the rest of the library — geometry, events, dialogs, themes,
+menus, layouts, and text helpers — is ordinary `.rk` code under `fastlib/`. On
+Linux and AArch64 the same source checks and bakes with the GUI primaries as
+safe no-ops. See [Simple GUI library](#simple-gui-library).
+
 v1.2.0 is the debugging-and-errors release. The prompt colours Rusk code as
 you type it, moves by word with Ctrl/Alt+Left and Ctrl/Alt+Right, and has a
 built-in `rdb` debugger: `:rdb [file.rk]` or `rusk rdb [file.rk]` steps
@@ -129,7 +136,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.2.0
+sh toastset --version 1.2.1
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -161,7 +168,7 @@ build with `curl.exe`, unpacks it with `tar.exe`, and adds it to your user
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
 # To pin a release instead of taking the latest, replace the line above with:
-# $tag = 'v1.2.0'
+# $tag = 'v1.2.1'
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -196,7 +203,7 @@ for each target. A toast defaults to both Linux architectures:
 $ rusk toast hello.rk
 toasted hello.rk -> hello.tst (34.2 KB, aarch64, x86_64, 0 dependencies)
 $ rusk check hello.tst
-hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.2.0)
+hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.2.1)
   aarch64: 6.8 KB code, 355 B data, 1088.2 KB zeroed
   x86_64: 25.8 KB code, 355 B data, 1088.2 KB zeroed
 $ rusk run hello.tst             # runs the host image
@@ -429,17 +436,19 @@ say units.convert with 3
 say pad_left with "x"
 ```
 
-A bare module name is resolved next to the importing file, then in `ruskmods/`
-and `rusklib/` beside it and in each parent directory. That means `import "math"`
-works from a program at the checkout root and from one in `examples/`, and
-`import "wheat/table"` finds `rusklib/wheat/table.rk`.
+A bare module name is resolved next to the importing file, then in `ruskmods/`,
+`rusklib/`, and `fastlib/` beside it and in each parent directory. That means
+`import "math"` works from a program at the checkout root and from one in
+`examples/`, `import "wheat/table"` finds `rusklib/wheat/table.rk`, and
+`import "simple/simple"` finds `fastlib/simple/simple.rk`.
 
 The checkout ships small Rusk libraries under `ruskmods/`: `math`, `date`,
 `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`, and
 `shutils`. `ruskmods/installwork/` is an installer framework with a registry,
 version specs, a dependency resolver, archives, an install prefix, and a CLI.
 The `rusklib/` folder adds higher-level file and archive helpers, the `wheat`
-terminal UI library, and a bundle that imports everything:
+terminal UI library, and a bundle that imports everything. `fastlib/` holds
+libraries built on language primaries, starting with the `simple` GUI:
 
 ```rusk
 import "rusklib/rusklib"
@@ -449,10 +458,11 @@ say wheat_box_around with "hello" and 0 and "rounded"
 ```
 
 Every public name carries its module's prefix (`date_`, `files_`, `wheat_`,
-and so on) because a plain import shares one global namespace. Import one
-module directly when a program does not need the bundle. See
-[`ruskmods/README.md`](ruskmods/README.md) and
-[`rusklib/README.md`](rusklib/README.md) for the function lists.
+`simple_`, and so on) because a plain import shares one global namespace. Import
+one module directly when a program does not need the bundle. See
+[`ruskmods/README.md`](ruskmods/README.md),
+[`rusklib/README.md`](rusklib/README.md), and
+[`fastlib/README.md`](fastlib/README.md) for the function lists.
 
 A line containing only `end`, `end.`, `<e>`, `</e>`, or `end of file` stops the
 file there, so chained or concatenated files do not run into each other. That
@@ -568,6 +578,46 @@ Everything is line-based, blocks are colon-plus-indentation, and `#` starts a
 comment. Full reference: [docs/SPEC.md](docs/SPEC.md). A hands-on tour lives in
 the [guide](guide/README.md).
 
+## Simple GUI library
+
+v1.2.1 ships [`fastlib/simple`](fastlib/simple/README.md), a small native GUI
+library written in Rusk. Its `core.rk` uses a handful of GUI primaries; the
+other thirty modules are ordinary `.rk` files for geometry, events, dialogs,
+layouts, themes, and text. Import the whole bundle or just one file:
+
+```rusk
+import "simple/simple"
+
+let window be simple_window with "Hello" and 320 and 200
+let button be simple_button with window and "Press" and 10 and 10 and 100 and 30
+simple_window_open with window
+let running be true
+while running:
+    let event be simple_event_wait
+    if event is "close":
+        set running to false
+    if event is "click":
+        if (simple_event_id) is button:
+            simple_control_set_text with button and "Thanks"
+simple_window_exit
+```
+
+Bake a GUI program for Windows x86-64:
+
+```console
+rusk build app.rk --target windows -o app.exe
+```
+
+The window and controls are real Win32 objects. The PE still imports only
+`kernel32.dll`; `user32.dll` functions are resolved at runtime with
+`LoadLibraryA` and `GetProcAddress`. Events (`""`, `click`, `change`, `close`)
+are recorded by a hand-emitted `WndProc` and read by the Rusk loop, so there are
+no language callbacks. On Linux and AArch64 the same GUI syntax checks and
+bakes as safe no-ops. Native support is currently buttons, labels, fields,
+message boxes, and confirm boxes; frames, menus, canvases, and drag-and-drop
+are Rusk-level models. See the
+[`simple` README](fastlib/simple/README.md) for every module and primary.
+
 ## The prompt
 
 `rusk` with no arguments runs a nearby `Ruskfile` if it finds one, and otherwise
@@ -579,7 +629,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.2.0 — an English-like language
+Rusk 1.2.1 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -800,7 +850,7 @@ Runtime facts worth knowing:
   relocation pass. Data addresses are patched into the finished machine code,
   so growing the text section moves the data instead of colliding with it.
 
-## What v1.2.0 doesn't do yet
+## What v1.2.1 doesn't do yet
 
 Honest list, so the docs don't lie:
 
@@ -842,8 +892,11 @@ Honest list, so the docs don't lie:
 - Toast files are whole-program containers, not relocatable objects or a linker.
   They cannot be combined, patched, or linked with other code, and they carry
   no signature. A toast holds at most 8 target images.
-- GUI toolkits, pthread-style threads, and a package registry are not in this
-  release. They are later layers, not a claim of v1.2.0.
+- The `simple` GUI is deliberately small: native buttons, labels, fields, text
+  messages, and yes/no boxes. Menus, frames, canvases, and drag-and-drop are
+  Rusk-level models rendered into labels; native versions would need more
+  primaries. pthread-style threads and a package registry are still later
+  layers.
 - The x86-64 register allocator works within straight-line blocks and spills at
   every branch and call. It is much closer to AArch64 than the old
   memory-backed encoder, but it is not a global allocator yet.

@@ -1,0 +1,30 @@
+# style.rk — space-separated style specifications such as "strong quiet".
+
+import "constants"
+import "textbox"
+import "theme"
+
+to simple_style_tokens with spec as view of text:
+    give back simple_text_split with spec and " "
+
+to simple_style_has with spec as view of text and token as view of text:
+    let tokens be simple_style_tokens with spec
+    let i be 1
+    while i is at most length of tokens:
+        if (item i of tokens) is token:
+            give back true
+        set i to i + 1
+    give back false
+
+# Apply the first recognised style in `spec` to `body`.
+to simple_style_render with spec as view of text and body as view of text:
+    if simple_style_has with spec and simple_style_strong:
+        give back simple_theme_decorate with simple_style_strong and body
+    if simple_style_has with spec and simple_style_quiet:
+        give back simple_theme_decorate with simple_style_quiet and body
+    if simple_style_has with spec and simple_style_danger:
+        give back simple_theme_decorate with simple_style_danger and body
+    give back copy of body
+
+to simple_style_plain_text with body as view of text:
+    give back simple_theme_decorate with simple_style_plain and body

@@ -1,0 +1,25 @@
+# frame.rk — labelled rectangles for grouping controls.
+#
+# The native `simple` controls are buttons, labels, and fields, so a frame is
+# represented by a rectangle plus a static label. Programs keep the rectangle
+# as a list of four numbers and pass it to the `*_at` helpers.
+
+import "geometry"
+import "label"
+
+to simple_frame_rect with x as a number and y as a number and width as a number and height as a number:
+    give back simple_rect with x and y and width and height
+
+# The text drawn above a frame. The extra spaces keep it clear of the border.
+to simple_frame_title with title as view of text:
+    give back "  " + title + "  "
+
+# Create the label that names a frame.
+to simple_frame_label with window as a number and title as view of text and rect as a view of a list of numbers:
+    let caption be simple_frame_title with title
+    let width be length of caption * 8
+    give back simple_label_new with window and caption and (item 1 of rect) and (item 2 of rect) and width and 22
+
+# Move a frame's inner rectangle down to leave room for its title.
+to simple_frame_body with rect as a view of a list of numbers:
+    give back simple_rect with (item 1 of rect) + 8 and (item 2 of rect) + 24 and (item 3 of rect) - 16 and (item 4 of rect) - 32

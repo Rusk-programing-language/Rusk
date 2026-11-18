@@ -1,0 +1,30 @@
+# demo.rk — a small window that uses the simple library.
+#
+# Bake it for Windows with:
+#
+#     rusk build fastlib/simple/demo.rk --target windows -o simple-demo.exe
+#
+# On other targets the GUI primaries are no-ops, so `rusk check demo.rk` still
+# verifies every helper in the file.
+
+import "simple"
+
+to simple_demo:
+    let window be simple_window with "Simple demo" and 420 and 260
+    let heading be simple_label with window and "Simple library demo" and 20 and 16 and 360 and 28
+    let rect be simple_rect with 20 and 56 and 300 and 36
+    let button be simple_button_at with window and "Press me" and rect
+    let status be simple_label with window and "Waiting for a click" and 20 and 206 and 360 and 28
+    simple_window_open with window
+
+    let running be true
+    while running:
+        let event be simple_event_wait
+        if event is simple_event_close:
+            set running to false
+        if event is simple_event_click:
+            if (simple_event_id) is button:
+                simple_control_set_text with status and "Thank you for the click"
+    simple_window_exit
+
+simple_demo

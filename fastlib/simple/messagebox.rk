@@ -1,0 +1,30 @@
+# messagebox.rk — the small native message and confirm boxes.
+
+import "core"
+import "textbox"
+
+to simple_message_show with text as view of text:
+    simple_message with text
+
+to simple_message_info with text as view of text:
+    simple_message with text
+
+to simple_message_warn with text as view of text:
+    simple_message with ("Warning: " + text)
+
+to simple_message_error with text as view of text:
+    simple_message with ("Error: " + text)
+
+# A yes/no question. Gives back a truth value.
+to simple_message_ask with text as view of text:
+    give back simple_confirm with text
+
+# Show several lines as one message.
+to simple_message_lines with lines as a view of a list of text:
+    let body be simple_text_join with lines and "\n"
+    simple_message with body
+
+# Show a message only when `condition` is true.
+to simple_message_when with text as view of text and condition as a truth value:
+    if condition:
+        simple_message with text

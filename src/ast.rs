@@ -329,8 +329,40 @@ pub enum Expr {
     },
     /// `read key` — one byte from standard input as text.
     ReadKey,
+    /// `make simple window titled TITLE wide W high H` — a native window.
+    GuiWindow {
+        title: Box<Expr>,
+        width: Box<Expr>,
+        height: Box<Expr>,
+    },
+    /// `add simple button/label/field to WINDOW labelled TEXT at X and Y sized W and H`.
+    GuiControl {
+        window: Box<Expr>,
+        kind: GuiControlKind,
+        text: Box<Expr>,
+        x: Box<Expr>,
+        y: Box<Expr>,
+        width: Box<Expr>,
+        height: Box<Expr>,
+    },
+    /// `next simple event` — the next event's kind as text.
+    GuiNextEvent,
+    /// `simple event control` — the control number of the last event.
+    GuiEventControl,
+    /// `simple text of CONTROL` — the current text of a control.
+    GuiControlText(Box<Expr>),
+    /// `simple confirm with TEXT` — a yes/no message box.
+    GuiConfirm(Box<Expr>),
     Unary(UnOp, Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
+}
+
+/// Which native control a `simple` GUI expression creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuiControlKind {
+    Button,
+    Label,
+    Field,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -441,6 +473,20 @@ pub enum Stmt {
         on: bool,
         line: usize,
     },
+    /// `show simple window WINDOW` — show the window and its controls.
+    GuiShow(Expr, usize),
+    /// `set simple text of CONTROL to TEXT`.
+    GuiSetText {
+        control: Expr,
+        text: Expr,
+        line: usize,
+    },
+    /// `show simple message TEXT` — a one-button message box.
+    GuiMessage(Expr, usize),
+    /// `pump simple events` — deliver waiting Windows messages.
+    GuiPump(usize),
+    /// `close simple window` — close the GUI window.
+    GuiClose(usize),
     If {
         cond: Expr,
         then: Vec<Stmt>,
@@ -577,11 +623,41 @@ fn collect_free_expr(
             collect_free_expr(from, bound, free, seen);
             collect_free_expr(to, bound, free, seen);
         }
+        Expr::GuiWindow {
+            title,
+            width,
+            height,
+        } => {
+            collect_free_expr(title, bound, free, seen);
+            collect_free_expr(width, bound, free, seen);
+            collect_free_expr(height, bound, free, seen);
+        }
+        Expr::GuiControl {
+            window,
+            text,
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => {
+            collect_free_expr(window, bound, free, seen);
+            collect_free_expr(text, bound, free, seen);
+            collect_free_expr(x, bound, free, seen);
+            collect_free_expr(y, bound, free, seen);
+            collect_free_expr(width, bound, free, seen);
+            collect_free_expr(height, bound, free, seen);
+        }
+        Expr::GuiControlText(inner) | Expr::GuiConfirm(inner) => {
+            collect_free_expr(inner, bound, free, seen)
+        }
         Expr::EmptyArray(_)
         | Expr::ReadLine
         | Expr::ReadAll
         | Expr::AllArguments
-        | Expr::ReadKey => {}
+        | Expr::ReadKey
+        | Expr::GuiNextEvent
+        | Expr::GuiEventControl => {}
     }
 }
 
@@ -671,6 +747,14 @@ fn collect_free_stmts(
                 collect_free_expr(socket, bound, free, seen);
             }
             Stmt::RawTerminal { .. } => {}
+            Stmt::GuiShow(expr, _) | Stmt::GuiMessage(expr, _) => {
+                collect_free_expr(expr, bound, free, seen)
+            }
+            Stmt::GuiPump(_) | Stmt::GuiClose(_) => {}
+            Stmt::GuiSetText { control, text, .. } => {
+                collect_free_expr(control, bound, free, seen);
+                collect_free_expr(text, bound, free, seen);
+            }
             Stmt::If {
                 cond, then, other, ..
             } => {
@@ -733,6 +817,11 @@ impl Stmt {
             | Stmt::Send { line, .. }
             | Stmt::Close { line, .. }
             | Stmt::RawTerminal { line, .. }
+            | Stmt::GuiShow(_, line)
+            | Stmt::GuiSetText { line, .. }
+            | Stmt::GuiMessage(_, line)
+            | Stmt::GuiPump(line)
+            | Stmt::GuiClose(line)
             | Stmt::If { line, .. }
             | Stmt::Repeat { line, .. }
             | Stmt::While { line, .. }

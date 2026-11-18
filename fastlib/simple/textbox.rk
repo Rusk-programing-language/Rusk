@@ -1,0 +1,202 @@
+# textbox.rk — plain text helpers used by the higher `simple` modules.
+#
+# These are ordinary Rusk functions; they give back text or lists of text and
+# never touch a window. Keeping them here lets labels, menus, and dialogs share
+# one small vocabulary.
+
+# Join a list of text with a separator between neighbouring items.
+to simple_text_join with lines as a view of a list of text and separator as view of text:
+    let out be ""
+    let i be 1
+    while i is at most length of lines:
+        if i is more than 1:
+            set out to out + separator
+        set out to out + (item i of lines)
+        set i to i + 1
+    give back out
+
+# The 1-based position of `needle` in `body` at or after `start`, or 0.
+to simple_text_find_from with body as view of text and needle as view of text and start as a number:
+    let n be length of body
+    let m be length of needle
+    if m is 0:
+        give back 0
+    if start is less than 1:
+        give back 0
+    if start + m - 1 is more than n:
+        give back 0
+    let i be start
+    while i + m - 1 is at most n:
+        if (part i to (i + m - 1) of body) is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+# Split text on every occurrence of `separator`. An empty separator gives back
+# a one-item list holding the whole text.
+to simple_text_split with body as view of text and separator as view of text:
+    let pieces be an empty list of text
+    if separator is "":
+        add (copy of body) to pieces
+        give back pieces
+    let start be 1
+    while true:
+        let found be simple_text_find_from with body and separator and start
+        if found is 0:
+            add (part start to length of body of body) to pieces
+            break
+        add (part start to (found - 1) of body) to pieces
+        set start to found + length of separator
+    give back pieces
+
+to simple_text_lines with body as view of text:
+    give back simple_text_split with body and "\n"
+
+to simple_text_words with body as view of text:
+    give back simple_text_split with body and " "
+
+# `body` written next to itself `n` times. A count below one gives empty text.
+to simple_text_repeat with body as view of text and n as a number:
+    let out be ""
+    let i be 0
+    while i is less than n:
+        set out to out + body
+        set i to i + 1
+    give back out
+
+# Pad on the right until the text is `width` bytes long.
+to simple_text_pad_right with body as view of text and width as a number:
+    let missing be width - length of body
+    give back body + (simple_text_repeat with " " and missing)
+
+to simple_text_pad_left with body as view of text and width as a number:
+    let missing be width - length of body
+    give back (simple_text_repeat with " " and missing) + body
+
+to simple_text_center with body as view of text and width as a number:
+    let missing be width - length of body
+    if missing is at most 0:
+        give back copy of body
+    let left be missing / 2
+    let right be missing - left
+    give back (simple_text_repeat with " " and left) + body + (simple_text_repeat with " " and right)
+
+# A number as decimal text, with a leading minus when needed.
+to simple_number_text with n as a number:
+    if n is 0:
+        give back "0"
+    let value be n
+    let negative be false
+    if value is less than 0:
+        set negative to true
+        set value to 0 - value
+    let digits be ""
+    while value is more than 0:
+        let digit be value - (value / 10) * 10
+        set digits to (letter (digit + 1) of "0123456789") + digits
+        set value to value / 10
+    if negative:
+        give back "-" + digits
+    give back digits
+
+# Read a decimal number at the start of text. Non-digits give 0.
+to simple_number_from_text with body as view of text:
+    let n be length of body
+    let i be 1
+    while i is at most n and (letter i of body) is less than "0":
+        set i to i + 1
+    let value be 0
+    while i is at most n and (letter i of body) is at most "9":
+        let digit be 0
+        let ch be letter i of body
+        if ch is "0":
+            set digit to 0
+        otherwise if ch is "1":
+            set digit to 1
+        otherwise if ch is "2":
+            set digit to 2
+        otherwise if ch is "3":
+            set digit to 3
+        otherwise if ch is "4":
+            set digit to 4
+        otherwise if ch is "5":
+            set digit to 5
+        otherwise if ch is "6":
+            set digit to 6
+        otherwise if ch is "7":
+            set digit to 7
+        otherwise if ch is "8":
+            set digit to 8
+        otherwise if ch is "9":
+            set digit to 9
+        set value to value * 10 + digit
+        set i to i + 1
+    give back value
+
+to simple_text_starts_with with body as view of text and prefix as view of text:
+    let n be length of prefix
+    if n is 0:
+        give back true
+    if length of body is less than n:
+        give back false
+    give back (part 1 to n of body) is prefix
+
+to simple_text_ends_with with body as view of text and suffix as view of text:
+    let n be length of suffix
+    if n is 0:
+        give back true
+    let m be length of body
+    if m is less than n:
+        give back false
+    give back (part (m - n + 1) to m of body) is suffix
+
+# The 1-based position of the last `needle`, or 0 when it is absent.
+to simple_text_find_last with body as view of text and needle as view of text:
+    let found be simple_text_find_from with body and needle and 1
+    let last be 0
+    while found is not 0:
+        set last to found
+        set found to simple_text_find_from with body and needle and (found + length of needle)
+    give back last
+
+# Remove spaces, tabs, newlines, and carriage returns from both ends.
+to simple_text_trim with body as view of text:
+    let n be length of body
+    let start be 1
+    while start is at most n:
+        let ch be letter start of body
+        if ch is " " or ch is "\t" or ch is "\n" or ch is "\r":
+            set start to start + 1
+        otherwise:
+            break
+    if start is more than n:
+        give back ""
+    let finish be n
+    while finish is at least start:
+        let tail be letter finish of body
+        if tail is " " or tail is "\t" or tail is "\n" or tail is "\r":
+            set finish to finish - 1
+        otherwise:
+            break
+    give back part start to finish of body
+
+# Wrap words so each line is at most `width` bytes. Very long words stay whole.
+to simple_text_wrap with body as view of text and width as a number:
+    let lines be an empty list of text
+    let words be simple_text_words with body
+    let current be ""
+    let i be 1
+    while i is at most length of words:
+        let word be item i of words
+        if current is "":
+            set current to word
+        otherwise:
+            if length of current + 1 + length of word is at most width:
+                set current to current + " " + word
+            otherwise:
+                add current to lines
+                set current to word
+        set i to i + 1
+    if current is not "":
+        add current to lines
+    give back lines

@@ -1,0 +1,29 @@
+# ttk.rk — themed wrappers around the native `simple` controls.
+#
+# The native set is small: button, label, and field. `ttk` adds a theme name to
+# each of them and returns the same control numbers, so event handling is
+# unchanged.
+
+import "button"
+import "label"
+import "field"
+import "theme"
+import "style"
+
+to simple_ttk_button with window as a number and text as view of text and rect as a view of a list of numbers and theme_name as view of text:
+    let caption be simple_theme_decorate with theme_name and text
+    give back simple_button_at with window and caption and rect
+
+to simple_ttk_label with window as a number and text as view of text and rect as a view of a list of numbers and theme_name as view of text:
+    let caption be simple_theme_decorate with theme_name and text
+    give back simple_label_at with window and caption and rect
+
+to simple_ttk_field with window as a number and text as view of text and rect as a view of a list of numbers and spec as view of text:
+    let caption be simple_style_render with spec and text
+    give back simple_field_at with window and caption and rect
+
+to simple_ttk_styles:
+    give back simple_theme_names
+
+to simple_ttk_apply with spec as view of text and body as view of text:
+    give back simple_style_render with spec and body

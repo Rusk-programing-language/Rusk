@@ -454,6 +454,35 @@ fn infer_stmts(
                 infer_number(socket, "close", "a connection number", scope, sigs, *line)?;
             }
             Stmt::RawTerminal { .. } => {}
+            Stmt::GuiShow(window, line) => {
+                infer_number(
+                    window,
+                    "show simple window",
+                    "a window number",
+                    scope,
+                    sigs,
+                    *line,
+                )?;
+            }
+            Stmt::GuiSetText {
+                control,
+                text,
+                line,
+            } => {
+                infer_number(
+                    control,
+                    "set simple text",
+                    "a control number",
+                    scope,
+                    sigs,
+                    *line,
+                )?;
+                infer_text_path(text, "set simple text", scope, sigs, *line)?;
+            }
+            Stmt::GuiMessage(text, line) => {
+                infer_text_path(text, "show simple message", scope, sigs, *line)?;
+            }
+            Stmt::GuiPump(_) | Stmt::GuiClose(_) => {}
             Stmt::If {
                 cond,
                 then,
@@ -1007,6 +1036,50 @@ fn type_of(e: &Expr, scope: &Scope, sigs: &Sigs) -> Result<Option<Ty>, String> {
             Ok(Some(Ty::Str))
         }
         Expr::ReadKey => Ok(Some(Ty::Str)),
+        Expr::GuiWindow {
+            title,
+            width,
+            height,
+        } => {
+            infer_text_path(title, "make simple window", scope, sigs, 0)?;
+            infer_number(width, "make simple window", "a width", scope, sigs, 0)?;
+            infer_number(height, "make simple window", "a height", scope, sigs, 0)?;
+            Ok(Some(Ty::Int))
+        }
+        Expr::GuiControl {
+            window,
+            text,
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => {
+            infer_number(
+                window,
+                "add simple control",
+                "a window number",
+                scope,
+                sigs,
+                0,
+            )?;
+            infer_text_path(text, "add simple control", scope, sigs, 0)?;
+            infer_number(x, "add simple control", "an x position", scope, sigs, 0)?;
+            infer_number(y, "add simple control", "a y position", scope, sigs, 0)?;
+            infer_number(width, "add simple control", "a width", scope, sigs, 0)?;
+            infer_number(height, "add simple control", "a height", scope, sigs, 0)?;
+            Ok(Some(Ty::Int))
+        }
+        Expr::GuiNextEvent => Ok(Some(Ty::Str)),
+        Expr::GuiEventControl => Ok(Some(Ty::Int)),
+        Expr::GuiControlText(control) => {
+            infer_number(control, "simple text", "a control number", scope, sigs, 0)?;
+            Ok(Some(Ty::Str))
+        }
+        Expr::GuiConfirm(text) => {
+            infer_text_path(text, "simple confirm", scope, sigs, 0)?;
+            Ok(Some(Ty::Bool))
+        }
         Expr::Item(index, array) => {
             let it = type_of(index, scope, sigs)?;
             if let Some(t) = it {

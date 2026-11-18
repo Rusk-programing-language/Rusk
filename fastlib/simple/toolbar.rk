@@ -1,0 +1,26 @@
+# toolbar.rk — a row of buttons or a compact text strip.
+
+import "button"
+import "label"
+import "textbox"
+
+to simple_toolbar_render with actions as a view of a list of text:
+    give back simple_text_join with actions and "  "
+
+to simple_toolbar_label with window as a number and actions as a view of a list of text and rect as a view of a list of numbers:
+    let caption be simple_toolbar_render with actions
+    give back simple_label_at with window and caption and rect
+
+# Create one button per action and give back their control numbers.
+to simple_toolbar_buttons with window as a number and actions as a view of a list of text and x as a number and y as a number and gap as a number:
+    let ids be an empty list of numbers
+    let i be 1
+    let cursor be x
+    while i is at most length of actions:
+        let action be item i of actions
+        let width be length of action * 8 + 20
+        let id be simple_button_new with window and action and cursor and y and width and 28
+        add id to ids
+        set cursor to cursor + width + gap
+        set i to i + 1
+    give back ids

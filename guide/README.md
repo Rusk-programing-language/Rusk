@@ -6,9 +6,10 @@ directly, and the result is a standalone static ELF64 Linux executable with no
 runtime, no libc, and no dependencies. v1.1.6 added portable `.tst` toast files
 and an experimental Windows x86-64 `.exe` target; v1.1.7 extended that target
 with arguments, the environment, regular files, and raw terminal mode. v1.2.0
-adds the `rdb` debugger, live coloured editing, and numbered diagnostics.
+adds the `rdb` debugger, live coloured editing, and numbered diagnostics. v1.2.1
+adds the `simple` native GUI library under `fastlib/`.
 
-This guide is for v1.2.0. For the exact language rules, see
+This guide is for v1.2.1. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -121,7 +122,7 @@ with `curl.exe`, unpacks it with `tar.exe`, and adds it to the user `PATH`:
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
-# $tag = 'v1.2.0'   # uncomment to pin a release
+# $tag = 'v1.2.1'   # uncomment to pin a release
 $version = $tag.TrimStart('v')
 $asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
 $dest = Join-Path $env:LOCALAPPDATA 'Rusk'
@@ -145,7 +146,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.2.0 — code, baked ahead of time
+rusk 1.2.1 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -264,7 +265,7 @@ cannot be combined with other code.
 $ rusk toast hello.rk
 toasted hello.rk -> hello.tst (34.2 KB, aarch64, x86_64, 0 dependencies)
 $ rusk check hello.tst
-hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.2.0)
+hello.tst is an intact toast (aarch64, x86_64, source hello.rk, built with rusk 1.2.1)
   aarch64: 6.8 KB code, 355 B data, 1088.2 KB zeroed
   x86_64: 25.8 KB code, 355 B data, 1088.2 KB zeroed
 $ rusk run hello.tst              # runs the host image
@@ -931,21 +932,23 @@ full-screen session, `stop with` restores the terminal first.
 ## 9. Imports
 
 `import` includes another file once. A relative path is resolved next to the
-importing file, then in `ruskmods/` and `rusklib/` beside it, then in those same
-places in each parent directory, then in the current directory. Cycles are
-detected.
+importing file, then in `ruskmods/`, `rusklib/`, and `fastlib/` beside it, then
+in those same places in each parent directory, then in the current directory.
+Cycles are detected.
 
 ```rusk
 import "lib/greetings"
 import "math"                 # finds ruskmods/math.rk
 import "wheat/table"          # finds rusklib/wheat/table.rk
+import "simple/simple"        # finds fastlib/simple/simple.rk
 
 say greeting with "world"
 say math_square with 12
 ```
 
 A bare name (no slash) may also name a module directory, so `import "wheat"`
-finds `rusklib/wheat/wheat.rk`. This is why a program in `examples/` can write
+finds `rusklib/wheat/wheat.rk` and `import "simple"` finds
+`fastlib/simple/simple.rk`. This is why a program in `examples/` can write
 `import "math"` and still reach the checkout's modules.
 
 A plain import is textual inclusion into one global namespace. Modules that
@@ -1017,12 +1020,14 @@ The checkout also ships libraries written in Rusk. `ruskmods/` holds focused
 modules (`math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`,
 `os`, `path`, `shutils`) and the `installwork/` installer framework.
 `rusklib/` adds file and archive helpers, the `wheat/` terminal UI library, and
-one bundle:
+one bundle. `fastlib/` adds libraries whose bottom layer is a language primary,
+starting with the `simple/` GUI:
 
 ```rusk
 import "date"
 import "rusklib/files"
 import "wheat/wheat"
+import "simple/simple"
 
 say date_format_iso with 2026 and 11 and 12
 say files_exists with "notes.txt"
@@ -1040,11 +1045,14 @@ say files_size with "notes.txt"
 say wheat_bar with 3 and 10 and 10
 ```
 
-Each module keeps a prefix (`date_`, `path_`, `files_`, `wheat_`, ...) because a
-plain import shares one global namespace. See
+Each module keeps a prefix (`date_`, `path_`, `files_`, `wheat_`, `simple_`, ...)
+because a plain import shares one global namespace. See
 [`ruskmods/README.md`](../ruskmods/README.md),
-[`rusklib/README.md`](../rusklib/README.md), and
-[`rusklib/wheat/README.md`](../rusklib/wheat/README.md) for the full lists.
+[`rusklib/README.md`](../rusklib/README.md),
+[`rusklib/wheat/README.md`](../rusklib/wheat/README.md), and
+[`fastlib/README.md`](../fastlib/README.md) for the full lists. The
+[`simple` README](../fastlib/simple/README.md) explains the GUI primaries and
+every helper module.
 
 ## 10. The interactive session
 
@@ -1059,7 +1067,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.2.0 — an English-like language
+Rusk 1.2.1 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1356,9 +1364,8 @@ installs. The default prefix is `~/.rusk`.
 
 ## 14. What ships with Rusk
 
-Everything in this section is present in the v1.1.6 tree. It is ordinary Rusk
-source, not compiler magic, so it carries forward from release to release and
-you can read or copy it.
+Everything in this section is present in the v1.2.1 tree. The helper libraries
+are ordinary Rusk source, not compiler magic, so you can read or copy them.
 
 | Path | What it is |
 |---|---|
@@ -1367,6 +1374,7 @@ you can read or copy it.
 | `rusklib/files.rk` | file and directory helpers that copy, size, and walk trees |
 | `rusklib/rusklib.rk` | one import that pulls in the whole helper bundle |
 | `rusklib/wheat/` | **wheat**, the terminal UI library: widths, colours, styles, boxes, tables, progress bars, panels, layout, and themes |
+| `fastlib/simple/` | **simple**, the native GUI library: windows, buttons, labels, fields, events, dialogs, themes, and layouts |
 | `selfhost/interpreter.rk` | an integer-expression interpreter written in Rusk and compiled by Rusk |
 | `toastset` | the POSIX-shell installer that downloads a release and upgrades it in place |
 | `src/repl.rs`, `src/tui.rs` | the line session and the full-screen terminal session |
@@ -1390,11 +1398,38 @@ say wheat_bar_labelled with "build" and 5 and 20 and 40
 `truecolor` choose a colour depth. The same code renders in a pipe with colour
 disabled, which is handy for logs and tests.
 
+### simple
+
+`simple` is the GUI library in `fastlib/`. Its `core.rk` uses a handful of
+compiler primaries; everything above it is plain Rusk. Import the bundle or one
+module, then bake for Windows x86-64:
+
+```rusk
+import "simple/simple"
+
+let window be simple_window with "Hello" and 320 and 200
+let button be simple_button with window and "Press" and 10 and 10 and 100 and 30
+simple_window_open with window
+let event be simple_event_wait
+if event is "click":
+    if (simple_event_id) is button:
+        simple_control_set_text with button and "Thanks"
+simple_window_exit
+```
+
+```console
+rusk build app.rk --target windows -o app.exe
+```
+
+There are real Win32 windows, buttons, labels, and fields on Windows x86-64;
+elsewhere the primaries are no-ops so the same source still checks and bakes.
+`simple_event_wait` gives `""`, `click`, `change`, or `close`. See the
+[`simple` README](../fastlib/simple/README.md) for the module list.
+
 The installer, the wheat library, the Ruskfile task runner, and the
-`installwork/` package framework all landed in the v1.1.6 tree, on top of the
-v1.1.5 networking/terminal work and the earlier language releases. `cargo test`
-builds and exercises the language they are written in, and the files above are
-the supported copies — there is no separate download.
+`installwork/` package framework landed in the v1.1.6 tree; `simple` was added
+in v1.2.1. `cargo test` builds and exercises the language they are written in,
+and the files above are the supported copies — there is no separate download.
 
 ## 15. Project layout and testing
 
@@ -1489,6 +1524,7 @@ Implemented and checked:
 - A Rusk-in-Rusk interpreter (`selfhost/interpreter.rk`)
 - Standard modules under `ruskmods/`, the `installwork/` installer framework,
   and file helpers plus the `wheat/` terminal UI in `rusklib/`
+- Native GUI primaries on Windows x86-64 and the `simple/` library in `fastlib/`
 - A `Ruskfile` manifest and task runner, found automatically when `rusk` runs
   with no arguments
 
@@ -1497,11 +1533,12 @@ Not implemented yet:
 - Full compiler self-hosting; the interpreter is the bootstrap stage
 - A global x86-64 register allocator that keeps values across branches and
   calls
-- Threads, signals, GUI toolkits, and a networked package registry (the
-  `installwork/` registry is a local directory tree, not a server)
+- Threads, signals, a full GUI toolkit beyond `simple`'s controls, and a
+  networked package registry (the `installwork/` registry is a local directory
+  tree, not a server)
 - IPv6, UDP, DNS, TLS, socket timeouts, and non-blocking sockets
-- Windows beyond the current console milestone: `file exists`, directories,
-  process launch, sockets, and relocatable images
+- Windows beyond the current console and `simple` GUI milestone: `file exists`,
+  directories, process launch, sockets, and relocatable images
 - A toast linker; a toast is a whole program, not a relocatable object
 
 Backend limits worth knowing:

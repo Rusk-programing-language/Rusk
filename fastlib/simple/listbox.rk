@@ -1,0 +1,39 @@
+# listbox.rk — a selectable list rendered as multiline label text.
+
+import "label"
+import "control"
+
+to simple_listbox_render with items as a view of a list of text and selected as a number:
+    let text be ""
+    let i be 1
+    while i is at most length of items:
+        if i is more than 1:
+            set text to text + "\n"
+        if i is selected:
+            set text to text + "> " + (item i of items)
+        otherwise:
+            set text to text + "  " + (item i of items)
+        set i to i + 1
+    give back text
+
+to simple_listbox with window as a number and items as a view of a list of text and selected as a number and rect as a view of a list of numbers:
+    let text be simple_listbox_render with items and selected
+    give back simple_label_at with window and text and rect
+
+to simple_listbox_set with list as a number and items as a view of a list of text and selected as a number:
+    let text be simple_listbox_render with items and selected
+    simple_control_set_text with list and text
+
+to simple_listbox_next with selected as a number and count as a number:
+    if count is 0:
+        give back 0
+    if selected is at least count:
+        give back 1
+    give back selected + 1
+
+to simple_listbox_previous with selected as a number and count as a number:
+    if count is 0:
+        give back 0
+    if selected is at most 1:
+        give back count
+    give back selected - 1

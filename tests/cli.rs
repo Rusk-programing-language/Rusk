@@ -512,3 +512,141 @@ fn toastset_documents_the_optional_windows_startup_shortcut() {
     );
     assert!(installer.contains("Rusk.lnk"));
 }
+
+fn gui_source() -> &'static str {
+    concat!(
+        "let w be make simple window titled \"Hello\" wide 320 high 200\n",
+        "let b be add simple button to w labelled \"Press\" at 10 and 10 sized 100 and 30\n",
+        "show simple window w\n",
+        "pump simple events\n",
+        "let e be next simple event\n",
+        "say e\n",
+        "say simple event control\n",
+        "set simple text of b to \"Thanks\"\n",
+        "say simple text of b\n",
+        "show simple message \"Done\"\n",
+        "say simple confirm with \"OK?\"\n",
+        "close simple window\n",
+    )
+}
+
+#[test]
+fn simple_gui_syntax_checks_on_the_host_target() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-gui-check-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("gui.rk");
+    std::fs::write(&file, gui_source()).unwrap();
+
+    let out = Command::new(rusk())
+        .arg("check")
+        .arg(&file)
+        .output()
+        .expect("rusk should start");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("looks good"), "{stdout}");
+}
+
+#[test]
+fn a_windows_bake_of_simple_gui_links_user32_at_runtime() {
+    let dir = std::env::temp_dir().join(format!("rusk-cli-gui-pe-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("gui.rk");
+    let exe = dir.join("gui.exe");
+    std::fs::write(&file, gui_source()).unwrap();
+
+    let out = Command::new(rusk())
+        .arg("build")
+        .arg(&file)
+        .args(["--target", "windows"])
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("rusk should start");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let bytes = std::fs::read(&exe).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("windows-x86_64"), "{stdout}");
+    assert_eq!(&bytes[0..2], b"MZ");
+    let pe = u32::from_le_bytes(bytes[0x3C..0x40].try_into().unwrap()) as usize;
+    assert_eq!(&bytes[pe..pe + 4], b"PE\0\0");
+    for needle in [
+        b"LoadLibraryA".as_slice(),
+        b"GetProcAddress",
+        b"GetModuleHandleA",
+        b"user32.dll",
+        b"CreateWindowExA",
+        b"SimpleWindowClass",
+    ] {
+        assert!(
+            bytes.windows(needle.len()).any(|window| window == needle),
+            "missing {}",
+            String::from_utf8_lossy(needle)
+        );
+    }
+}
+
+#[test]
+fn fastlib_imports_resolve_from_a_nested_program() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = root
+        .join("target")
+        .join(format!("rusk-cli-fastlib-import-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("gui.rk");
+    std::fs::write(
+        &file,
+        "import \"simple/event\"\nlet e be simple_event_wait\nsay e\n",
+    )
+    .unwrap();
+
+    let out = Command::new(rusk())
+        .arg("check")
+        .arg(&file)
+        .output()
+        .expect("rusk should start");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("looks good"), "{stdout}");
+}
+
+#[test]
+fn every_fastlib_simple_module_checks() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let folder = root.join("fastlib").join("simple");
+    let mut files: Vec<_> = std::fs::read_dir(&folder)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rk"))
+        .collect();
+    files.sort();
+    assert!(
+        files.len() >= 30,
+        "expected the simple bundle, got {}",
+        files.len()
+    );
+
+    for file in files {
+        let out = Command::new(rusk())
+            .arg("check")
+            .arg(&file)
+            .output()
+            .expect("rusk should start");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "{} failed: {stdout}{stderr}",
+            file.display()
+        );
+    }
+}

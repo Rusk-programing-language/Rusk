@@ -1,0 +1,16 @@
+# statusbar.rk — a single-line status label, usually at the window bottom.
+
+import "label"
+import "control"
+
+to simple_statusbar with window as a number and text as view of text and rect as a view of a list of numbers:
+    give back simple_label_at with window and text and rect
+
+to simple_statusbar_set with bar as a number and text as view of text:
+    simple_control_set_text with bar and text
+
+to simple_statusbar_ready with window as a number and rect as a view of a list of numbers:
+    give back simple_label_at with window and "Ready" and rect
+
+to simple_statusbar_busy with window as a number and rect as a view of a list of numbers:
+    give back simple_label_at with window and "Working..." and rect

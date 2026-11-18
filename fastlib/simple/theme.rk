@@ -1,0 +1,38 @@
+# theme.rk — a handful of named text styles for simple controls.
+#
+# A theme is just a name. The `decorate` helpers return the text a control
+# should show, so the native control itself stays unchanged.
+
+import "constants"
+import "textbox"
+
+to simple_theme_names:
+    give back ["plain", "strong", "quiet", "danger"]
+
+to simple_theme_default:
+    give back copy of simple_style_plain
+
+to simple_theme_label with name as view of text:
+    if name is simple_style_plain:
+        give back "Plain"
+    if name is simple_style_strong:
+        give back "Strong"
+    if name is simple_style_quiet:
+        give back "Quiet"
+    if name is simple_style_danger:
+        give back "Danger"
+    give back copy of name
+
+to simple_theme_valid with name as view of text:
+    let names be simple_text_join with (simple_theme_names) and " "
+    give back (simple_text_find_from with names and name and 1) is not 0
+
+# Wrap `body` according to the named theme.
+to simple_theme_decorate with name as view of text and body as view of text:
+    if name is simple_style_strong:
+        give back "**" + body + "**"
+    if name is simple_style_quiet:
+        give back "[" + body + "]"
+    if name is simple_style_danger:
+        give back "!" + body + "!"
+    give back copy of body

@@ -1,0 +1,57 @@
+# geometry.rk — small rectangles and placement helpers.
+#
+# A rectangle is a list of four numbers in this order: x, y, width, height.
+# Lists are homogeneous in Rusk, so rectangles hold only numbers.
+
+to simple_rect with x as a number and y as a number and width as a number and height as a number:
+    give back [x, y, width, height]
+
+to simple_rect_x with rect as a view of a list of numbers:
+    give back item 1 of rect
+
+to simple_rect_y with rect as a view of a list of numbers:
+    give back item 2 of rect
+
+to simple_rect_width with rect as a view of a list of numbers:
+    give back item 3 of rect
+
+to simple_rect_height with rect as a view of a list of numbers:
+    give back item 4 of rect
+
+to simple_rect_right with rect as a view of a list of numbers:
+    give back (item 1 of rect) + (item 3 of rect)
+
+to simple_rect_bottom with rect as a view of a list of numbers:
+    give back (item 2 of rect) + (item 4 of rect)
+
+to simple_rect_contains with rect as a view of a list of numbers and x as a number and y as a number:
+    if x is less than (item 1 of rect):
+        give back false
+    if y is less than (item 2 of rect):
+        give back false
+    if x is more than (simple_rect_right with rect):
+        give back false
+    if y is more than (simple_rect_bottom with rect):
+        give back false
+    give back true
+
+to simple_rect_grow with rect as a view of a list of numbers and pad as a number:
+    give back simple_rect with (item 1 of rect) - pad and (item 2 of rect) - pad and (item 3 of rect) + pad * 2 and (item 4 of rect) + pad * 2
+
+to simple_rect_inset with rect as a view of a list of numbers and pad as a number:
+    give back simple_rect with (item 1 of rect) + pad and (item 2 of rect) + pad and (item 3 of rect) - pad * 2 and (item 4 of rect) - pad * 2
+
+to simple_point with x as a number and y as a number:
+    give back [x, y]
+
+to simple_point_x with point as a view of a list of numbers:
+    give back item 1 of point
+
+to simple_point_y with point as a view of a list of numbers:
+    give back item 2 of point
+
+# The centre of a rectangle, as a two-number point.
+to simple_rect_center with rect as a view of a list of numbers:
+    let cx be (item 1 of rect) + (item 3 of rect) / 2
+    let cy be (item 2 of rect) + (item 4 of rect) / 2
+    give back simple_point with cx and cy

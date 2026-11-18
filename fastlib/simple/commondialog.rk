@@ -1,0 +1,28 @@
+# commondialog.rk — short `ask` names for the common dialogs.
+#
+# This mirrors the shape of Tk's commondialog module while keeping every name
+# under the `simple_` prefix. Import it when a program mostly asks questions.
+
+import "dialog"
+import "constants"
+
+to simple_ask_message with text as view of text:
+    simple_dialog_message with text
+
+to simple_ask_yes_no with text as view of text:
+    give back simple_dialog_question with text
+
+to simple_ask_file with path as text:
+    give back simple_dialog_open with path and "Open this file?"
+
+to simple_ask_save with path as text:
+    give back simple_dialog_save with path
+
+to simple_ask_color with name as view of text:
+    give back simple_dialog_color with name
+
+# Ask before replacing a value. Gives back the replacement when accepted.
+to simple_ask_replace with old as view of text and new as view of text:
+    if simple_dialog_question with ("Replace " + old + " with " + new + "?"):
+        give back copy of new
+    give back copy of old

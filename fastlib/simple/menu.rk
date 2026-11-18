@@ -1,0 +1,30 @@
+# menu.rk — text menus rendered as a label.
+#
+# Native menus are not part of the first `simple` control set. A menu here is a
+# list of item names that a program can query and display.
+
+import "textbox"
+import "label"
+
+to simple_menu_render with items as a view of a list of text:
+    give back simple_text_join with items and " | "
+
+to simple_menu_with_title with title as view of text and items as a view of a list of text:
+    give back title + ": " + (simple_menu_render with items)
+
+# 1-based position of an item, or 0 when it is absent.
+to simple_menu_find with items as a view of a list of text and label as view of text:
+    let i be 1
+    while i is at most length of items:
+        if (item i of items) is label:
+            give back i
+        set i to i + 1
+    give back 0
+
+to simple_menu_has with items as a view of a list of text and label as view of text:
+    give back (simple_menu_find with items and label) is not 0
+
+# Create the label that displays a menu bar.
+to simple_menu_label with window as a number and title as view of text and items as a view of a list of text and rect as a view of a list of numbers:
+    let caption be simple_menu_with_title with title and items
+    give back simple_label_at with window and caption and rect

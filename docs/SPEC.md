@@ -1,13 +1,15 @@
-# The Rusk Language — Specification v1.2.0
+# The Rusk Language — Specification v1.2.1
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v1.1
+emits native machine code directly. This document describes exactly what v1.2.1
 accepts and what it guarantees.
 
-Status: **v1.2.0, Linux on AArch64 and x86-64, plus experimental Windows
-x86-64 output**. The compiler also builds and runs on Windows x86-64. Toast
-files (`.tst`) can hold finished images for several targets. Everything here is
-implemented and tested; anything not here does not exist yet.
+Status: **v1.2.1, Linux on AArch64 and x86-64, plus experimental Windows
+x86-64 output**. The compiler also builds and runs on Windows x86-64. Windows
+x86-64 programs can create native GUI windows through the `simple` primaries;
+on other targets those primaries are safe no-ops. Toast files (`.tst`) can hold
+finished images for several targets. Everything here is implemented and tested;
+anything not here does not exist yet.
 
 ---
 
@@ -752,6 +754,7 @@ say call add5 with 10         # 15
 import "lib/greetings"
 import "math"                 # bare module name
 import "wheat/table"          # a module inside a library folder
+import "simple/simple"        # a module inside fastlib/
 ```
 
 The name is either text in quotes or a bare name; the `.rk` extension is
@@ -761,19 +764,20 @@ same. Several imports may appear at the top of one file.
 Resolution order, for a relative path:
 
 1. next to the file that wrote the import;
-2. inside `ruskmods/` and `rusklib/` next to that file;
-3. the same three places in each parent directory of that file;
-4. the same three places relative to the current directory.
+2. inside `ruskmods/`, `rusklib/`, and `fastlib/` next to that file;
+3. the same four places in each parent directory of that file;
+4. the same four places relative to the current directory.
 
 Each directory is checked completely before the next one, so a file beside the
 importing file always wins over an unrelated module with the same name. Within
 one directory the order is: the path as written, then the path inside
-`ruskmods/`, then inside `rusklib/`.
+`ruskmods/`, then inside `rusklib/`, then inside `fastlib/`.
 
 A bare name (no slash) also finds a module directory, so `import "math"` matches
-`ruskmods/math/math.rk` and `import "wheat"` matches `rusklib/wheat/wheat.rk`.
-The parent walk is what lets a program in `examples/` or `tests/` write
-`import "math"` and still find the checkout's `ruskmods/math.rk`.
+`ruskmods/math/math.rk`, `import "wheat"` matches `rusklib/wheat/wheat.rk`, and
+`import "simple"` matches `fastlib/simple/simple.rk`. The parent walk is what
+lets a program in `examples/` or `tests/` write `import "math"` and still find
+the checkout's `ruskmods/math.rk`.
 
 An absolute path is used as written. A file and a namespace are expanded **at
 most once** per bake, so several modules can import the same helper without
@@ -888,7 +892,7 @@ $ rusk
 ░█▀▄░█░█░▀▀█░█▀▄
 ░▀░▀░▀▀▀░▀▀▀░▀░▀
 
-Rusk 1.2.0 — an English-like language
+Rusk 1.2.1 — an English-like language
 Type :help for commands, :quit to leave.
 
 rusk> let who be "world"
@@ -1294,22 +1298,87 @@ value; the ownership pass is what prevents it from being moved or changed.
   window-size query, key decoder, color API, or cursor movement. On Windows the
   full-screen session falls back to the line-oriented REPL.
 - Linux is the supported output platform, on AArch64 and x86-64. Windows
-  x86-64 output is experimental and console-only: it maps console I/O, exit,
-  the heap, arguments, the environment, regular files, and raw terminal mode,
-  but not `file exists`, directories, process launch, or sockets. A Windows
-  program sees at most 1024 command-line words and uses simplified double-quote
-  rules. There is no macOS or 32-bit output. The compiler host can be Linux or
-  Windows x86-64; on Windows, `rusk build` and `rusk check` work, but `rusk run`
-  cannot start the Linux ELF natively. The x86-64 backend
+  x86-64 output is experimental: it maps console I/O, exit, the heap, arguments,
+  the environment, regular files, raw terminal mode, and the `simple` GUI
+  primaries, but not `file exists`, directories, process launch, or sockets. A
+  Windows program sees at most 1024 command-line words and uses simplified
+  double-quote rules. There is no macOS or 32-bit output. The compiler host can
+  be Linux or Windows x86-64; on Windows, `rusk build` and `rusk check` work,
+  but `rusk run` cannot start the Linux ELF natively. The GUI is native only on
+  Windows x86-64; elsewhere its primaries are typed no-ops. The x86-64 backend
   allocates registers within straight-line blocks and spills at branches and
   calls, so it is close to the AArch64 output but is not a global register
   allocator yet.
+- The GUI surface has only buttons, labels, fields, messages, and confirm
+  boxes. There is no native key event, menu, canvas, tree view, real
+  drag-and-drop, or HiDPI layout; the matching `fastlib/simple` modules are
+  Rusk-level models rendered into labels. Windows executables keep the CUI
+  subsystem, and the native GUI has been smoke-tested by baking a PE, not by a
+  Windows CI runner.
 - Toast files hold whole finished programs. They cannot be linked, combined,
   or patched, they contain no relocations or symbols, and they are unsigned.
   A toast holds at most 8 images and one image per target.
 - At most 128 parameters per function. There is no function overloading.
 
-## 16. Roadmap
+## 16. Simple GUI primaries
+
+v1.2.1 adds a small native GUI surface for Windows x86-64. A window and each
+control are numbers; a piece of text is the event kind or a control's title;
+`simple confirm with` gives back a truth value. These are language primaries,
+not Rusk functions, and the [`fastlib/simple`](../fastlib/simple/README.md)
+library wraps them with ordinary `.rk` helpers.
+
+| Form | Kind | Meaning |
+|---|---|---|
+| `make simple window titled TITLE wide W high H` | expression, number | create a hidden window |
+| `add simple button to W labelled TEXT at X and Y sized W and H` | expression, number | create a button |
+| `add simple label to W labelled TEXT at X and Y sized W and H` | expression, number | create a static label |
+| `add simple field to W labelled TEXT at X and Y sized W and H` | expression, number | create an edit field |
+| `show simple window W` | statement | show the window and start its message loop |
+| `close simple window` | statement | close the window and stop the loop |
+| `set simple text of C to TEXT` | statement | change a control's text |
+| `simple text of C` | expression, text | read a control's text |
+| `show simple message TEXT` | statement | show a one-button message box |
+| `simple confirm with TEXT` | expression, truth value | show a yes/no box |
+| `pump simple events` | statement | deliver pending messages once |
+| `next simple event` | expression, text | take the next recorded event |
+| `simple event control` | expression, number | the control number of the last event |
+
+The control forms use `labelled` rather than `with`: after an identifier,
+`with` starts an ordinary function call. `show simple window` must be reached
+before events arrive. Events are text: `""` for none, `click`, `change`, or
+`close`. The window procedure is emitted by the compiler and only records
+events into data slots; a Rusk program reads them in its own polling loop, so
+no callback crosses the language boundary. A typical loop is:
+
+```rusk
+let window be make simple window titled "Hi" wide 320 high 200
+let button be add simple button to window labelled "Press" at 10 and 10 sized 100 and 30
+show simple window window
+let running be true
+while running:
+    pump simple events
+    let event be next simple event
+    if event is "close":
+        set running to false
+    if event is "click":
+        if (simple event control) is button:
+            set simple text of button to "Thanks"
+close simple window
+```
+
+On Windows x86-64 the window and controls are real Win32 objects. The PE import
+table names only `kernel32.dll`: `user32.dll` is loaded at runtime with
+`LoadLibraryA` and the functions are resolved with `GetProcAddress`, avoiding a
+second DLL import descriptor. The emitted PE keeps the CUI subsystem. On Linux
+and AArch64, and in the REPL, every form above is a typed no-op: `check` and
+`bake` accept the same source, and no window appears.
+
+The `fastlib/simple` bundle provides the higher-level names (`simple_window`,
+`simple_button`, `simple_event_wait`, themes, dialogs, layouts, and more) in
+plain Rusk. Its native layer is only `core.rk`.
+
+## 17. Roadmap
 
 v1.1 implements everything the v1.0 roadmap listed: function-typed parameters,
 function values in lists, functions that give back functions, a
@@ -1319,7 +1388,9 @@ operations, the whole command line as a list, a growable heap, and 128
 parameters. v1.1.5 added IPv4 TCP sockets and raw terminal input. v1.1.6 added
 toast files and an experimental Windows x86-64 output. v1.1.7 fleshed out that
 Windows target with arguments, the environment, regular files, and raw terminal
-mode. What remains:
+mode. v1.2.0 added `rdb`, coloured editing, and numbered diagnostics. v1.2.1
+added the native `simple` GUI primaries and the `fastlib/` library folder. What
+remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression
@@ -1329,6 +1400,8 @@ mode. What remains:
 - broader systems primitives: threads, signals, and a package registry. IPv6,
   UDP, DNS, and TLS are also outside the current socket surface.
 - reusing memory for joined text instead of only list and input buffers.
-- Windows parity beyond the current console milestone: `file exists`,
+- Windows parity beyond the current console and GUI milestone: `file exists`,
   directories, process launch, sockets, and relocatable images. Toast files are
   not a linker and do not combine images.
+- more native GUI widgets (menus, canvas, trees, real drag-and-drop) and GUI
+  support beyond Windows x86-64.

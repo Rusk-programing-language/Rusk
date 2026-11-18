@@ -1,0 +1,59 @@
+# filedialog.rk — asking for paths and describing file filters.
+#
+# These helpers do not open a native file picker. They use the language's
+# `file exists` primary together with a yes/no message, so they bake on every
+# target and stay predictable in tests.
+
+import "core"
+import "constants"
+import "textbox"
+import "messagebox"
+
+# One filter line, for example "Text files (*.txt)".
+to simple_file_filter with name as view of text and extension as view of text:
+    give back name + " (*." + extension + ")"
+
+to simple_file_filters with filters as a view of a list of text:
+    give back simple_text_join with filters and ";;"
+
+to simple_file_exists with path as view of text:
+    give back file exists path
+
+# The part after the last slash.
+to simple_file_name with path as view of text:
+    let slash be simple_text_find_last with path and "/"
+    if slash is 0:
+        give back copy of path
+    give back part (slash + 1) to length of path of path
+
+# The part after the last dot, or empty text when there is no dot.
+to simple_file_extension with path as view of text:
+    let dot be simple_text_find_last with path and "."
+    if dot is 0:
+        give back ""
+    give back part (dot + 1) to length of path of path
+
+# Offer an existing path and give it back when the question is accepted.
+to simple_file_open_pick with path as text and question as view of text:
+    if file exists (copy of path):
+        if simple_confirm with question:
+            give back path
+    give back ""
+
+to simple_file_prompt with path as text and question as view of text:
+    give back simple_file_open_pick with path and question
+
+# Offer a save path. An existing path needs an overwrite confirmation.
+to simple_file_save_pick with path as text:
+    if file exists (copy of path):
+        if simple_confirm with ("Overwrite " + path + "?"):
+            give back path
+        give back ""
+    give back path
+
+# Give back the path when it exists; otherwise show a small error message.
+to simple_file_require with path as text:
+    if file exists (copy of path):
+        give back path
+    simple_message_error with ("I can't find " + path)
+    give back ""

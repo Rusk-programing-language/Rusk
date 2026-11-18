@@ -1,0 +1,33 @@
+# label.rk — static text labels.
+
+import "core"
+import "control"
+import "geometry"
+import "textbox"
+
+to simple_label with window as a number and text as view of text and x as a number and y as a number and width as a number and height as a number:
+    give back simple_label_new with window and text and x and y and width and height
+
+to simple_label_at with window as a number and text as view of text and rect as a view of a list of numbers:
+    give back simple_label_new with window and text and (item 1 of rect) and (item 2 of rect) and (item 3 of rect) and (item 4 of rect)
+
+to simple_label_text with label as a number:
+    give back simple_control_text with label
+
+to simple_label_set_text with label as a number and text as view of text:
+    simple_control_set_text with label and text
+
+# Word-wrap text into a label. The label's height grows with the line count.
+to simple_label_wrapped with window as a number and body as view of text and rect as a view of a list of numbers and column_width as a number:
+    let rows be simple_text_wrap with body and column_width
+    let text be ""
+    let i be 1
+    while i is at most length of rows:
+        if i is more than 1:
+            set text to text + "\n"
+        set text to text + (item i of rows)
+        set i to i + 1
+    let height be 20 * length of rows
+    if height is less than (item 4 of rect):
+        set height to item 4 of rect
+    give back simple_label_new with window and text and (item 1 of rect) and (item 2 of rect) and (item 3 of rect) and height

@@ -1,0 +1,41 @@
+# control.rk — shared operations for buttons, labels, and fields.
+
+import "core"
+import "constants"
+
+to simple_control_text_set with control as a number and text as view of text:
+    simple_control_set_text with control and text
+
+to simple_control_text_get with control as a number:
+    give back simple_control_text with control
+
+# True when the last event belongs to `control` and is of `expected` kind.
+to simple_control_is with control as a number and expected as view of text:
+    if expected is simple_event_click:
+        give back (simple_event_control) is control
+    give back false
+
+to simple_control_clicked with control as a number:
+    give back simple_control_is with control and simple_event_click
+
+to simple_control_changed with control as a number:
+    give back simple_control_is with control and simple_event_change
+
+to simple_control_clear with control as a number:
+    simple_control_set_text with control and ""
+
+to simple_control_append with control as a number and suffix as view of text:
+    let current be simple_control_text with control
+    simple_control_set_text with control and (current + suffix)
+
+# Rewrite a field's visible text with one mask character per byte. The native
+# edit control keeps the real text; this is a presentation helper for labels
+# and for simple password-style displays.
+to simple_control_mask with control as a number and mask as view of text:
+    let current be simple_control_text with control
+    let out be ""
+    let i be 1
+    while i is at most length of current:
+        set out to out + mask
+        set i to i + 1
+    simple_control_set_text with control and out

@@ -5,6 +5,8 @@
 //! generator is written once and the chosen target only changes the encoder and
 //! the ELF machine word.
 
+pub use crate::x86_64::WinArg;
+
 pub use crate::aarch64::{
     CC_EQ, CC_GE, CC_GT, CC_LE, CC_LT, CC_NE, IMAGE_BASE, SP, SYS_EXIT, SYS_WRITE, TEXT_OFFSET, X0,
     X1, X10, X11, X12, X13, X14, X15, X16, X17, X18, X19, X2, X20, X21, X22, X23, X24, X25, X26,
@@ -13,6 +15,48 @@ pub use crate::aarch64::{
 
 use crate::aarch64;
 use crate::x86_64;
+
+/// Scratch slots for the small native GUI runtime. User32 is loaded at runtime
+/// with `LoadLibraryA`/`GetProcAddress`, so the PE still needs only kernel32.
+pub const WIN_GUI_FLAG_OFFSET: u64 = 0x9000;
+pub const WIN_GUI_USER32_OFFSET: u64 = 0x9008;
+pub const WIN_GUI_HINSTANCE_OFFSET: u64 = 0x9010;
+pub const WIN_GUI_HWND_OFFSET: u64 = 0x9018;
+pub const WIN_GUI_NEXT_ID_OFFSET: u64 = 0x9020;
+pub const WIN_GUI_EVENT_COUNT_OFFSET: u64 = 0x9028;
+pub const WIN_GUI_EVENT_READ_OFFSET: u64 = 0x9030;
+pub const WIN_GUI_EVENT_KIND_OFFSET: u64 = 0x9038;
+pub const WIN_GUI_EVENT_CONTROL_OFFSET: u64 = 0x9040;
+pub const WIN_GUI_EVENT_VALUE_OFFSET: u64 = 0x9048;
+pub const WIN_GUI_WNDPROC_ARG1_OFFSET: u64 = 0x9050;
+pub const WIN_GUI_WNDPROC_ARG2_OFFSET: u64 = 0x9058;
+pub const WIN_GUI_WNDPROC_ARG3_OFFSET: u64 = 0x9060;
+pub const WIN_GUI_WNDPROC_ARG4_OFFSET: u64 = 0x9068;
+pub const WIN_GUI_TEMP_OFFSET: u64 = 0x9070;
+pub const WIN_GUI_WNDCLASS_OFFSET: u64 = 0x9080;
+pub const WIN_GUI_MSG_OFFSET: u64 = 0x90C0;
+pub const WIN_GUI_TEXT_OFFSET: u64 = 0x9100;
+pub const WIN_GUI_TEXT_CAPACITY: u64 = 4096;
+pub const WIN_GUI_END_OFFSET: u64 = 0xA200;
+
+/// Function-pointer slots, filled by `GetProcAddress` during GUI init.
+pub const WIN_GUI_FN_BASE: u64 = 0xA200;
+pub const WIN_GUI_FN_REGISTER_CLASS: u64 = WIN_GUI_FN_BASE;
+pub const WIN_GUI_FN_CREATE_WINDOW: u64 = WIN_GUI_FN_BASE + 8;
+pub const WIN_GUI_FN_SHOW_WINDOW: u64 = WIN_GUI_FN_BASE + 16;
+pub const WIN_GUI_FN_UPDATE_WINDOW: u64 = WIN_GUI_FN_BASE + 24;
+pub const WIN_GUI_FN_PEEK_MESSAGE: u64 = WIN_GUI_FN_BASE + 32;
+pub const WIN_GUI_FN_TRANSLATE_MESSAGE: u64 = WIN_GUI_FN_BASE + 40;
+pub const WIN_GUI_FN_DISPATCH_MESSAGE: u64 = WIN_GUI_FN_BASE + 48;
+pub const WIN_GUI_FN_DEF_WINDOW_PROC: u64 = WIN_GUI_FN_BASE + 56;
+pub const WIN_GUI_FN_POST_QUIT_MESSAGE: u64 = WIN_GUI_FN_BASE + 64;
+pub const WIN_GUI_FN_MESSAGE_BOX: u64 = WIN_GUI_FN_BASE + 72;
+pub const WIN_GUI_FN_GET_DLG_ITEM: u64 = WIN_GUI_FN_BASE + 80;
+pub const WIN_GUI_FN_SET_WINDOW_TEXT: u64 = WIN_GUI_FN_BASE + 88;
+pub const WIN_GUI_FN_GET_WINDOW_TEXT: u64 = WIN_GUI_FN_BASE + 96;
+pub const WIN_GUI_FN_GET_WINDOW_TEXT_LEN: u64 = WIN_GUI_FN_BASE + 104;
+pub const WIN_GUI_FN_DESTROY_WINDOW: u64 = WIN_GUI_FN_BASE + 112;
+pub const WIN_GUI_FN_END: u64 = WIN_GUI_FN_BASE + 120;
 
 /// Which instruction set and operating system a bake targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +426,21 @@ impl Asm {
     pub fn win_result(&mut self) {
         if let Inner::X86_64(a) = &mut self.inner {
             a.win_result();
+        }
+    }
+
+    /// Call an imported function whose address is stored in a writable slot.
+    /// Used by the `simple` GUI runtime, which resolves user32 at load time.
+    pub fn win_call_ptr(&mut self, slot: u64, argc: usize, stack_args: &[WinArg]) {
+        if let Inner::X86_64(a) = &mut self.inner {
+            a.win_call_ptr(slot, argc, stack_args);
+        }
+    }
+
+    /// Emit the hand-written `WndProc` used by the `simple` GUI window class.
+    pub fn win_emit_wndproc(&mut self, label: &str) {
+        if let Inner::X86_64(a) = &mut self.inner {
+            a.win_emit_wndproc(label);
         }
     }
 }

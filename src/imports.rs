@@ -400,6 +400,19 @@ impl Rewriter<'_> {
                 line,
             },
             Stmt::RawTerminal { on, line } => Stmt::RawTerminal { on, line },
+            Stmt::GuiShow(e, line) => Stmt::GuiShow(self.expr(e, locals), line),
+            Stmt::GuiSetText {
+                control,
+                text,
+                line,
+            } => Stmt::GuiSetText {
+                control: self.expr(control, locals),
+                text: self.expr(text, locals),
+                line,
+            },
+            Stmt::GuiMessage(e, line) => Stmt::GuiMessage(self.expr(e, locals), line),
+            Stmt::GuiPump(line) => Stmt::GuiPump(line),
+            Stmt::GuiClose(line) => Stmt::GuiClose(line),
             Stmt::If {
                 cond,
                 then,
@@ -541,6 +554,38 @@ impl Rewriter<'_> {
             Expr::ListDirectory(path) => Expr::ListDirectory(Box::new(self.expr(*path, locals))),
             Expr::FileExists(path) => Expr::FileExists(Box::new(self.expr(*path, locals))),
             Expr::AllArguments => Expr::AllArguments,
+            Expr::GuiWindow {
+                title,
+                width,
+                height,
+            } => Expr::GuiWindow {
+                title: Box::new(self.expr(*title, locals)),
+                width: Box::new(self.expr(*width, locals)),
+                height: Box::new(self.expr(*height, locals)),
+            },
+            Expr::GuiControl {
+                window,
+                kind,
+                text,
+                x,
+                y,
+                width,
+                height,
+            } => Expr::GuiControl {
+                window: Box::new(self.expr(*window, locals)),
+                kind,
+                text: Box::new(self.expr(*text, locals)),
+                x: Box::new(self.expr(*x, locals)),
+                y: Box::new(self.expr(*y, locals)),
+                width: Box::new(self.expr(*width, locals)),
+                height: Box::new(self.expr(*height, locals)),
+            },
+            Expr::GuiNextEvent => Expr::GuiNextEvent,
+            Expr::GuiEventControl => Expr::GuiEventControl,
+            Expr::GuiControlText(control) => {
+                Expr::GuiControlText(Box::new(self.expr(*control, locals)))
+            }
+            Expr::GuiConfirm(text) => Expr::GuiConfirm(Box::new(self.expr(*text, locals))),
             Expr::RunCommand(command) => Expr::RunCommand(Box::new(self.expr(*command, locals))),
             Expr::Connect { host, port } => Expr::Connect {
                 host: Box::new(self.expr(*host, locals)),
@@ -609,12 +654,12 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
         candidates.extend(names.iter().cloned());
     } else {
         // A bare module name (`import "math"`) is searched for beside the
-        // program, inside the bundled `ruskmods/` and `rusklib/` folders, and
-        // in the same folders in each parent directory. The parent walk lets a
-        // program in `examples/` or `tests/` import from the checkout root.
-        // Each root is checked completely before the next one, so a file
-        // beside the program always wins over an unrelated module in the
-        // current directory.
+        // program, inside the bundled `ruskmods/`, `rusklib/`, and `fastlib/`
+        // folders, and in the same folders in each parent directory. The
+        // parent walk lets a program in `examples/` or `tests/` import from
+        // the checkout root. Each root is checked completely before the next
+        // one, so a file beside the program always wins over an unrelated
+        // module in the current directory.
         let bare = !raw.contains('/') && !raw.contains('\\');
         let nested = format!("{raw}.rk");
         let mut roots: Vec<PathBuf> = Vec::new();
@@ -639,10 +684,12 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
             for name in &names {
                 candidates.push(root.join("ruskmods").join(name));
                 candidates.push(root.join("rusklib").join(name));
+                candidates.push(root.join("fastlib").join(name));
             }
             if bare {
                 candidates.push(root.join("ruskmods").join(raw).join(&nested));
                 candidates.push(root.join("rusklib").join(raw).join(&nested));
+                candidates.push(root.join("fastlib").join(raw).join(&nested));
             }
         }
     }
@@ -653,7 +700,7 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "I can't find the file '{raw}' — I looked next to the program and in ruskmods/ and rusklib/"
+        "I can't find the file '{raw}' — I looked next to the program and in ruskmods/, rusklib/, and fastlib/"
     ))
 }
 

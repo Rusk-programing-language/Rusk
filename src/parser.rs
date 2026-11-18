@@ -67,7 +67,7 @@
 //! as words when the sentence around them fits, so they can still be names.
 //! ```
 
-use crate::ast::{Base, BinOp, Elem, Expr, FuncTy, Param, Program, Stmt, Ty, UnOp};
+use crate::ast::{Base, BinOp, Elem, Expr, FuncTy, GuiControlKind, Param, Program, Stmt, Ty, UnOp};
 use crate::lexer::{Tok, Token};
 
 pub struct Parser {
@@ -331,6 +331,46 @@ impl Parser {
         }
     }
 
+    /// The rest of `make simple window titled ... wide ... high ...`.
+    fn gui_window_tail(&mut self) -> Result<Expr, String> {
+        self.need_word("titled", "after 'make simple window',")?;
+        let title = self.expr(false)?;
+        self.need_word("wide", "after the window title,")?;
+        let width = self.expr(false)?;
+        self.need_word("high", "after the window width,")?;
+        let height = self.expr(false)?;
+        Ok(Expr::GuiWindow {
+            title: Box::new(title),
+            width: Box::new(width),
+            height: Box::new(height),
+        })
+    }
+
+    /// The rest of `add simple button to WINDOW labelled TEXT at X and Y sized W and H`.
+    fn gui_control_tail(&mut self, kind: GuiControlKind) -> Result<Expr, String> {
+        self.need_word("to", "after the simple control kind,")?;
+        let window = self.expr(false)?;
+        self.need_word("labelled", "after the window in 'add simple',")?;
+        let text = self.expr(false)?;
+        self.need_word("at", "after the control text,")?;
+        let x = self.expr(false)?;
+        self.need_word("and", "after the control's x position,")?;
+        let y = self.expr(false)?;
+        self.need_word("sized", "after the control's y position,")?;
+        let width = self.expr(false)?;
+        self.need_word("and", "after the control width,")?;
+        let height = self.expr(false)?;
+        Ok(Expr::GuiControl {
+            window: Box::new(window),
+            kind,
+            text: Box::new(text),
+            x: Box::new(x),
+            y: Box::new(y),
+            width: Box::new(width),
+            height: Box::new(height),
+        })
+    }
+
     fn stmt(&mut self) -> Result<Stmt, String> {
         let line = self.line();
 
@@ -389,6 +429,28 @@ impl Parser {
             return Ok(Stmt::Stop(code, line));
         }
 
+        if self.is_word("show") {
+            self.bump();
+            self.need_word("simple", "after 'show',")?;
+            if self.eat_word("window") {
+                let window = self.expr(false)?;
+                self.end_of_line()?;
+                return Ok(Stmt::GuiShow(window, line));
+            }
+            self.need_word("message", "after 'show simple',")?;
+            let text = self.expr(true)?;
+            self.end_of_line()?;
+            return Ok(Stmt::GuiMessage(text, line));
+        }
+
+        if self.is_word("pump") {
+            self.bump();
+            self.need_word("simple", "after 'pump',")?;
+            self.need_word("events", "after 'pump simple',")?;
+            self.end_of_line()?;
+            return Ok(Stmt::GuiPump(line));
+        }
+
         if self.is_word("write") {
             self.bump();
             let text = self.expr(true)?;
@@ -401,6 +463,12 @@ impl Parser {
 
         if self.is_word("make") {
             self.bump();
+            if self.eat_word("simple") {
+                self.need_word("window", "after 'make simple',")?;
+                let value = self.gui_window_tail()?;
+                self.end_of_line()?;
+                return Ok(Stmt::Expr(value, line));
+            }
             self.need_word("directory", "after 'make',")?;
             let path = self.expr(true)?;
             self.end_of_line()?;
@@ -427,6 +495,11 @@ impl Parser {
 
         if self.is_word("close") {
             self.bump();
+            if self.eat_word("simple") {
+                self.need_word("window", "after 'close simple',")?;
+                self.end_of_line()?;
+                return Ok(Stmt::GuiClose(line));
+            }
             let socket = self.primary()?;
             self.end_of_line()?;
             return Ok(Stmt::Close { socket, line });
@@ -465,6 +538,32 @@ impl Parser {
 
         if self.is_word("add") {
             self.bump();
+            if self.eat_word("simple") {
+                let kind = match self.peek().clone() {
+                    Tok::Ident(word) if word == "button" => {
+                        self.bump();
+                        GuiControlKind::Button
+                    }
+                    Tok::Ident(word) if word == "label" => {
+                        self.bump();
+                        GuiControlKind::Label
+                    }
+                    Tok::Ident(word) if word == "field" => {
+                        self.bump();
+                        GuiControlKind::Field
+                    }
+                    other => {
+                        return Err(format!(
+                            "line {}: after 'add simple' I expected 'button', 'label', or 'field', but found {}",
+                            self.line(),
+                            other.describe()
+                        ))
+                    }
+                };
+                let value = self.gui_control_tail(kind)?;
+                self.end_of_line()?;
+                return Ok(Stmt::Expr(value, line));
+            }
             let value = self.expr(true)?;
             self.need_word("to", "after the value in 'add',")?;
             let name = self.qualified_name("after 'add ... to'")?;
@@ -538,6 +637,19 @@ impl Parser {
 
         if self.is_word("set") {
             self.bump();
+            if self.eat_word("simple") {
+                self.need_word("text", "after 'set simple',")?;
+                self.need_word("of", "after 'set simple text',")?;
+                let control = self.expr(false)?;
+                self.need_word("to", "after the control in 'set simple text',")?;
+                let text = self.expr(true)?;
+                self.end_of_line()?;
+                return Ok(Stmt::GuiSetText {
+                    control,
+                    text,
+                    line,
+                });
+            }
             if self.is_word("item") && self.starts_index() {
                 self.bump(); // "item"
                 let index = self.expr(true)?;
@@ -1045,6 +1157,79 @@ impl Parser {
                 Ok(Expr::Array(items))
             }
             Tok::Ident(word) => {
+                if word == "make"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "simple")
+                    && matches!(self.peek_at(2), Tok::Ident(s) if s == "window")
+                {
+                    self.bump(); // "make"
+                    self.bump(); // "simple"
+                    self.bump(); // "window"
+                    return self.gui_window_tail();
+                }
+                if word == "add" && matches!(self.peek_at(1), Tok::Ident(s) if s == "simple") {
+                    self.bump(); // "add"
+                    self.bump(); // "simple"
+                    let kind = match self.peek().clone() {
+                        Tok::Ident(s) if s == "button" => {
+                            self.bump();
+                            GuiControlKind::Button
+                        }
+                        Tok::Ident(s) if s == "label" => {
+                            self.bump();
+                            GuiControlKind::Label
+                        }
+                        Tok::Ident(s) if s == "field" => {
+                            self.bump();
+                            GuiControlKind::Field
+                        }
+                        other => {
+                            return Err(format!(
+                                "line {}: after 'add simple' I expected 'button', 'label', or 'field', but found {}",
+                                self.line(),
+                                other.describe()
+                            ))
+                        }
+                    };
+                    return self.gui_control_tail(kind);
+                }
+                if word == "next"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "simple")
+                    && matches!(self.peek_at(2), Tok::Ident(s) if s == "event")
+                {
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    return Ok(Expr::GuiNextEvent);
+                }
+                if word == "simple"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "event")
+                    && matches!(self.peek_at(2), Tok::Ident(s) if s == "control")
+                {
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    return Ok(Expr::GuiEventControl);
+                }
+                if word == "simple"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "text")
+                    && matches!(self.peek_at(2), Tok::Ident(s) if s == "of")
+                {
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    let control = self.expr(false)?;
+                    return Ok(Expr::GuiControlText(Box::new(control)));
+                }
+                if word == "simple"
+                    && matches!(self.peek_at(1), Tok::Ident(s) if s == "confirm")
+                    && matches!(self.peek_at(2), Tok::Ident(s) if s == "with")
+                {
+                    self.bump();
+                    self.bump();
+                    self.bump();
+                    let text = self.expr(true)?;
+                    return Ok(Expr::GuiConfirm(Box::new(text)));
+                }
                 if word == "view" && matches!(self.peek_at(1), Tok::Ident(s) if s == "of") {
                     self.bump(); // "view"
                     self.bump(); // "of"
@@ -1663,5 +1848,60 @@ mod tests {
                 ..
             } if matches!(&**inner, Expr::Var(name) if name == "xs")
         ));
+    }
+
+    #[test]
+    fn simple_gui_forms_parse() {
+        let prog = p(concat!(
+            "let w be make simple window titled \"Hi\" wide 320 high 200\n",
+            "let b be add simple button to w labelled \"Press\" at 10 and 10 sized 100 and 30\n",
+            "let l be add simple label to w labelled \"Text\" at 10 and 50 sized 100 and 30\n",
+            "let f be add simple field to w labelled \"Name\" at 10 and 90 sized 100 and 30\n",
+            "show simple window w\n",
+            "set simple text of b to \"Thanks\"\n",
+            "say simple text of f\n",
+            "show simple message \"Done\"\n",
+            "say simple confirm with \"OK?\"\n",
+            "pump simple events\n",
+            "say next simple event\n",
+            "say simple event control\n",
+            "close simple window\n",
+        ));
+        assert_eq!(prog.stmts.len(), 13);
+        assert!(matches!(
+            &prog.stmts[0],
+            Stmt::Let {
+                value: Expr::GuiWindow { .. },
+                ..
+            }
+        ));
+        for (index, kind) in [
+            (1usize, GuiControlKind::Button),
+            (2, GuiControlKind::Label),
+            (3, GuiControlKind::Field),
+        ] {
+            assert!(matches!(
+                &prog.stmts[index],
+                Stmt::Let {
+                    value: Expr::GuiControl { kind: got, .. },
+                    ..
+                } if *got == kind
+            ));
+        }
+        assert!(matches!(&prog.stmts[4], Stmt::GuiShow(_, _)));
+        assert!(matches!(&prog.stmts[5], Stmt::GuiSetText { .. }));
+        assert!(matches!(
+            &prog.stmts[6],
+            Stmt::Say(Expr::GuiControlText(_), _)
+        ));
+        assert!(matches!(&prog.stmts[7], Stmt::GuiMessage(_, _)));
+        assert!(matches!(&prog.stmts[8], Stmt::Say(Expr::GuiConfirm(_), _)));
+        assert!(matches!(&prog.stmts[9], Stmt::GuiPump(_)));
+        assert!(matches!(&prog.stmts[10], Stmt::Say(Expr::GuiNextEvent, _)));
+        assert!(matches!(
+            &prog.stmts[11],
+            Stmt::Say(Expr::GuiEventControl, _)
+        ));
+        assert!(matches!(&prog.stmts[12], Stmt::GuiClose(_)));
     }
 }

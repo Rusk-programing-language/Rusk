@@ -1,0 +1,28 @@
+# button.rk — push buttons built on the native button control.
+
+import "core"
+import "control"
+import "constants"
+import "geometry"
+
+to simple_button with window as a number and text as view of text and x as a number and y as a number and width as a number and height as a number:
+    give back simple_button_new with window and text and x and y and width and height
+
+to simple_button_at with window as a number and text as view of text and rect as a view of a list of numbers:
+    give back simple_button_new with window and text and (item 1 of rect) and (item 2 of rect) and (item 3 of rect) and (item 4 of rect)
+
+to simple_button_text with button as a number:
+    give back simple_control_text with button
+
+to simple_button_set_text with button as a number and text as view of text:
+    simple_control_set_text with button and text
+
+to simple_button_clicked with button as a number:
+    give back simple_control_is with button and simple_event_click
+
+# A tiny visual acknowledgement used by the demo programs.
+to simple_button_press with button as a number:
+    simple_control_set_text with button and "Pressed"
+
+to simple_button_reset with button as a number and text as view of text:
+    simple_control_set_text with button and text

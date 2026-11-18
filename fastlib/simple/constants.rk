@@ -1,0 +1,31 @@
+# constants.rk — the small vocabulary used by simple applications.
+#
+# Rusk keywords are not reserved, so these are ordinary top-level names. A
+# program can import just this file when it only wants event and style names.
+
+constant simple_event_none be ""
+constant simple_event_click be "click"
+constant simple_event_change be "change"
+constant simple_event_close be "close"
+
+constant simple_align_left be "left"
+constant simple_align_center be "center"
+constant simple_align_right be "right"
+
+constant simple_color_black be "#000000"
+constant simple_color_white be "#ffffff"
+constant simple_color_red be "#cc0000"
+constant simple_color_green be "#008800"
+constant simple_color_blue be "#0000cc"
+constant simple_color_yellow be "#ddcc00"
+constant simple_color_gray be "#777777"
+
+constant simple_style_plain be "plain"
+constant simple_style_strong be "strong"
+constant simple_style_quiet be "quiet"
+constant simple_style_danger be "danger"
+
+constant simple_key_enter be "Return"
+constant simple_key_escape be "Escape"
+constant simple_key_tab be "Tab"
+constant simple_key_space be " "

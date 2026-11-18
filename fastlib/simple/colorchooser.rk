@@ -1,0 +1,69 @@
+# colorchooser.rk — named colours and small hex-colour helpers.
+#
+# There is no native colour picker in the first `simple` release. These helpers
+# give a program the same vocabulary a chooser would return: a `#rrggbb` text.
+
+import "constants"
+import "textbox"
+
+# One lowercase hex digit for a nibble in the range 0..15.
+to simple_color_hex_digit with n as a number:
+    if n is less than 10:
+        give back letter (n + 1) of "0123456789abcdef"
+    give back letter (n - 9) of "abcdef"
+
+# Two hex digits for a byte in the range 0..255.
+to simple_color_hex_pair with n as a number:
+    let high be n / 16
+    let low be n - high * 16
+    give back (simple_color_hex_digit with high) + (simple_color_hex_digit with low)
+
+to simple_color_from_rgb with red as a number and green as a number and blue as a number:
+    give back "#" + (simple_color_hex_pair with red) + (simple_color_hex_pair with green) + (simple_color_hex_pair with blue)
+
+to simple_color_is_hex_digit with ch as view of text:
+    give back (simple_text_find_from with "0123456789abcdefABCDEF" and ch and 1) is not 0
+
+# True for a seven-byte text such as "#1a2b3c".
+to simple_color_valid with value as view of text:
+    if length of value is not 7:
+        give back false
+    if letter 1 of value is not "#":
+        give back false
+    let i be 2
+    while i is at most 7:
+        if (simple_color_is_hex_digit with (letter i of value)) is false:
+            give back false
+        set i to i + 1
+    give back true
+
+# The built-in named colours. Unknown names give empty text.
+to simple_color_named with name as view of text:
+    if name is "black":
+        give back copy of simple_color_black
+    if name is "white":
+        give back copy of simple_color_white
+    if name is "red":
+        give back copy of simple_color_red
+    if name is "green":
+        give back copy of simple_color_green
+    if name is "blue":
+        give back copy of simple_color_blue
+    if name is "yellow":
+        give back copy of simple_color_yellow
+    if name is "gray" or name is "grey":
+        give back copy of simple_color_gray
+    give back ""
+
+# Accept a name, a valid hex colour, or fall back to black.
+to simple_color_pick with name as view of text:
+    let named be simple_color_named with name
+    if named is not "":
+        give back named
+    if simple_color_valid with name:
+        give back copy of name
+    give back copy of simple_color_black
+
+# A short preview swatch for labels and menus.
+to simple_color_swatch with value as view of text:
+    give back "[" + value + "]"

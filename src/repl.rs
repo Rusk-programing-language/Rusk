@@ -582,6 +582,20 @@ impl Session {
                 self.connections.remove(&socket);
                 Ok(Flow::Normal)
             }
+            Stmt::GuiShow(window, _) => {
+                let _ = self.eval_int(window, env)?;
+                Ok(Flow::Normal)
+            }
+            Stmt::GuiSetText { control, text, .. } => {
+                let _ = self.eval_int(control, env)?;
+                let _ = self.eval_text(text, env, "set simple text")?;
+                Ok(Flow::Normal)
+            }
+            Stmt::GuiMessage(text, _) => {
+                let _ = self.eval_text(text, env, "show simple message")?;
+                Ok(Flow::Normal)
+            }
+            Stmt::GuiPump(_) | Stmt::GuiClose(_) => Ok(Flow::Normal),
             Stmt::RawTerminal { on, .. } => {
                 if *on {
                     if self.raw_mode.is_none() {
@@ -1117,6 +1131,43 @@ impl Session {
                 Ok(Value::Str(out))
             }
             Expr::ReadKey => Ok(Value::Str(read_stdin_byte()?)),
+            Expr::GuiWindow {
+                title,
+                width,
+                height,
+            } => {
+                let _ = self.eval_text(title, env, "make simple window")?;
+                let _ = self.eval_int(width, env)?;
+                let _ = self.eval_int(height, env)?;
+                Ok(Value::Int(1))
+            }
+            Expr::GuiControl {
+                window,
+                text,
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => {
+                let _ = self.eval_int(window, env)?;
+                let _ = self.eval_text(text, env, "add simple control")?;
+                let _ = self.eval_int(x, env)?;
+                let _ = self.eval_int(y, env)?;
+                let _ = self.eval_int(width, env)?;
+                let _ = self.eval_int(height, env)?;
+                Ok(Value::Int(1))
+            }
+            Expr::GuiNextEvent => Ok(Value::Str(Vec::new())),
+            Expr::GuiEventControl => Ok(Value::Int(0)),
+            Expr::GuiControlText(control) => {
+                let _ = self.eval_int(control, env)?;
+                Ok(Value::Str(Vec::new()))
+            }
+            Expr::GuiConfirm(text) => {
+                let _ = self.eval_text(text, env, "simple confirm")?;
+                Ok(Value::Bool(false))
+            }
             Expr::Unary(op, inner) => {
                 let value = self.eval(inner, env)?;
                 match (op, value) {

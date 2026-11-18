@@ -1,0 +1,34 @@
+# keys.rk — names for the few keys a native event queue can report.
+#
+# The first `simple` events are click, change, and close; key names are useful
+# for console helpers and for labelling keyboard hints in a window.
+
+import "constants"
+import "textbox"
+
+to simple_key_name with ch as view of text:
+    if ch is "\n" or ch is "\r":
+        give back copy of simple_key_enter
+    if ch is "\t":
+        give back copy of simple_key_tab
+    if ch is " ":
+        give back copy of simple_key_space
+    give back copy of ch
+
+to simple_key_is_enter with ch as view of text:
+    give back (simple_key_name with ch) is simple_key_enter
+
+to simple_key_is_escape with ch as view of text:
+    give back (simple_key_name with ch) is simple_key_escape
+
+to simple_key_is_tab with ch as view of text:
+    give back (simple_key_name with ch) is simple_key_tab
+
+to simple_key_is_space with ch as view of text:
+    give back (simple_key_name with ch) is simple_key_space
+
+to simple_key_display with ch as view of text:
+    give back "[" + (simple_key_name with ch) + "]"
+
+to simple_key_hint with keys as a view of a list of text:
+    give back "Keys: " + (simple_text_join with keys and ", ")

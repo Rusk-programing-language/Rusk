@@ -1,0 +1,38 @@
+# layout.rk — grids, rows, columns, and centring for simple controls.
+
+import "geometry"
+
+# Rect for cell `index` in a grid, counting from 1.
+to simple_layout_grid with columns as a number and index as a number and cell_width as a number and cell_height as a number and gap as a number:
+    let zero be index - 1
+    let column be zero - (zero / columns) * columns
+    let row be zero / columns
+    let x be column * (cell_width + gap)
+    let y be row * (cell_height + gap)
+    give back simple_rect with x and y and cell_width and cell_height
+
+to simple_layout_row with index as a number and cell_width as a number and gap as a number and y as a number:
+    let x be (index - 1) * (cell_width + gap)
+    give back simple_rect with x and y and cell_width and 24
+
+to simple_layout_column with index as a number and cell_height as a number and gap as a number and x as a number:
+    let y be (index - 1) * (cell_height + gap)
+    give back simple_rect with x and y and 120 and cell_height
+
+# Place a smaller rectangle in the middle of a larger one.
+to simple_layout_center with outer as a view of a list of numbers and inner_width as a number and inner_height as a number:
+    let x be (item 1 of outer) + ((item 3 of outer) - inner_width) / 2
+    let y be (item 2 of outer) + ((item 4 of outer) - inner_height) / 2
+    give back simple_rect with x and y and inner_width and inner_height
+
+# Split a rectangle into `count` equal columns and return piece `index`.
+to simple_layout_columns with rect as a view of a list of numbers and count as a number and index as a number:
+    let piece be (item 3 of rect) / count
+    let x be (item 1 of rect) + (index - 1) * piece
+    give back simple_rect with x and (item 2 of rect) and piece and (item 4 of rect)
+
+# Split a rectangle into `count` equal rows and return piece `index`.
+to simple_layout_rows with rect as a view of a list of numbers and count as a number and index as a number:
+    let piece be (item 4 of rect) / count
+    let y be (item 2 of rect) + (index - 1) * piece
+    give back simple_rect with (item 1 of rect) and y and (item 3 of rect) and piece

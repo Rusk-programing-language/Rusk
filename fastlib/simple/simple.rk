@@ -1,0 +1,42 @@
+# simple.rk — one import for the whole native GUI library.
+#
+#     import "simple/simple"
+#
+# pulls in every module under `fastlib/simple/`. Each public name keeps the
+# `simple_` prefix, so a program can import this file without worrying about a
+# shared namespace. A program that needs only one corner can import that file
+# directly, for example `import "simple/button"` or `import "simple/event"`.
+#
+# The native primaries behind `core.rk` bake to real Win32 controls on Windows
+# x86-64 and to safe no-ops on other targets, so the whole library checks and
+# bakes everywhere Rusk does.
+
+import "app"
+import "button"
+import "canvas"
+import "colorchooser"
+import "commondialog"
+import "constants"
+import "control"
+import "core"
+import "dialog"
+import "dnd"
+import "event"
+import "field"
+import "filedialog"
+import "frame"
+import "geometry"
+import "keys"
+import "label"
+import "layout"
+import "listbox"
+import "menu"
+import "messagebox"
+import "progress"
+import "statusbar"
+import "style"
+import "textbox"
+import "theme"
+import "toolbar"
+import "ttk"
+import "window"

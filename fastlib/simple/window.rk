@@ -1,0 +1,24 @@
+# window.rk — creating and showing simple windows.
+#
+# Import "simple/window" for these names. A window is just a number, so it can
+# be stored in a variable and passed to any control helper.
+
+import "core"
+
+to simple_window with title as view of text and width as a number and height as a number:
+    give back simple_window_new with title and width and height
+
+to simple_window_default:
+    give back simple_window_new with "Simple" and 480 and 320
+
+to simple_window_open with window as a number:
+    simple_window_show with window
+
+to simple_window_exit:
+    simple_window_close
+
+# Create and show a window in one line.
+to simple_window_start with title as view of text and width as a number and height as a number:
+    let window be simple_window_new with title and width and height
+    simple_window_show with window
+    give back window

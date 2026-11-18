@@ -1,0 +1,53 @@
+# canvas.rk — a tiny character canvas drawn in a label.
+#
+# The native `simple` controls do not include a drawing surface, so a canvas is
+# a list of equal-length text rows. Programs can plot characters and then show
+# the joined rows in a static label.
+
+import "textbox"
+import "label"
+
+to simple_canvas_blank with width as a number and height as a number:
+    let rows be an empty list of text
+    let row be simple_text_repeat with " " and width
+    let i be 0
+    while i is less than height:
+        add (copy of row) to rows
+        set i to i + 1
+    give back rows
+
+# Put one character at 1-based x/y. Out-of-range coordinates are ignored.
+to simple_canvas_dot with canvas as a list of text and x as a number and y as a number and ch as view of text:
+    if x is less than 1:
+        give back canvas
+    if y is less than 1:
+        give back canvas
+    if y is more than length of canvas:
+        give back canvas
+    let row be item y of canvas
+    if x is more than length of row:
+        give back canvas
+    let left be part 1 to (x - 1) of row
+    let right be ""
+    if x is less than length of row:
+        set right to part (x + 1) to length of row of row
+    set item y of canvas to left + ch + right
+    give back canvas
+
+to simple_canvas_frame with canvas as a list of text and ch as view of text:
+    let i be 1
+    while i is at most length of canvas:
+        let row be item i of canvas
+        let width be length of row
+        if width is more than 2:
+            let middle be part 2 to (width - 1) of row
+            set item i of canvas to ch + middle + ch
+        set i to i + 1
+    give back canvas
+
+to simple_canvas_render with canvas as a view of a list of text:
+    give back simple_text_join with canvas and "\n"
+
+to simple_canvas_label with window as a number and canvas as a view of a list of text and rect as a view of a list of numbers:
+    let text be simple_canvas_render with canvas
+    give back simple_label_at with window and text and rect

@@ -1,0 +1,57 @@
+# event.rk — reading the small event queue behind the `simple` window.
+#
+# Events are pieces of text: "" for none, "click", "change", or "close".
+# `simple event control` gives the number of the control that caused the last
+# click or change.
+
+import "core"
+import "constants"
+
+to simple_event_is with event as view of text and expected as view of text:
+    give back event is expected
+
+to simple_event_is_click with event as view of text:
+    give back simple_event_is with event and simple_event_click
+
+to simple_event_is_change with event as view of text:
+    give back simple_event_is with event and simple_event_change
+
+to simple_event_is_close with event as view of text:
+    give back simple_event_is with event and simple_event_close
+
+# The control number attached to the last click or change.
+to simple_event_id:
+    give back simple_event_control
+
+# Pump messages until an event appears, then give back its kind.
+to simple_event_wait:
+    let event be ""
+    while event is "":
+        simple_events_pump
+        set event to simple_event_next
+    give back event
+
+# Pump messages until an event of the wanted kind appears.
+to simple_event_wait_for with expected as view of text:
+    let event be ""
+    while event is not expected:
+        simple_events_pump
+        set event to simple_event_next
+    give back event
+
+# True when `event` is one of the kinds in `names`.
+to simple_event_any with event as view of text and names as a view of a list of text:
+    let i be 1
+    while i is at most length of names:
+        if event is (item i of names):
+            give back true
+        set i to i + 1
+    give back false
+
+# Wait for any event kind named in `names`.
+to simple_event_wait_any with names as a view of a list of text:
+    let event be ""
+    while not simple_event_any with event and names:
+        simple_events_pump
+        set event to simple_event_next
+    give back event

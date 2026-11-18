@@ -1,0 +1,46 @@
+# core.rk — thin Rusk names for the native `simple` GUI primaries.
+#
+# Every window is a number, every control is a number, and every event is a
+# piece of text. The higher modules in this folder build on these names; they
+# never speak directly to the operating system. A program on a non-Windows
+# target still checks and bakes: these primaries become safe no-ops there.
+
+# A new window. It is hidden until `simple_window_show` is called.
+to simple_window_new with title as view of text and width as a number and height as a number:
+    give back make simple window titled title wide width high height
+
+to simple_window_show with window as a number:
+    show simple window window
+
+to simple_window_close:
+    close simple window
+
+to simple_button_new with window as a number and text as view of text and x as a number and y as a number and width as a number and height as a number:
+    give back add simple button to window labelled text at x and y sized width and height
+
+to simple_label_new with window as a number and text as view of text and x as a number and y as a number and width as a number and height as a number:
+    give back add simple label to window labelled text at x and y sized width and height
+
+to simple_field_new with window as a number and text as view of text and x as a number and y as a number and width as a number and height as a number:
+    give back add simple field to window labelled text at x and y sized width and height
+
+to simple_control_set_text with control as a number and text as view of text:
+    set simple text of control to text
+
+to simple_control_text with control as a number:
+    give back simple text of control
+
+to simple_events_pump:
+    pump simple events
+
+to simple_event_next:
+    give back next simple event
+
+to simple_event_control:
+    give back simple event control
+
+to simple_confirm with text as view of text:
+    give back simple confirm with text
+
+to simple_message with text as view of text:
+    show simple message text

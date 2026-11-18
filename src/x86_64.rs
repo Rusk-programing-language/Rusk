@@ -15,6 +15,12 @@ use crate::aarch64::{
     CC_EQ, CC_GE, CC_GT, CC_LE, CC_LT, CC_NE, IMAGE_BASE, SP, TEXT_OFFSET, X0, X1, X2, X3, X4, X5,
     X8, XZR,
 };
+use crate::backend::{
+    WIN_GUI_EVENT_CONTROL_OFFSET, WIN_GUI_EVENT_COUNT_OFFSET, WIN_GUI_EVENT_KIND_OFFSET,
+    WIN_GUI_EVENT_VALUE_OFFSET, WIN_GUI_FN_DEF_WINDOW_PROC, WIN_GUI_FN_POST_QUIT_MESSAGE,
+    WIN_GUI_TEMP_OFFSET, WIN_GUI_WNDPROC_ARG1_OFFSET, WIN_GUI_WNDPROC_ARG2_OFFSET,
+    WIN_GUI_WNDPROC_ARG3_OFFSET, WIN_GUI_WNDPROC_ARG4_OFFSET,
+};
 use crate::pe;
 use std::collections::HashMap;
 
@@ -134,6 +140,13 @@ enum Fixup {
         at: usize,
         label: String,
     },
+    /// A near jump or branch whose relative operand ends `next` bytes after
+    /// `at`. Used by the hand-written GUI `WndProc`.
+    LabelRel32 {
+        at: usize,
+        next: usize,
+        label: String,
+    },
     /// Absolute address of an interned string, patched at finish.
     Str {
         at: usize,
@@ -159,11 +172,15 @@ enum Fixup {
     },
 }
 
-/// A stack argument for a Windows call: either a constant (written with a
-/// sign-extending 32-bit immediate) or a physical register.
-enum WinArg {
+/// A stack argument for a Windows call. `Vreg` reads a virtual register after
+/// the caller's cached values have been written back, which is how the GUI
+/// runtime passes coordinates and handles in positions five and above.
+#[derive(Clone, Copy)]
+pub enum WinArg {
     Imm(u32),
+    Imm64(u64),
     Reg(u8),
+    Vreg(u8),
 }
 
 pub struct Asm {
@@ -1068,12 +1085,16 @@ impl Asm {
                     self.u8(disp);
                     self.u32(*value); // mov qword [rsp+disp], imm32
                 }
-                WinArg::Reg(phys) => {
-                    self.u8(0x48 | ((phys >> 3) & 1));
-                    self.u8(0x89);
-                    self.u8(0x44 | ((phys & 7) << 3));
-                    self.u8(0x24);
-                    self.u8(disp); // mov [rsp+disp], reg
+                WinArg::Imm64(value) => {
+                    // Scratch R10 is safe after `discard_all`: no virtual
+                    // register is cached at this point.
+                    self.mov_phys_imm64(R10, *value);
+                    self.store_stack_reg(disp, R10);
+                }
+                WinArg::Reg(phys) => self.store_stack_reg(disp, *phys),
+                WinArg::Vreg(reg) => {
+                    self.load_vreg(R10, *reg);
+                    self.store_stack_reg(disp, R10);
                 }
             }
         }
@@ -1096,6 +1117,15 @@ impl Asm {
         self.u8(0xE4); // mov rsp, r12
         self.u8(0x41);
         self.u8(0x5C); // pop r12
+    }
+
+    /// Emit `mov [rsp+disp], reg` for a Windows stack argument.
+    fn store_stack_reg(&mut self, disp: u8, phys: u8) {
+        self.u8(0x48 | ((phys >> 3) & 1));
+        self.u8(0x89);
+        self.u8(0x44 | ((phys & 7) << 3));
+        self.u8(0x24);
+        self.u8(disp);
     }
 
     fn win_call_stack(&mut self, name: &str, stack_args: &[u64]) {
@@ -1128,6 +1158,235 @@ impl Asm {
     /// Move the Windows call's return value into `X0`.
     pub fn win_result(&mut self) {
         self.store_vreg(X0, RAX);
+    }
+
+    /// Call a function whose address was resolved into a data slot. This keeps
+    /// the PE import table limited to kernel32 while still reaching user32.
+    pub fn win_call_ptr(&mut self, slot: u64, argc: usize, stack_args: &[WinArg]) {
+        self.flush_all();
+        self.discard_all();
+        const ARG_REGS: [u8; 4] = [RCX, RDX, R8, R9];
+        const VREGS: [u8; 4] = [X0, X1, X2, X3];
+        for i in 0..argc.min(ARG_REGS.len()) {
+            self.load_vreg(ARG_REGS[i], VREGS[i]);
+        }
+        let frame = (32 + stack_args.len() * 8).div_ceil(16) * 16;
+        self.u8(0x41);
+        self.u8(0x54); // push r12
+        self.u8(0x4C);
+        self.u8(0x8B);
+        self.u8(0xE4); // mov r12, rsp
+        self.u8(0x48);
+        self.u8(0x83);
+        self.u8(0xE4);
+        self.u8(0xF0); // and rsp, -16
+        self.u8(0x48);
+        self.u8(0x81);
+        self.u8(0xEC);
+        self.u32(frame as u32); // sub rsp, frame
+        for (i, value) in stack_args.iter().enumerate() {
+            let disp = (32 + i * 8) as u8;
+            match value {
+                WinArg::Imm(value) => {
+                    self.u8(0x48);
+                    self.u8(0xC7);
+                    self.u8(0x44);
+                    self.u8(0x24);
+                    self.u8(disp);
+                    self.u32(*value);
+                }
+                WinArg::Imm64(value) => {
+                    self.mov_phys_imm64(R10, *value);
+                    self.store_stack_reg(disp, R10);
+                }
+                WinArg::Reg(phys) => self.store_stack_reg(disp, *phys),
+                WinArg::Vreg(reg) => {
+                    self.load_vreg(R10, *reg);
+                    self.store_stack_reg(disp, R10);
+                }
+            }
+        }
+        self.raw_call_slot(slot);
+        self.u8(0x48);
+        self.u8(0x81);
+        self.u8(0xC4);
+        self.u32(frame as u32); // add rsp, frame
+        self.u8(0x4C);
+        self.u8(0x89);
+        self.u8(0xE4); // mov rsp, r12
+        self.u8(0x41);
+        self.u8(0x5C); // pop r12
+    }
+
+    // ---- raw instruction helpers for the GUI WndProc ---------------------
+
+    fn raw_data_addr(&mut self, phys: u8, offset: u64) {
+        self.mov_phys_imm64(phys, 0);
+        self.fixups.push(Fixup::Data {
+            at: self.code.len() - 8,
+            offset,
+        });
+    }
+
+    fn raw_mov_reg_mem(&mut self, dst: u8, base: u8) {
+        let rex = 0x48 | (((dst >> 3) & 1) << 2) | ((base >> 3) & 1);
+        self.u8(rex);
+        self.u8(0x8B);
+        self.u8(((dst & 7) << 3) | (base & 7));
+    }
+
+    fn raw_mov_mem_reg(&mut self, base: u8, src: u8) {
+        let rex = 0x48 | (((src >> 3) & 1) << 2) | ((base >> 3) & 1);
+        self.u8(rex);
+        self.u8(0x89);
+        self.u8(((src & 7) << 3) | (base & 7));
+    }
+
+    fn raw_load_data(&mut self, phys: u8, offset: u64) {
+        let addr = if phys == RAX { R11 } else { RAX };
+        self.raw_data_addr(addr, offset);
+        self.raw_mov_reg_mem(phys, addr);
+    }
+
+    fn raw_store_data(&mut self, phys: u8, offset: u64) {
+        let addr = if phys == RAX { R11 } else { RAX };
+        self.raw_data_addr(addr, offset);
+        self.raw_mov_mem_reg(addr, phys);
+    }
+
+    fn raw_store_imm64_data(&mut self, offset: u64, value: u64) {
+        self.mov_phys_imm64(RAX, value);
+        self.raw_store_data(RAX, offset);
+    }
+
+    fn raw_cmp_rax_imm32(&mut self, value: u32) {
+        self.u8(0x48);
+        self.u8(0x81);
+        self.u8(0xF8);
+        self.u32(value);
+    }
+
+    fn raw_jcc(&mut self, opcode: u8, label: &str) {
+        self.u8(0x0F);
+        self.u8(opcode);
+        let at = self.code.len();
+        self.u32(0);
+        self.fixups.push(Fixup::LabelRel32 {
+            at,
+            next: 4,
+            label: label.to_string(),
+        });
+    }
+
+    fn raw_jmp(&mut self, label: &str) {
+        self.u8(0xE9);
+        let at = self.code.len();
+        self.u32(0);
+        self.fixups.push(Fixup::LabelRel32 {
+            at,
+            next: 4,
+            label: label.to_string(),
+        });
+    }
+
+    fn raw_call_slot(&mut self, slot: u64) {
+        self.raw_data_addr(RAX, slot);
+        self.raw_mov_reg_mem(RAX, RAX);
+        self.u8(0xFF);
+        self.u8(0xD0); // call rax
+    }
+
+    /// A tiny `WndProc` for the simple window class. It records button clicks
+    /// and text changes in fixed slots, then forwards everything else to
+    /// `DefWindowProcA`. Rusk callbacks stay in Rusk: the library reads the
+    /// recorded events in its own loop.
+    pub fn win_emit_wndproc(&mut self, label: &str) {
+        self.label(label);
+        let destroy = self.win_label("wnd_destroy");
+        let command = self.win_label("wnd_command");
+        let set_change_kind = self.win_label("wnd_change_kind");
+        let store_event = self.win_label("wnd_store_event");
+        let def = self.win_label("wnd_def");
+        let done = self.win_label("wnd_done");
+
+        self.u8(0x53); // push rbx
+        self.u8(0x48);
+        self.u8(0x83);
+        self.u8(0xEC);
+        self.u8(0x20); // sub rsp, 32 (shadow space, 16-byte aligned)
+
+        self.raw_store_data(RCX, WIN_GUI_WNDPROC_ARG1_OFFSET);
+        self.raw_store_data(RDX, WIN_GUI_WNDPROC_ARG2_OFFSET);
+        self.raw_store_data(R8, WIN_GUI_WNDPROC_ARG3_OFFSET);
+        self.raw_store_data(R9, WIN_GUI_WNDPROC_ARG4_OFFSET);
+
+        // WM_DESTROY (0x0002)
+        self.raw_load_data(RAX, WIN_GUI_WNDPROC_ARG2_OFFSET);
+        self.raw_cmp_rax_imm32(0x0002);
+        self.raw_jcc(0x84, &destroy); // je
+
+        // WM_COMMAND (0x0111)
+        self.raw_load_data(RAX, WIN_GUI_WNDPROC_ARG2_OFFSET);
+        self.raw_cmp_rax_imm32(0x0111);
+        self.raw_jcc(0x85, &command); // jne
+
+        self.raw_jmp(&def);
+
+        self.label(&destroy);
+        self.mov_phys_imm64(RCX, 0);
+        self.raw_call_slot(WIN_GUI_FN_POST_QUIT_MESSAGE);
+        self.u8(0x31);
+        self.u8(0xC0); // xor eax, eax
+        self.raw_jmp(&done);
+
+        self.label(&command);
+        self.raw_store_imm64_data(WIN_GUI_EVENT_KIND_OFFSET, 1); // click
+                                                                 // HIWORD(wParam) == 1 means EN_CHANGE for an edit control.
+        self.raw_load_data(RAX, WIN_GUI_WNDPROC_ARG3_OFFSET);
+        self.u8(0x48);
+        self.u8(0xC1);
+        self.u8(0xE8);
+        self.u8(0x10); // shr rax, 16
+        self.raw_store_data(RAX, WIN_GUI_TEMP_OFFSET);
+        self.raw_load_data(RAX, WIN_GUI_TEMP_OFFSET);
+        self.raw_cmp_rax_imm32(1);
+        self.raw_jcc(0x84, &set_change_kind);
+        self.raw_jmp(&store_event);
+
+        self.label(&set_change_kind);
+        self.raw_store_imm64_data(WIN_GUI_EVENT_KIND_OFFSET, 2); // change
+
+        self.label(&store_event);
+        self.raw_load_data(RAX, WIN_GUI_WNDPROC_ARG3_OFFSET);
+        self.u8(0x0F);
+        self.u8(0xB7);
+        self.u8(0xC0); // movzx eax, ax (control id)
+        self.raw_store_data(RAX, WIN_GUI_EVENT_CONTROL_OFFSET);
+        self.raw_store_imm64_data(WIN_GUI_EVENT_VALUE_OFFSET, 0);
+        self.raw_load_data(RAX, WIN_GUI_EVENT_COUNT_OFFSET);
+        self.u8(0x48);
+        self.u8(0x83);
+        self.u8(0xC0);
+        self.u8(0x01); // add rax, 1
+        self.raw_store_data(RAX, WIN_GUI_EVENT_COUNT_OFFSET);
+        self.u8(0x31);
+        self.u8(0xC0); // xor eax, eax
+        self.raw_jmp(&done);
+
+        self.label(&def);
+        self.raw_load_data(RCX, WIN_GUI_WNDPROC_ARG1_OFFSET);
+        self.raw_load_data(RDX, WIN_GUI_WNDPROC_ARG2_OFFSET);
+        self.raw_load_data(R8, WIN_GUI_WNDPROC_ARG3_OFFSET);
+        self.raw_load_data(R9, WIN_GUI_WNDPROC_ARG4_OFFSET);
+        self.raw_call_slot(WIN_GUI_FN_DEF_WINDOW_PROC);
+
+        self.label(&done);
+        self.u8(0x48);
+        self.u8(0x83);
+        self.u8(0xC4);
+        self.u8(0x20); // add rsp, 32
+        self.u8(0x5B); // pop rbx
+        self.u8(0xC3); // ret
     }
 
     fn test_rax(&mut self) {
@@ -1593,6 +1852,13 @@ impl Asm {
                         .get(label)
                         .unwrap_or_else(|| panic!("internal: branch to unknown label '{label}'"));
                     let delta = target as i64 - (*at as i64 + 4);
+                    self.patch_u32(*at, delta as i32 as u32);
+                }
+                Fixup::LabelRel32 { at, next, label } => {
+                    let target = *labels
+                        .get(label)
+                        .unwrap_or_else(|| panic!("internal: branch to unknown label '{label}'"));
+                    let delta = target as i64 - (*at as i64 + *next as i64);
                     self.patch_u32(*at, delta as i32 as u32);
                 }
                 Fixup::Str { at, id } => {

@@ -21,7 +21,8 @@
 //! with `exit(2)`.
 
 use crate::ast::{
-    lambda_free_names, Base, BinOp, Elem, Expr, FuncTy, Param, Program, Stmt, Ty, UnOp,
+    lambda_free_names, Base, BinOp, Elem, Expr, FuncTy, GuiControlKind, Param, Program, Stmt, Ty,
+    UnOp,
 };
 use crate::backend::*;
 use crate::types::Sig;
@@ -270,6 +271,10 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
     cg.emit_heap_fail();
     cg.emit_runtime_fail();
 
+    if target.is_windows() && cg.gui_used {
+        cg.emit_simple_gui_runtime();
+    }
+
     if target.is_windows() {
         // Any syscall the Windows runtime does not map lands here. The label
         // is emitted unconditionally so every unsupported call has a target.
@@ -301,6 +306,7 @@ pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
 
 struct Codegen {
     asm: Asm,
+    target: Target,
     vars: HashMap<String, Var>,
     funcs: HashMap<String, Sig>,
     frame: Option<Frame>,
@@ -318,6 +324,10 @@ struct Codegen {
     show_shapes: Vec<Elem>,
     /// Closure bodies waiting to be emitted, in discovery order.
     pending_lambdas: Vec<PendingLambda>,
+    /// True once a `simple` GUI primary or statement has been compiled.
+    gui_used: bool,
+    /// The native GUI helper is emitted at most once.
+    gui_runtime_emitted: bool,
 }
 
 #[derive(Clone)]
@@ -345,6 +355,7 @@ impl Codegen {
     fn new(funcs: HashMap<String, Sig>, target: Target) -> Self {
         Codegen {
             asm: Asm::new(target),
+            target,
             vars: HashMap::new(),
             funcs,
             frame: None,
@@ -357,6 +368,8 @@ impl Codegen {
             copy_shapes: Vec::new(),
             show_shapes: Vec::new(),
             pending_lambdas: Vec::new(),
+            gui_used: false,
+            gui_runtime_emitted: false,
         }
     }
 
@@ -417,6 +430,7 @@ impl Codegen {
             .max(RUN_STATUS_OFFSET + 8)
             .max(DENTS_OFFSET + DENTS_CAPACITY)
             .max(SOCK_ONE_OFFSET + 8)
+            .max(WIN_GUI_FN_END)
             .max(crate::x86_64::VREG_OFFSET + crate::x86_64::VREG_OFFSET_SLACK)
     }
 
@@ -567,6 +581,15 @@ impl Codegen {
                 }
                 Ok(())
             }
+            Stmt::GuiShow(window, line) => self.gui_show(window).map_err(|m| at(*line, m)),
+            Stmt::GuiSetText {
+                control,
+                text,
+                line,
+            } => self.gui_set_text(control, text).map_err(|m| at(*line, m)),
+            Stmt::GuiMessage(text, line) => self.gui_message(text).map_err(|m| at(*line, m)),
+            Stmt::GuiPump(line) => self.gui_pump().map_err(|m| at(*line, m)),
+            Stmt::GuiClose(line) => self.gui_close().map_err(|m| at(*line, m)),
             Stmt::If {
                 cond,
                 then,
@@ -785,6 +808,548 @@ impl Codegen {
         self.asm.pop_reg(X0);
         self.asm.bl_label("write_file");
         Ok(())
+    }
+
+    // ---- the `simple` native GUI ---------------------------------------
+
+    fn gui_ensure_called(&mut self) {
+        self.gui_used = true;
+        if self.target.is_windows() {
+            self.asm.bl_label("simple_gui_init");
+        }
+    }
+
+    fn gui_cstr(&mut self, id: usize) {
+        self.asm.mov_abs(X0, id);
+        self.asm.add_imm(X0, X0, 8);
+    }
+
+    fn gui_window(&mut self, title: &Expr, width: &Expr, height: &Expr) -> Result<Ty, String> {
+        self.gui_ensure_called();
+        let tt = self.expr(title)?;
+        if tt != Ty::Str {
+            return Err(format!(
+                "'make simple window' needs a title as text, but this is {tt}"
+            ));
+        }
+        self.asm.mov_reg_reg(X2, X0); // keep the Rusk text pointer
+        let wt = self.expr(width)?;
+        if wt != Ty::Int {
+            return Err(format!(
+                "'make simple window' needs a width as a number, but this is {wt}"
+            ));
+        }
+        self.asm.mov_reg_reg(X6, X0);
+        let ht = self.expr(height)?;
+        if ht != Ty::Int {
+            return Err(format!(
+                "'make simple window' needs a height as a number, but this is {ht}"
+            ));
+        }
+        self.asm.mov_reg_reg(X7, X0);
+        if !self.target.is_windows() {
+            self.asm.mov_imm64(X0, 1);
+            return Ok(Ty::Int);
+        }
+
+        self.asm.push_reg(X6); // keep width/height across the helper call
+        self.asm.push_reg(X7);
+        self.asm.mov_reg_reg(X0, X2);
+        self.asm.bl_label("simple_gui_cstring");
+        self.asm.mov_reg_reg(X2, X0); // NUL-terminated title
+        self.asm.pop_reg(X7);
+        self.asm.pop_reg(X6);
+        let class = self.intern("SimpleWindowClass\0");
+        self.gui_cstr(class);
+        self.asm.mov_reg_reg(X1, X0); // class name
+        self.asm.mov_imm64(X0, 0); // dwExStyle
+        self.asm.mov_imm64(X3, 0x02CF_0000); // WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN
+        self.asm.mov_imm64(X4, 0x8000_0000); // CW_USEDEFAULT x
+        self.asm.mov_imm64(X5, 0x8000_0000); // CW_USEDEFAULT y
+        self.asm.mov_imm64(X8, 0); // no parent
+        self.asm.mov_imm64(X9, 0); // no menu
+        self.asm.mov_data_addr(X10, WIN_GUI_HINSTANCE_OFFSET);
+        self.asm.ldr(X10, X10, 0);
+        self.asm.mov_imm64(X11, 0); // lpParam
+        let stack = [
+            WinArg::Vreg(X4),
+            WinArg::Vreg(X5),
+            WinArg::Vreg(X6),
+            WinArg::Vreg(X7),
+            WinArg::Vreg(X8),
+            WinArg::Vreg(X9),
+            WinArg::Vreg(X10),
+            WinArg::Vreg(X11),
+        ];
+        self.asm.win_call_ptr(WIN_GUI_FN_CREATE_WINDOW, 4, &stack);
+        self.asm.win_result();
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.mov_data_addr(X0, WIN_GUI_HWND_OFFSET);
+        self.asm.str(X1, X0, 0);
+        self.asm.mov_imm64(X0, 1); // a Rusk-side window number
+        Ok(Ty::Int)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gui_control(
+        &mut self,
+        kind: GuiControlKind,
+        window: &Expr,
+        text: &Expr,
+        x: &Expr,
+        y: &Expr,
+        width: &Expr,
+        height: &Expr,
+    ) -> Result<Ty, String> {
+        self.gui_ensure_called();
+        let wt = self.expr(window)?;
+        if wt != Ty::Int {
+            return Err(format!(
+                "'add simple control' needs a window number, but this is {wt}"
+            ));
+        }
+        self.asm.mov_reg_reg(X8, X0); // parent window
+        let tt = self.expr(text)?;
+        if tt != Ty::Str {
+            return Err(format!(
+                "'add simple control' needs a label as text, but this is {tt}"
+            ));
+        }
+        self.asm.mov_reg_reg(X2, X0);
+        let xt = self.expr(x)?;
+        if xt != Ty::Int {
+            return Err(format!(
+                "'add simple control' needs an x position as a number, but this is {xt}"
+            ));
+        }
+        self.asm.mov_reg_reg(X4, X0);
+        let yt = self.expr(y)?;
+        if yt != Ty::Int {
+            return Err(format!(
+                "'add simple control' needs a y position as a number, but this is {yt}"
+            ));
+        }
+        self.asm.mov_reg_reg(X5, X0);
+        let wit = self.expr(width)?;
+        if wit != Ty::Int {
+            return Err(format!(
+                "'add simple control' needs a width as a number, but this is {wit}"
+            ));
+        }
+        self.asm.mov_reg_reg(X6, X0);
+        let hit = self.expr(height)?;
+        if hit != Ty::Int {
+            return Err(format!(
+                "'add simple control' needs a height as a number, but this is {hit}"
+            ));
+        }
+        self.asm.mov_reg_reg(X7, X0);
+
+        self.asm.mov_data_addr(X0, WIN_GUI_NEXT_ID_OFFSET);
+        self.asm.ldr(X0, X0, 0);
+        self.asm.add_imm(X0, X0, 1);
+        self.asm.mov_reg_reg(X9, X0); // control id in hMenu
+        self.asm.mov_data_addr(X1, WIN_GUI_NEXT_ID_OFFSET);
+        self.asm.str(X0, X1, 0);
+        if !self.target.is_windows() {
+            self.asm.mov_reg_reg(X0, X9);
+            return Ok(Ty::Int);
+        }
+
+        self.asm.push_reg(X4); // keep geometry across the helper call
+        self.asm.push_reg(X5);
+        self.asm.push_reg(X6);
+        self.asm.push_reg(X7);
+        self.asm.mov_reg_reg(X0, X2);
+        self.asm.bl_label("simple_gui_cstring");
+        self.asm.mov_reg_reg(X2, X0);
+        self.asm.pop_reg(X7);
+        self.asm.pop_reg(X6);
+        self.asm.pop_reg(X5);
+        self.asm.pop_reg(X4);
+        let (class, style) = match kind {
+            GuiControlKind::Button => ("Button\0", 0x5000_0000),
+            GuiControlKind::Label => ("Static\0", 0x5000_0000),
+            GuiControlKind::Field => ("Edit\0", 0x5080_0080),
+        };
+        let class_id = self.intern(class);
+        self.gui_cstr(class_id);
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.mov_imm64(X0, 0); // dwExStyle
+        self.asm.mov_imm64(X3, style);
+        self.asm.mov_data_addr(X10, WIN_GUI_HINSTANCE_OFFSET);
+        self.asm.ldr(X10, X10, 0);
+        self.asm.mov_imm64(X11, 0); // lpParam
+        self.asm.mov_data_addr(X0, WIN_GUI_HWND_OFFSET);
+        self.asm.ldr(X8, X0, 0); // use the real parent HWND
+        let stack = [
+            WinArg::Vreg(X4),
+            WinArg::Vreg(X5),
+            WinArg::Vreg(X6),
+            WinArg::Vreg(X7),
+            WinArg::Vreg(X8),
+            WinArg::Vreg(X9),
+            WinArg::Vreg(X10),
+            WinArg::Vreg(X11),
+        ];
+        self.asm.win_call_ptr(WIN_GUI_FN_CREATE_WINDOW, 4, &stack);
+        self.asm.win_result();
+        self.asm.mov_reg_reg(X0, X9); // Rusk-side control number
+        Ok(Ty::Int)
+    }
+
+    /// X0 holds a Rusk control number; on return X0 holds its native HWND.
+    fn gui_control_hwnd(&mut self) {
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.mov_data_addr(X0, WIN_GUI_HWND_OFFSET);
+        self.asm.ldr(X0, X0, 0);
+        self.asm.win_call_ptr(WIN_GUI_FN_GET_DLG_ITEM, 2, &[]);
+        self.asm.win_result();
+    }
+
+    fn gui_show(&mut self, window: &Expr) -> Result<(), String> {
+        self.gui_ensure_called();
+        let ty = self.expr(window)?;
+        if ty != Ty::Int {
+            return Err(format!(
+                "'show simple window' needs a window number, but this is {ty}"
+            ));
+        }
+        if !self.target.is_windows() {
+            return Ok(());
+        }
+        self.asm.mov_data_addr(X0, WIN_GUI_HWND_OFFSET);
+        self.asm.ldr(X0, X0, 0);
+        self.asm.mov_imm64(X1, 5); // SW_SHOW
+        self.asm.win_call_ptr(WIN_GUI_FN_SHOW_WINDOW, 2, &[]);
+        self.asm.mov_data_addr(X0, WIN_GUI_HWND_OFFSET);
+        self.asm.ldr(X0, X0, 0);
+        self.asm.win_call_ptr(WIN_GUI_FN_UPDATE_WINDOW, 1, &[]);
+        Ok(())
+    }
+
+    fn gui_set_text(&mut self, control: &Expr, text: &Expr) -> Result<(), String> {
+        self.gui_ensure_called();
+        let tty = self.expr(text)?;
+        if tty != Ty::Str {
+            return Err(format!("'set simple text' needs text, but this is {tty}"));
+        }
+        if self.target.is_windows() {
+            self.asm.bl_label("simple_gui_cstring");
+        }
+        self.asm.push_reg(X0); // C string
+        let cty = self.expr(control)?;
+        if cty != Ty::Int {
+            return Err(format!(
+                "'set simple text' needs a control number, but this is {cty}"
+            ));
+        }
+        if self.target.is_windows() {
+            self.gui_control_hwnd();
+            self.asm.pop_reg(X1); // C string
+            self.asm.win_call_ptr(WIN_GUI_FN_SET_WINDOW_TEXT, 2, &[]);
+        } else {
+            self.asm.pop_reg(X0);
+        }
+        Ok(())
+    }
+
+    fn gui_message(&mut self, text: &Expr) -> Result<(), String> {
+        self.gui_ensure_called();
+        let ty = self.expr(text)?;
+        if ty != Ty::Str {
+            return Err(format!(
+                "'show simple message' needs text, but this is {ty}"
+            ));
+        }
+        if !self.target.is_windows() {
+            return Ok(());
+        }
+        self.asm.bl_label("simple_gui_cstring");
+        self.asm.mov_reg_reg(X1, X0);
+        let caption = self.intern("Simple\0");
+        self.gui_cstr(caption);
+        self.asm.mov_reg_reg(X2, X0);
+        self.asm.mov_imm64(X0, 0); // no owner
+        self.asm.mov_imm64(X3, 0); // MB_OK
+        self.asm.win_call_ptr(WIN_GUI_FN_MESSAGE_BOX, 4, &[]);
+        Ok(())
+    }
+
+    fn gui_confirm(&mut self, text: &Expr) -> Result<Ty, String> {
+        self.gui_ensure_called();
+        let ty = self.expr(text)?;
+        if ty != Ty::Str {
+            return Err(format!("'simple confirm' needs text, but this is {ty}"));
+        }
+        if !self.target.is_windows() {
+            self.asm.mov_reg_reg(X0, XZR);
+            return Ok(Ty::Bool);
+        }
+        self.asm.bl_label("simple_gui_cstring");
+        self.asm.mov_reg_reg(X1, X0);
+        let caption = self.intern("Simple\0");
+        self.gui_cstr(caption);
+        self.asm.mov_reg_reg(X2, X0);
+        self.asm.mov_imm64(X0, 0);
+        self.asm.mov_imm64(X3, 4); // MB_YESNO
+        self.asm.win_call_ptr(WIN_GUI_FN_MESSAGE_BOX, 4, &[]);
+        self.asm.win_result();
+        self.asm.mov_imm64(X1, 6); // IDYES
+        self.asm.cmp_reg_reg(X0, X1);
+        self.asm.cset(X0, CC_EQ);
+        Ok(Ty::Bool)
+    }
+
+    fn gui_control_text(&mut self, control: &Expr) -> Result<Ty, String> {
+        self.gui_ensure_called();
+        let ty = self.expr(control)?;
+        if ty != Ty::Int {
+            return Err(format!(
+                "'simple text' needs a control number, but this is {ty}"
+            ));
+        }
+        if !self.target.is_windows() {
+            let empty = self.intern("");
+            self.asm.mov_abs(X0, empty);
+            return Ok(Ty::Str);
+        }
+        self.gui_control_hwnd();
+        self.asm.push_reg(X0); // control HWND
+        self.asm
+            .win_call_ptr(WIN_GUI_FN_GET_WINDOW_TEXT_LEN, 1, &[]);
+        self.asm.win_result();
+        self.asm.pop_reg(X1); // control HWND
+        self.asm.mov_reg_reg(X2, X0); // length
+        self.asm.mov_reg_reg(X0, X1);
+        self.asm.mov_data_addr(X1, WIN_GUI_TEXT_OFFSET);
+        self.asm.add_imm(X1, X1, 8); // GetWindowTextA writes here
+        self.asm.mov_imm64(X3, WIN_GUI_TEXT_CAPACITY - 1);
+        self.asm.win_call_ptr(WIN_GUI_FN_GET_WINDOW_TEXT, 3, &[]);
+        self.asm.win_result();
+        self.asm.mov_reg_reg(X2, X0); // bytes actually copied
+        self.asm.mov_data_addr(X1, WIN_GUI_TEXT_OFFSET);
+        self.asm.str(X2, X1, 0); // Rusk text length
+        self.asm.mov_data_addr(X0, WIN_GUI_TEXT_OFFSET);
+        Ok(Ty::Str)
+    }
+
+    fn gui_pump(&mut self) -> Result<(), String> {
+        self.gui_ensure_called();
+        if !self.target.is_windows() {
+            return Ok(());
+        }
+        let end = self.new_label("gui_pump_end");
+        self.asm.mov_data_addr(X0, WIN_GUI_MSG_OFFSET);
+        self.asm.mov_imm64(X1, 0);
+        self.asm.mov_imm64(X2, 0);
+        self.asm.mov_imm64(X3, 0);
+        self.asm
+            .win_call_ptr(WIN_GUI_FN_PEEK_MESSAGE, 4, &[WinArg::Imm64(1)]);
+        self.asm.win_result();
+        self.asm.mov_imm64(X1, 0);
+        self.asm.cmp_reg_reg(X0, X1);
+        self.asm.bcond_label(CC_EQ, &end);
+        self.asm.mov_data_addr(X0, WIN_GUI_MSG_OFFSET);
+        self.asm.win_call_ptr(WIN_GUI_FN_TRANSLATE_MESSAGE, 1, &[]);
+        self.asm.mov_data_addr(X0, WIN_GUI_MSG_OFFSET);
+        self.asm.win_call_ptr(WIN_GUI_FN_DISPATCH_MESSAGE, 1, &[]);
+        self.asm.label(&end);
+        Ok(())
+    }
+
+    fn gui_next_event(&mut self) -> Result<Ty, String> {
+        self.gui_pump()?;
+        let empty = self.intern("");
+        let click = self.intern("click");
+        let change = self.intern("change");
+        let close = self.intern("close");
+        let done = self.new_label("gui_event_done");
+        let advance = self.new_label("gui_event_advance");
+        let is_change = self.new_label("gui_event_change");
+        let is_close = self.new_label("gui_event_close");
+
+        if self.target.is_windows() {
+            self.asm.mov_data_addr(X0, WIN_GUI_EVENT_READ_OFFSET);
+            self.asm.ldr(X0, X0, 0);
+            self.asm.mov_data_addr(X1, WIN_GUI_EVENT_COUNT_OFFSET);
+            self.asm.ldr(X1, X1, 0);
+            self.asm.cmp_reg_reg(X0, X1);
+            self.asm.bcond_label(CC_GE, &done);
+
+            let is_click = self.new_label("gui_event_click");
+            self.asm.mov_data_addr(X0, WIN_GUI_EVENT_KIND_OFFSET);
+            self.asm.ldr(X0, X0, 0);
+            self.asm.mov_imm64(X1, 1);
+            self.asm.cmp_reg_reg(X0, X1);
+            self.asm.bcond_label(CC_EQ, &is_click);
+            self.asm.mov_data_addr(X0, WIN_GUI_EVENT_KIND_OFFSET);
+            self.asm.ldr(X0, X0, 0);
+            self.asm.mov_imm64(X1, 2);
+            self.asm.cmp_reg_reg(X0, X1);
+            self.asm.bcond_label(CC_EQ, &is_change);
+            self.asm.mov_imm64(X1, 3);
+            self.asm.cmp_reg_reg(X0, X1);
+            self.asm.bcond_label(CC_EQ, &is_close);
+            self.asm.b_label(&done);
+
+            self.asm.label(&is_click);
+            self.asm.mov_abs(X0, click);
+            self.asm.b_label(&advance);
+            self.asm.label(&is_change);
+            self.asm.mov_abs(X0, change);
+            self.asm.b_label(&advance);
+            self.asm.label(&is_close);
+            self.asm.mov_abs(X0, close);
+            self.asm.label(&advance);
+            self.asm.mov_data_addr(X1, WIN_GUI_EVENT_READ_OFFSET);
+            self.asm.ldr(X1, X1, 0);
+            self.asm.add_imm(X1, X1, 1);
+            self.asm.mov_data_addr(X2, WIN_GUI_EVENT_READ_OFFSET);
+            self.asm.str(X1, X2, 0);
+        }
+        self.asm.label(&done);
+        self.asm.mov_abs(X0, empty);
+        Ok(Ty::Str)
+    }
+
+    fn gui_close(&mut self) -> Result<(), String> {
+        self.gui_ensure_called();
+        if !self.target.is_windows() {
+            return Ok(());
+        }
+        self.asm.mov_data_addr(X0, WIN_GUI_HWND_OFFSET);
+        self.asm.ldr(X0, X0, 0);
+        self.asm.win_call_ptr(WIN_GUI_FN_DESTROY_WINDOW, 1, &[]);
+        Ok(())
+    }
+
+    fn emit_simple_gui_runtime(&mut self) {
+        if self.gui_runtime_emitted {
+            return;
+        }
+        self.gui_runtime_emitted = true;
+        self.emit_gui_cstring();
+        self.emit_gui_init();
+        self.asm.win_emit_wndproc("simple_gui_wndproc");
+    }
+
+    fn emit_gui_cstring(&mut self) {
+        let clamp = self.new_label("gui_cstr_clamp");
+        let copy = self.new_label("gui_cstr_copy");
+        let loop_ = self.new_label("gui_cstr_loop");
+        let done = self.new_label("gui_cstr_done");
+        self.asm.label("simple_gui_cstring");
+        self.asm.mov_data_addr(X1, WIN_GUI_TEXT_OFFSET);
+        self.asm.ldr(X2, X0, 0); // Rusk length
+        self.asm.mov_imm64(X3, WIN_GUI_TEXT_CAPACITY - 1);
+        self.asm.cmp_reg_reg(X2, X3);
+        self.asm.bcond_label(CC_GT, &clamp);
+        self.asm.b_label(&copy);
+        self.asm.label(&clamp);
+        self.asm.mov_reg_reg(X2, X3);
+        self.asm.label(&copy);
+        self.asm.add_imm(X3, X0, 8); // bytes
+        self.asm.mov_reg_reg(X4, X1); // write cursor
+        self.asm.mov_reg_reg(X5, X1); // result
+        self.asm.mov_reg_reg(X6, X2); // bytes left
+        self.asm.label(&loop_);
+        self.asm.cmp_reg_reg(X6, XZR);
+        self.asm.bcond_label(CC_EQ, &done);
+        self.asm.ldrb(X7, X3, 0);
+        self.asm.strb(X7, X4, 0);
+        self.asm.add_imm(X3, X3, 1);
+        self.asm.add_imm(X4, X4, 1);
+        self.asm.sub_imm(X6, X6, 1);
+        self.asm.b_label(&loop_);
+        self.asm.label(&done);
+        self.asm.strb(XZR, X4, 0);
+        self.asm.mov_reg_reg(X0, X5);
+        self.asm.ret();
+    }
+
+    fn emit_gui_init(&mut self) {
+        let done = self.new_label("gui_init_done");
+        self.asm.label("simple_gui_init");
+        self.asm.mov_data_addr(X0, WIN_GUI_FLAG_OFFSET);
+        self.asm.ldr(X0, X0, 0);
+        self.asm.mov_imm64(X1, 0);
+        self.asm.cmp_reg_reg(X0, X1);
+        self.asm.bcond_label(CC_NE, &done);
+
+        let dll = self.intern("user32.dll\0");
+        self.gui_cstr(dll);
+        self.asm.win_call_args("LoadLibraryA", 1);
+        self.asm.win_result();
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.mov_data_addr(X0, WIN_GUI_USER32_OFFSET);
+        self.asm.str(X1, X0, 0);
+
+        self.asm.mov_imm64(X0, 0);
+        self.asm.win_call_args("GetModuleHandleA", 1);
+        self.asm.win_result();
+        self.asm.mov_reg_reg(X1, X0);
+        self.asm.mov_data_addr(X0, WIN_GUI_HINSTANCE_OFFSET);
+        self.asm.str(X1, X0, 0);
+
+        let procs = [
+            ("RegisterClassA\0", WIN_GUI_FN_REGISTER_CLASS),
+            ("CreateWindowExA\0", WIN_GUI_FN_CREATE_WINDOW),
+            ("ShowWindow\0", WIN_GUI_FN_SHOW_WINDOW),
+            ("UpdateWindow\0", WIN_GUI_FN_UPDATE_WINDOW),
+            ("PeekMessageA\0", WIN_GUI_FN_PEEK_MESSAGE),
+            ("TranslateMessage\0", WIN_GUI_FN_TRANSLATE_MESSAGE),
+            ("DispatchMessageA\0", WIN_GUI_FN_DISPATCH_MESSAGE),
+            ("DefWindowProcA\0", WIN_GUI_FN_DEF_WINDOW_PROC),
+            ("PostQuitMessage\0", WIN_GUI_FN_POST_QUIT_MESSAGE),
+            ("MessageBoxA\0", WIN_GUI_FN_MESSAGE_BOX),
+            ("GetDlgItem\0", WIN_GUI_FN_GET_DLG_ITEM),
+            ("SetWindowTextA\0", WIN_GUI_FN_SET_WINDOW_TEXT),
+            ("GetWindowTextA\0", WIN_GUI_FN_GET_WINDOW_TEXT),
+            ("GetWindowTextLengthA\0", WIN_GUI_FN_GET_WINDOW_TEXT_LEN),
+            ("DestroyWindow\0", WIN_GUI_FN_DESTROY_WINDOW),
+        ];
+        for (name, slot) in procs {
+            self.asm.mov_data_addr(X0, WIN_GUI_USER32_OFFSET);
+            self.asm.ldr(X0, X0, 0);
+            let id = self.intern(name);
+            self.gui_cstr(id);
+            self.asm.mov_reg_reg(X1, X0);
+            self.asm.win_call_args("GetProcAddress", 2);
+            self.asm.win_result();
+            self.asm.mov_reg_reg(X2, X0);
+            self.asm.mov_data_addr(X0, slot);
+            self.asm.str(X2, X0, 0);
+        }
+
+        self.asm.mov_data_addr(X1, WIN_GUI_WNDCLASS_OFFSET);
+        self.asm.mov_imm64(X0, 3); // CS_HREDRAW | CS_VREDRAW
+        self.asm.str(X0, X1, 0);
+        self.asm.mov_label_addr(X0, "simple_gui_wndproc");
+        self.asm.str(X0, X1, 8); // lpfnWndProc
+        self.asm.mov_imm64(X0, 0);
+        self.asm.str(X0, X1, 16); // cbClsExtra and cbWndExtra
+        self.asm.mov_data_addr(X0, WIN_GUI_HINSTANCE_OFFSET);
+        self.asm.ldr(X0, X0, 0);
+        self.asm.str(X0, X1, 24); // hInstance
+        self.asm.mov_imm64(X0, 0);
+        self.asm.str(X0, X1, 32); // hIcon
+        self.asm.str(X0, X1, 40); // hCursor
+        self.asm.mov_imm64(X0, 5); // COLOR_WINDOW + 1
+        self.asm.str(X0, X1, 48); // hbrBackground
+        self.asm.mov_imm64(X0, 0);
+        self.asm.str(X0, X1, 56); // lpszMenuName
+        let class = self.intern("SimpleWindowClass\0");
+        self.gui_cstr(class);
+        self.asm.str(X0, X1, 64); // lpszClassName
+
+        self.asm.mov_reg_reg(X0, X1);
+        self.asm.win_call_ptr(WIN_GUI_FN_REGISTER_CLASS, 1, &[]);
+        self.asm.mov_imm64(X0, 1);
+        self.asm.mov_data_addr(X1, WIN_GUI_FLAG_OFFSET);
+        self.asm.str(X0, X1, 0);
+        self.asm.label(&done);
+        self.asm.ret();
     }
 
     fn path_expr(&mut self, expr: &Expr, what: &str) -> Result<(), String> {
@@ -1725,6 +2290,33 @@ impl Codegen {
                 self.asm.bl_label("read_key");
                 Ok(Ty::Str)
             }
+            Expr::GuiWindow {
+                title,
+                width,
+                height,
+            } => self.gui_window(title, width, height),
+            Expr::GuiControl {
+                window,
+                kind,
+                text,
+                x,
+                y,
+                width,
+                height,
+            } => self.gui_control(*kind, window, text, x, y, width, height),
+            Expr::GuiNextEvent => self.gui_next_event(),
+            Expr::GuiEventControl => {
+                self.gui_ensure_called();
+                if !self.target.is_windows() {
+                    self.asm.mov_imm64(X0, 0);
+                    return Ok(Ty::Int);
+                }
+                self.asm.mov_data_addr(X0, WIN_GUI_EVENT_CONTROL_OFFSET);
+                self.asm.ldr(X0, X0, 0);
+                Ok(Ty::Int)
+            }
+            Expr::GuiControlText(control) => self.gui_control_text(control),
+            Expr::GuiConfirm(text) => self.gui_confirm(text),
             Expr::Unary(op, inner) => {
                 let ty = self.expr(inner)?;
                 match op {
