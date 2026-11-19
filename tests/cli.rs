@@ -547,6 +547,9 @@ fn toastset_has_a_native_windows_installer() {
     assert!(release.contains("Copy-Item -Recurse \"rusklib\" \"dist/$name/rusklib\""));
     let wheat = include_str!("../rusklib/wheat/README.md");
     assert!(wheat.contains("wheat — a small terminal UI library in Rusk"));
+    let pointer = include_str!("../wheat/README.md");
+    assert!(pointer.contains("rusklib/wheat"));
+    assert!(pointer.contains("wheat_box_around"));
 }
 
 fn gui_source() -> &'static str {

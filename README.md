@@ -440,7 +440,9 @@ The checkout ships small Rusk libraries under `ruskmods/`: `math`, `date`,
 `shutils`. `ruskmods/installwork/` is an installer framework with a registry,
 version specs, a dependency resolver, archives, an install prefix, and a CLI.
 The `rusklib/` folder adds higher-level file and archive helpers, the `wheat`
-terminal UI library, and a bundle that imports everything. `fastlib/` holds
+terminal UI library, and a bundle that imports everything. The root-level
+[`wheat/`](wheat/) folder is a signpost to [`rusklib/wheat/`](rusklib/wheat/).
+`fastlib/` holds
 libraries built on language primaries, starting with the `simple` GUI:
 
 ```rusk
