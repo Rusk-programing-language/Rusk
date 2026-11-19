@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.2.1
+# The Rusk Language — Specification v1.2.2
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v1.2.1
+emits native machine code directly. This document describes exactly what v1.2.2
 accepts and what it guarantees.
 
-Status: **v1.2.1, Linux on AArch64 and x86-64, plus experimental Windows
+Status: **v1.2.2, Linux on AArch64 and x86-64, plus experimental Windows
 x86-64 output**. The compiler also builds and runs on Windows x86-64. Windows
 x86-64 programs can create native GUI windows through the `simple` primaries;
 on other targets those primaries are safe no-ops. Toast files (`.tst`) can hold
@@ -960,20 +960,21 @@ E01  syntax error  line 2
   hint: Text starts and ends with a double quote. Close it on the same line...
 ```
 
-Codes count upwards in a session (`E01`, `E02`, …). Categories are
-`syntax error`, `type error`, `ownership error`, `runtime error`,
-`import error`, and `usage error`. The report includes the line number and the
-source line when the pipeline or caller knows them, followed by an explanation
-and a hint. It then asks:
+Codes are fixed by category: `E01` `syntax error`, `E02` `type error`, `E03`
+`ownership error`, `E04` `runtime error`, `E05` `import error`, and `E06`
+`usage error`. A kind always gets the same number, in every session and for
+every command. The report includes the line number and the source line when the
+pipeline or caller knows them, followed by an explanation and a hint. The whole
+submitted source is then printed before the question:
 
 ```text
 Do you want to edit this code using the REPL y/n
 ```
 
-`y` reopens the offending block at the prompt with the cursor ready. The
-question is skipped when stdin is not a terminal. The numbering and wording are
-a presentation layer over the pipeline's existing `Result<_, String>` errors;
-they do not change which stage rejects a program.
+`y` reopens all of that source at the prompt with the cursor ready. The question
+is skipped when stdin is not a terminal. The codes and wording are a
+presentation layer over the pipeline's existing `Result<_, String>` errors; they
+do not change which stage rejects a program.
 
 The session is a tree-walking evaluator over the same AST, not a machine-code
 backend. Every submission is still lexed, parsed, type checked, and ownership
@@ -1108,6 +1109,25 @@ A Linux output is a static ELF64 executable for the selected target:
   on the next 4 KiB boundary after the text and read-only data, zero-filled by
   the kernel, with its address patched into the code after layout;
 - no interpreter, no dynamic section, no load-time relocations, no libc.
+
+### Optimization pass
+
+Type and ownership checks still run on the source as written. Only then does
+`src/optimize.rs` copy the checked AST for code generation:
+
+- arithmetic, comparisons, and boolean operations on literals are folded;
+  division by zero and overflow are left for the runtime;
+- a constant `if`, `while`, `repeat`, `and`, or `or` resolves to its live path;
+  statements after an unconditional `stop`, `give back`, `break`, or `continue`
+  are dropped;
+- function definitions in discarded code are kept, so live calls still have a
+  label.
+
+The x86-64 emitter also uses 32-bit immediate moves for values that fit, drops
+moves to the same register, and spills the least recently used pool register.
+`cargo bench` reports code-generation time, text/image size, and baked-program
+run time with the pass off and on. The pass changes speed and size, not which
+programs compile or what they print.
 
 ### Toast files (`.tst`)
 
@@ -1389,8 +1409,9 @@ parameters. v1.1.5 added IPv4 TCP sockets and raw terminal input. v1.1.6 added
 toast files and an experimental Windows x86-64 output. v1.1.7 fleshed out that
 Windows target with arguments, the environment, regular files, and raw terminal
 mode. v1.2.0 added `rdb`, coloured editing, and numbered diagnostics. v1.2.1
-added the native `simple` GUI primaries and the `fastlib/` library folder. What
-remains:
+added the native `simple` GUI primaries and the `fastlib/` library folder.
+v1.2.2 fixed category error codes, full-code REPL editing, native Windows
+installation, and added dependency-free compiler optimizations. What remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression

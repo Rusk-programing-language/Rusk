@@ -2,8 +2,8 @@
 //!
 //! Every error that reaches a person gets a short code (`E01`, `E02`, …), a
 //! category, the line it came from when one is known, a plain-English
-//! explanation, and a hint for the next step. The REPL keeps one [`Reporter`]
-//! for the whole session so the codes count upwards as mistakes happen.
+//! explanation, and a hint for the next step. The code identifies the category:
+//! `E01` is always a syntax error, `E02` a type error, and so on.
 //!
 //! The compiler pipeline still returns `String` errors. This module reads the
 //! conventions those strings already use (`line N: …`, `in file.rk: line N: …`)
@@ -39,6 +39,19 @@ impl Kind {
         }
     }
 
+    /// The stable number for this category: E01 syntax, E02 type, E03
+    /// ownership, E04 runtime, E05 import, E06 usage.
+    pub fn code(self) -> &'static str {
+        match self {
+            Kind::Syntax => "E01",
+            Kind::Type => "E02",
+            Kind::Ownership => "E03",
+            Kind::Runtime => "E04",
+            Kind::Import => "E05",
+            Kind::Usage => "E06",
+        }
+    }
+
     fn color(self) -> Color {
         match self {
             Kind::Syntax => Color::BrightRed,
@@ -54,7 +67,7 @@ impl Kind {
 /// One reported mistake, ready to print.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
-    /// A short session code such as `E01`.
+    /// The category's stable code, such as `E01` for a syntax error.
     pub code: String,
     pub kind: Kind,
     /// The one-based line in the submitted source or file, when known.
@@ -69,18 +82,20 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     /// Build a diagnostic from a raw pipeline error and, when available, the
-    /// source it came from. `serial` is one-based and becomes `E01`, `E02`, …
-    pub fn new(serial: u32, raw: &str, source: Option<&str>) -> Self {
+    /// source it came from. The code comes from the error's category, so the
+    /// same kind of mistake always gets the same number.
+    pub fn new(raw: &str, source: Option<&str>) -> Self {
         let line = find_line(raw);
         let file = find_file(raw);
         let message = clean_message(raw);
+        let kind = classify(raw);
         let snippet = source
             .and_then(|text| line.and_then(|line| text.lines().nth(line - 1)))
             .map(|text| text.trim_end().to_string())
             .filter(|text| !text.trim().is_empty());
         Diagnostic {
-            code: format!("E{serial:02}"),
-            kind: classify(raw),
+            code: kind.code().to_string(),
+            kind,
             line,
             file,
             message,
@@ -197,30 +212,47 @@ impl Diagnostic {
     }
 }
 
-/// Hands out the session's error numbers.
+/// Builds diagnostics. The category decides the code, so there is no counter
+/// to reset between sessions and a type error is never mistaken for `E01`.
 #[derive(Debug, Default)]
-pub struct Reporter {
-    next: u32,
-}
+pub struct Reporter;
 
 impl Reporter {
     pub fn new() -> Self {
-        Reporter::default()
+        Reporter
     }
 
-    /// Number the next mistake and attach the source line when possible.
-    pub fn report(&mut self, raw: &str, source: Option<&str>) -> Diagnostic {
-        self.next += 1;
-        Diagnostic::new(self.next, raw, source)
+    /// Number the mistake by its category and attach the source line when
+    /// possible.
+    pub fn report(&self, raw: &str, source: Option<&str>) -> Diagnostic {
+        Diagnostic::new(raw, source)
     }
 }
 
-/// Ask whether the code should be reopened in the REPL. This is deliberately a
-/// plain cooked-mode question: it runs after the full-screen editor has already
-/// let go of the terminal, and it is skipped entirely when stdin is a pipe.
-pub fn wants_to_edit() -> bool {
+/// Print the whole submitted source before the edit question, so a person can
+/// see exactly what will be reopened. `line` is kept for the caller's report
+/// but does not narrow the code shown here.
+pub fn show_full_code(source: &str, line: Option<usize>) {
+    let _ = line;
+    if source.is_empty() {
+        return;
+    }
+    let width = source.lines().count().to_string().len();
+    for (index, text) in source.lines().enumerate() {
+        println!("{:>width$} | {text}", index + 1);
+    }
+}
+
+/// Ask whether the code should be reopened in the REPL. The full source is
+/// printed first, followed by the exact question. This is deliberately a plain
+/// cooked-mode question: it runs after the full-screen editor has already let
+/// go of the terminal, and it is skipped entirely when stdin is a pipe.
+pub fn wants_to_edit(source: Option<&str>, line: Option<usize>) -> bool {
     if !io::stdin().is_terminal() {
         return false;
+    }
+    if let Some(source) = source {
+        show_full_code(source, line);
     }
     print!("{EDIT_QUESTION} ");
     let _ = io::stdout().flush();
@@ -231,41 +263,11 @@ pub fn wants_to_edit() -> bool {
     matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
-/// The lines a person should see when the REPL reopens: the offending block,
-/// cut back to the nearest non-indented header and forward while the block
-/// continues. This keeps a whole file from being replayed when one line is
-/// wrong.
-pub fn edit_lines(source: &str, line: Option<usize>) -> Vec<String> {
-    let lines: Vec<&str> = source.lines().collect();
-    if lines.is_empty() {
-        return Vec::new();
-    }
-    let Some(line) = line else {
-        return lines.iter().map(|text| text.to_string()).collect();
-    };
-    let at = (line - 1).min(lines.len() - 1);
-    let mut start = at;
-    while start > 0 {
-        let text = lines[start];
-        if text.trim().is_empty() || text.starts_with(' ') || text.starts_with('\t') {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    let mut end = at + 1;
-    while end < lines.len() {
-        let text = lines[end];
-        if text.trim().is_empty() || text.starts_with(' ') || text.starts_with('\t') {
-            end += 1;
-        } else {
-            break;
-        }
-    }
-    lines[start..end]
-        .iter()
-        .map(|text| text.to_string())
-        .collect()
+/// The lines a person gets when the REPL reopens: the entire submitted source,
+/// with the line numbers removed by the editor. Showing the full code matches
+/// what the question promises, even when the mistake is deep inside a block.
+pub fn edit_lines(source: &str) -> Vec<String> {
+    source.lines().map(|text| text.to_string()).collect()
 }
 
 /// Pull the first `line N` out of a pipeline message.
@@ -406,13 +408,26 @@ mod tests {
     }
 
     #[test]
-    fn codes_count_up_and_keep_their_source_line() {
+    fn codes_identify_the_category_and_keep_their_source_line() {
         let source = "let x be 1\nsay \"oops\nsay x\n";
-        let mut reporter = Reporter::new();
+        let reporter = Reporter::new();
         let first = reporter.report("line 2: this text never gets closed", Some(source));
         let second = reporter.report("line 3: I expected the end of the line", Some(source));
+        let type_error = reporter.report(
+            "line 3: 'x' holds text, but this needs a number",
+            Some(source),
+        );
+        let ownership = reporter.report("line 4: 'text' was moved already", Some(source));
+        let runtime = reporter.report("line 5: division by zero", Some(source));
+        let import = reporter.report("can't read missing.rk: No such file", Some(source));
+        let usage = reporter.report("I don't know the command ':wat' — try :help", Some(source));
         assert_eq!(first.code, "E01");
-        assert_eq!(second.code, "E02");
+        assert_eq!(second.code, "E01");
+        assert_eq!(type_error.code, "E02");
+        assert_eq!(ownership.code, "E03");
+        assert_eq!(runtime.code, "E04");
+        assert_eq!(import.code, "E05");
+        assert_eq!(usage.code, "E06");
         assert_eq!(first.line, Some(2));
         assert_eq!(first.snippet.as_deref(), Some("say \"oops"));
         assert_eq!(first.kind, Kind::Syntax);
@@ -423,11 +438,10 @@ mod tests {
     #[test]
     fn file_and_line_prefixes_are_understood() {
         let diagnostic = Diagnostic::new(
-            7,
             "in lib/math.rk: line 12: I don't know a thing called 'x'",
             None,
         );
-        assert_eq!(diagnostic.code, "E07");
+        assert_eq!(diagnostic.code, "E02");
         assert_eq!(diagnostic.file.as_deref(), Some("lib/math.rk"));
         assert_eq!(diagnostic.line, Some(12));
         assert_eq!(diagnostic.message, "I don't know a thing called 'x'");
@@ -437,35 +451,34 @@ mod tests {
     #[test]
     fn ownership_and_import_errors_are_classified() {
         assert_eq!(
-            Diagnostic::new(1, "line 4: 'text' was moved already", None).kind,
+            Diagnostic::new("line 4: 'text' was moved already", None).kind,
             Kind::Ownership
         );
         assert_eq!(
-            Diagnostic::new(1, "can't read missing.rk: No such file", None).kind,
+            Diagnostic::new("can't read missing.rk: No such file", None).kind,
             Kind::Import
         );
         assert_eq!(
-            Diagnostic::new(1, "I don't know the command ':wat' — try :help", None).kind,
+            Diagnostic::new("I don't know the command ':wat' — try :help", None).kind,
             Kind::Usage
         );
     }
 
     #[test]
-    fn edit_lines_keeps_the_block_around_the_mistake() {
+    fn edit_lines_returns_the_whole_source() {
         let source = "let x be 1\nif x is 1:\n    say \"one\"\n    say \"two\"\nsay x\n";
         assert_eq!(
-            edit_lines(source, Some(3)),
-            vec![
-                "if x is 1:".to_string(),
-                "    say \"one\"".to_string(),
-                "    say \"two\"".to_string()
-            ]
+            edit_lines(source),
+            source
+                .lines()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
     #[test]
     fn a_coloured_report_has_ansi_but_no_control_words() {
-        let diagnostic = Diagnostic::new(1, "line 2: this text never gets closed", None);
+        let diagnostic = Diagnostic::new("line 2: this text never gets closed", None);
         let coloured = diagnostic.render(true);
         assert!(coloured.contains("\x1b["));
         assert!(coloured.contains("E01"));

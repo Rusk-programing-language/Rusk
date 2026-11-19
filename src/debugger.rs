@@ -481,7 +481,7 @@ pub fn run_cli(path: Option<PathBuf>) -> Result<(), String> {
     };
     let mut session = Session::new();
     let mut editor = Editor::new();
-    let mut reporter = Reporter::new();
+    let reporter = Reporter::new();
 
     for line in debugger.hello() {
         println!("{line}");

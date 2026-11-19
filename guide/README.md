@@ -7,9 +7,11 @@ runtime, no libc, and no dependencies. v1.1.6 added portable `.tst` toast files
 and an experimental Windows x86-64 `.exe` target; v1.1.7 extended that target
 with arguments, the environment, regular files, and raw terminal mode. v1.2.0
 adds the `rdb` debugger, live coloured editing, and numbered diagnostics. v1.2.1
-adds the `simple` native GUI library under `fastlib/`.
+adds the `simple` native GUI library under `fastlib/`. v1.2.2 fixes category
+error codes, full-code REPL editing, and native Windows installation, and adds
+compiler optimizations.
 
-This guide is for v1.2.1. For the exact language rules, see
+This guide is for v1.2.2. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -101,10 +103,17 @@ It picks a static musl build on Termux, Alpine, and other musl systems, and a
 glibc build on ordinary Linux. Running it again upgrades in place. A progress
 bar appears while the archive downloads.
 
-On Windows (x86-64), run the same installer from Git Bash, MSYS2, or Cygwin.
-It installs `rusk.exe`, adds the bin directory to your shell profile, and
-updates the Windows user `PATH` via PowerShell. New terminals then find `rusk`
-automatically. It also asks:
+On Windows, `toastset` delegates to the native [`toastset.ps1`](../toastset.ps1).
+It works from Git Bash, MSYS2, Cygwin, or a plain PowerShell window:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File toastset.ps1
+# or, without a checkout:
+irm https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 | iex
+```
+
+It downloads the release with `curl.exe`, unpacks it with `tar.exe` into
+`%LOCALAPPDATA%\Rusk`, and updates the Windows user `PATH`. It then asks:
 
 ```text
 Add Rusk to the Windows Startup folder so the prompt opens at login? [y/N]
@@ -112,41 +121,20 @@ Add Rusk to the Windows Startup folder so the prompt opens at login? [y/N]
 
 Answering `y` creates `Rusk.lnk` in your personal Startup folder, pointing at
 the installed `rusk.exe` so future upgrades still use the new binary. `n`
-skips it; `--no-startup` skips the question. `toastset --uninstall` removes the
-shortcut. Use `--no-modify-path` to skip profile and `PATH` edits, or
-`--bin-dir` to pick the installation directory.
+skips it; `--no-startup` or `TOASTSET_NO_STARTUP=1` skips the question.
+`toastset --uninstall` removes the shortcut. Use `--no-modify-path` to skip the
+`PATH` edit, `--version` to pin a release, or `--bin-dir` to choose the
+installation directory.
 
-Without Git Bash, paste this into PowerShell. It downloads the Windows release
-with `curl.exe`, unpacks it with `tar.exe`, and adds it to the user `PATH`:
-
-```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
-# $tag = 'v1.2.1'   # uncomment to pin a release
-$version = $tag.TrimStart('v')
-$asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
-$dest = Join-Path $env:LOCALAPPDATA 'Rusk'
-$tarball = Join-Path $env:TEMP $asset
-
-New-Item -ItemType Directory -Force $dest | Out-Null
-curl.exe -fsSL "https://github.com/Rusk-programing-language/Rusk/releases/download/$tag/$asset" -o $tarball
-tar.exe -xzf $tarball -C $dest --strip-components 1
-Remove-Item $tarball
-
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (-not $userPath) { $userPath = '' }
-if ($userPath -notlike "*$dest*") {
-    [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ";$dest"), 'User')
-}
-$env:Path = "$env:Path;$dest"
-rusk version
-```
+Release archives include both installer scripts and the whole `rusklib/` source
+tree. The terminal UI library is always at `rusklib/wheat/` in the archive and
+on GitHub `main`; start with [`rusklib/wheat/README.md`](../rusklib/wheat/README.md).
 
 Check the version:
 
 ```console
 $ rusk version
-rusk 1.2.1 — code, baked ahead of time
+rusk 1.2.2 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -1160,9 +1148,10 @@ writing escape sequences.
 
 ### Numbered diagnostics
 
-Every error shown by the REPL or the CLI gets a session code, a category, and
-the line it came from. When the offending source is known, the line itself and
-a hint are printed too:
+Every error shown by the REPL or the CLI gets a fixed category code and the
+line it came from. When the offending source is known, the line itself and a
+hint are printed too. The REPL then prints the whole submission before the edit
+question:
 
 ```console
 $ rusk repl
@@ -1171,13 +1160,14 @@ E01  syntax error  line 1
   this text never gets closed — add a closing '"'
   1 | say "oops
   hint: Text starts and ends with a double quote. Close it on the same line...
+1 | say "oops
 Do you want to edit this code using the REPL y/n y
 ```
 
-Answering `y` reopens that code at the prompt with the cursor ready; `n`
+Answering `y` reopens all of that code at the prompt with the cursor ready; `n`
 leaves it alone. The question is skipped when stdin is a pipe, so scripts are
-unchanged. Codes count upwards during a REPL session (`E01`, `E02`, …) and
-start again for a new process.
+unchanged. The code does not count up: `E01` is always syntax, `E02` type,
+`E03` ownership, `E04` runtime, `E05` import, and `E06` usage.
 
 Categories are `syntax error`, `type error`, `ownership error`, `runtime
 error`, `import error`, and `usage error`:
@@ -1198,7 +1188,7 @@ pipeline message is still shown:
 
 ```console
 $ rusk build bad.rk
-E01  type error  line 3
+E02  type error  line 3
   I don't know a thing called 'x'
   3 | say x
   hint: Declare the name first with 'let name be ...', or check the spelling.
@@ -1223,7 +1213,7 @@ Runtime errors stop the program. They are reported through the same numbered
 diagnostics (category `runtime error`) and exit with status 1:
 
 ```console
-E01  runtime error  line 4
+E04  runtime error  line 4
   an item outside the list
   4 | say list item 9 of things
   hint: List positions start at 1 and stop at 'length of the list'.
@@ -1364,7 +1354,7 @@ installs. The default prefix is `~/.rusk`.
 
 ## 14. What ships with Rusk
 
-Everything in this section is present in the v1.2.1 tree. The helper libraries
+Everything in this section is present in the v1.2.2 tree. The helper libraries
 are ordinary Rusk source, not compiler magic, so you can read or copy them.
 
 | Path | What it is |
@@ -1376,7 +1366,8 @@ are ordinary Rusk source, not compiler magic, so you can read or copy them.
 | `rusklib/wheat/` | **wheat**, the terminal UI library: widths, colours, styles, boxes, tables, progress bars, panels, layout, and themes |
 | `fastlib/simple/` | **simple**, the native GUI library: windows, buttons, labels, fields, events, dialogs, themes, and layouts |
 | `selfhost/interpreter.rk` | an integer-expression interpreter written in Rusk and compiled by Rusk |
-| `toastset` | the POSIX-shell installer that downloads a release and upgrades it in place |
+| `toastset`, `toastset.ps1` | the shell installer and its native Windows installer; both download a release and upgrade in place |
+| `src/optimize.rs` | constant folding, constant branches, and dead-code removal before codegen |
 | `src/repl.rs`, `src/tui.rs` | the line session and the full-screen terminal session |
 | `examples/` | small runnable programs used by the guide and tests |
 
@@ -1444,16 +1435,18 @@ src/lexer.rs          tokens, indentation markers
 src/parser.rs         recursive-descent parser
 src/types.rs          kinds and return-kind inference
 src/ownership.rs      single-owner checking
+src/optimize.rs       constant folding and dead-code removal
 src/codegen.rs        AST to target-independent machine operations
 src/backend.rs        target selection and the common assembly interface
 src/aarch64.rs        hand-written AArch64 instruction encoder and fixups
-src/x86_64.rs         hand-written x86-64 encoder with a register allocator
+src/x86_64.rs         hand-written x86-64 encoder with LRU register allocation
 src/elf.rs            static ELF64 writer for either target
 src/repl.rs           tree-walking evaluator and line session
 src/tui.rs            native full-screen terminal UI
 src/main.rs           command-line interface
 tests/e2e.rs          bake and run compiled programs
 tests/cli.rs          CLI and piped-session tests
+benches/compiler.rs   codegen, size, and runtime benchmark
 ruskmods/             standard modules written in Rusk, plus installwork/
 rusklib/              file helpers, the wheat terminal UI, and one-import bundle
 selfhost/             a Rusk interpreter written in Rusk
@@ -1463,9 +1456,12 @@ Run the test suite:
 
 ```console
 cargo test
+cargo bench
 ```
 
-The suite covers unit tests in each compiler pass, CLI behavior, and
+`cargo bench` prints measurable code-generation, code-size, and baked-runtime
+differences with the optimization pass off and on. The suite covers unit tests
+in each compiler pass, CLI behavior, and
 end-to-end tests that bake real executables and run them. By default the
 end-to-end tests use the host backend. To run them against x86-64 on another
 host, set `RUSK_E2E_TARGET` and `RUSK_E2E_RUNNER`:

@@ -88,6 +88,8 @@ jobs:
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/rusk" "dist/${name}/rusk"
           cp toastset "dist/${name}/toastset"
+          cp toastset.ps1 "dist/${name}/toastset.ps1"
+          cp -R rusklib "dist/${name}/rusklib"
           cp README.md LICENSE* "dist/${name}/" 2>/dev/null || true
           mkdir -p "dist/${name}/assets"
           cp assets/rusk-logo.svg "dist/${name}/assets/rusk-logo.svg"
@@ -133,6 +135,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/rusk.exe" "dist/$name/rusk.exe"
           Copy-Item "toastset" "dist/$name/toastset"
+          Copy-Item "toastset.ps1" "dist/$name/toastset.ps1"
+          Copy-Item -Recurse "rusklib" "dist/$name/rusklib"
           Copy-Item "README.md" "dist/$name/"
           Copy-Item "LICENSE" "dist/$name/" -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path "dist/$name/assets" | Out-Null

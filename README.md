@@ -28,6 +28,13 @@ syscalls.
 
 ## Status
 
+v1.2.2 fixes the error/edit flow and adds compiler optimizations. Error codes
+are now fixed by category (`E01` syntax, `E02` type, `E03` ownership, `E04`
+runtime, `E05` import, `E06` usage); the REPL prints the whole submitted code
+before the edit question and reopens all of it after `y`. The Windows installer
+has a native `toastset.ps1`, and a dependency-free optimization pass folds
+constants, removes unreachable code, and emits shorter x86-64 instructions.
+
 v1.2.1 adds `fastlib/simple`, a native GUI library written in Rusk. A small set
 of GUI primaries creates real Win32 windows, buttons, labels, and fields on
 Windows x86-64; the rest of the library — geometry, events, dialogs, themes,
@@ -39,9 +46,10 @@ v1.2.0 is the debugging-and-errors release. The prompt colours Rusk code as
 you type it, moves by word with Ctrl/Alt+Left and Ctrl/Alt+Right, and has a
 built-in `rdb` debugger: `:rdb [file.rk]` or `rusk rdb [file.rk]` steps
 top-level statements, with breakpoints, step/continue, `list`, `where`, and
-`print NAME`. Mistakes now get numbered codes (`E01`, `E02`, …), a category,
-the line, an explanation, and a `Do you want to edit this code using the REPL
-y/n` question that reopens the offending code with the cursor ready. Windows
+`print NAME`. Mistakes now get fixed category codes (`E01` syntax, `E02` type,
+…), a category, the line, an explanation, and a `Do you want to edit this code
+using the REPL y/n` question. The whole submitted code is shown before the
+question and reopened after `y`. Windows
 packages ship [`assets/rusk-logo.svg`](assets/rusk-logo.svg); `rusk logo`
 prints that SVG on Windows and the ASCII wordmark elsewhere.
 
@@ -123,6 +131,7 @@ cargo run -- build examples/hello.rk --target x86_64  # cross-bake
 cargo run -- check examples/numbers.rk   # bake without writing anything
 cargo run -- toast examples/hello.rk     # write a portable hello.tst
 cargo run -- build examples/hello.rk --target windows  # write hello.exe (experimental)
+cargo bench                              # print codegen, size, and runtime gains
 ```
 
 Or install the `rusk` binary from `target/release/` somewhere on your `PATH`.
@@ -136,7 +145,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.2.1
+sh toastset --version 1.2.2
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -146,51 +155,35 @@ statically linked musl build automatically; the same static build also runs on
 ordinary glibc Linux. Downloads show a progress bar in a terminal, and running
 the script again upgrades the installed copy in place.
 
-On Windows, run the same command from Git Bash, MSYS2, or Cygwin. `toastset`
-installs `rusk.exe`, adds its bin directory to your shell profile, and updates
-the Windows user `PATH` through PowerShell, so new terminals find `rusk`
-without any manual setup. It then asks `Add Rusk to the Windows Startup folder
-so the prompt opens at login? [y/N]` before creating `Rusk.lnk` in your personal
-Startup folder; the shortcut points at the installed executable, so upgrades
-keep working. Answering `n` skips it, and `--no-startup` (or
-`TOASTSET_NO_STARTUP=1`) skips the question entirely. `toastset --uninstall`
-removes the shortcut as well. Pass `--no-modify-path` (or
-`TOASTSET_NO_MODIFY_PATH=1`) to leave profiles alone, or `--bin-dir` to choose
-the directory yourself. A plain PowerShell or `cmd.exe` session has no `sh`, so
-use Git Bash, MSYS2, or Cygwin for the installer.
-
-If you do not want Git Bash, paste this into a normal PowerShell window on
-Windows 10 or 11. It asks GitHub for the latest release, downloads the Windows
-build with `curl.exe`, unpacks it with `tar.exe`, and adds it to your user
-`PATH`:
+On Windows the `toastset` shell script detects the platform and delegates to
+[`toastset.ps1`](toastset.ps1), so Git Bash, MSYS2, Cygwin, and a plain
+PowerShell window all use the same native installer. The PowerShell script asks
+GitHub for the latest release, downloads it with `curl.exe`, unpacks it with
+`tar.exe` into `%LOCALAPPDATA%\Rusk`, and updates the Windows user `PATH`:
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$tag = (Invoke-RestMethod 'https://api.github.com/repos/Rusk-programing-language/Rusk/releases/latest').tag_name
-# To pin a release instead of taking the latest, replace the line above with:
-# $tag = 'v1.2.1'
-$version = $tag.TrimStart('v')
-$asset = "rusk-$version-x86_64-pc-windows-msvc.tar.gz"
-$dest = Join-Path $env:LOCALAPPDATA 'Rusk'
-$tarball = Join-Path $env:TEMP $asset
-
-New-Item -ItemType Directory -Force $dest | Out-Null
-curl.exe -fsSL "https://github.com/Rusk-programing-language/Rusk/releases/download/$tag/$asset" -o $tarball
-tar.exe -xzf $tarball -C $dest --strip-components 1
-Remove-Item $tarball
-
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if (-not $userPath) { $userPath = '' }
-if ($userPath -notlike "*$dest*") {
-    [Environment]::SetEnvironmentVariable('Path', ($userPath.TrimEnd(';') + ";$dest"), 'User')
-}
-$env:Path = "$env:Path;$dest"
-rusk version
+powershell -ExecutionPolicy Bypass -File toastset.ps1
 ```
 
-(`curl.exe` and `tar.exe` ship with Windows 10 version 1803 and newer. The
-installer script itself still needs a POSIX shell, which is why this PowerShell
-path downloads the release directly.)
+Or fetch and run it directly:
+
+```powershell
+irm https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 | iex
+```
+
+Before finishing it asks `Add Rusk to the Windows Startup folder so the prompt
+opens at login? [y/N]` and creates `Rusk.lnk` in your personal Startup folder
+only after `y`. Answering `n`, passing `--no-startup`, or setting
+`TOASTSET_NO_STARTUP=1` skips the question. `--uninstall` removes the shortcut.
+Pass `--no-modify-path` (or `TOASTSET_NO_MODIFY_PATH=1`) to leave `PATH` alone,
+`--version 1.2.2` to pin a release, or `--bin-dir` to choose the directory.
+`curl.exe` and `tar.exe` ship with Windows 10 version 1803 and newer. Set
+`TOASTSET_POSIX_FORCE=1` only if you deliberately want the older POSIX-shell
+install path from Git Bash.
+
+Each release archive also includes the installer scripts and the full
+[`rusklib/`](rusklib/) source tree, so the wheat terminal UI library is there as
+`rusklib/wheat/` whether you download an archive or browse GitHub `main`.
 
 ## Toast files and experimental Windows output
 
@@ -672,11 +665,13 @@ operators as the line is typed. Arrows move one character; Ctrl/Alt+Left and
 Ctrl/Alt+Right move one word. Home/End jump, Up/Down recall history, Tab inserts
 four spaces, and Ctrl-C, Ctrl-U, Ctrl-K, Ctrl-W, and Ctrl-L edit the line.
 
-Mistakes are printed as `E01`, `E02`, … with the kind of error, the line, the
-source, a hint, and the question `Do you want to edit this code using the REPL
-y/n`. Answering `y` puts that code back at the prompt with the cursor ready.
-The same report is used by `rusk build`, `rusk run`, and `rusk check`; over a
-pipe the question is skipped.
+Mistakes are printed with a fixed category code (`E01` syntax, `E02` type, `E03`
+ownership, `E04` runtime, `E05` import, `E06` usage), the kind of error, the
+line, the source, a hint, and the question `Do you want to edit this code using
+the REPL y/n`. The full submitted code is printed just before that question.
+Answering `y` puts all of it back at the prompt with the cursor ready. The same
+report is used by `rusk build`, `rusk run`, and `rusk check`; over a pipe the
+question is skipped.
 
 `rdb` works one **top-level statement** at a time. Function definitions run as
 one step, and calls inside them are not stepped into yet. Without the colon,
@@ -775,7 +770,8 @@ ownership   one owner per text value and list
 | `src/lexer.rs` | Source to tokens; keywords are plain words matched by the parser |
 | `src/highlight.rs` | Source colouring for the interactive editor |
 | `src/editor.rs` | Raw-mode line editing and word movement at the prompt |
-| `src/diagnostics.rs` | Numbered, explained errors and the edit-after-error question |
+| `src/diagnostics.rs` | Fixed category codes, explained errors, and the edit-after-error question |
+| `src/optimize.rs` | Constant folding, constant branches, and dead-code removal before codegen |
 | `src/debugger.rs` | `rdb` stepper, breakpoints, and source listing |
 | `src/logo.rs` | The bundled SVG logo and the platform wordmark |
 | `src/parser.rs` | Recursive descent over the English grammar |

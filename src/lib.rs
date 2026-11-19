@@ -25,6 +25,7 @@ pub mod highlight;
 pub mod imports;
 pub mod lexer;
 pub mod logo;
+pub mod optimize;
 pub mod ownership;
 pub mod parser;
 pub mod pe;

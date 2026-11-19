@@ -436,7 +436,7 @@ fn rdb_steps_and_prints_names_over_a_pipe() {
 }
 
 #[test]
-fn errors_get_numbers_over_a_pipe_without_a_question() {
+fn errors_get_fixed_category_codes_over_a_pipe_without_a_question() {
     use std::io::Write;
 
     let mut child = Command::new(rusk())
@@ -450,13 +450,20 @@ fn errors_get_numbers_over_a_pipe_without_a_question() {
         .stdin
         .take()
         .unwrap()
-        .write_all(b"say missing_name\n")
+        .write_all(b"say missing_name\nsay \"oops\n")
         .unwrap();
     let out = child.wait_with_output().unwrap();
 
     assert!(out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("E01"), "{stderr}");
+    assert!(
+        stderr.contains("E02"),
+        "unknown name should be a type error: {stderr}"
+    );
+    assert!(
+        stderr.contains("E01"),
+        "an unclosed quote should be a syntax error: {stderr}"
+    );
     assert!(stderr.contains("line 1"), "{stderr}");
     assert!(stderr.contains("hint:"), "{stderr}");
     assert!(!stderr.contains("Do you want to edit"), "{stderr}");
@@ -511,6 +518,35 @@ fn toastset_documents_the_optional_windows_startup_shortcut() {
         installer.contains("Add Rusk to the Windows Startup folder so the prompt opens at login?")
     );
     assert!(installer.contains("Rusk.lnk"));
+}
+
+#[test]
+fn toastset_has_a_native_windows_installer() {
+    let shell = include_str!("../toastset");
+    let native = include_str!("../toastset.ps1");
+    assert!(shell.contains("delegate_to_windows_installer"));
+    assert!(shell.contains("toastset.ps1"));
+    assert!(shell.contains("windows_path \"$ps1\""));
+    assert!(!native.contains("[CmdletBinding()]"));
+    assert!(native.contains("$RawArgs = $args"));
+    assert!(native.contains("[Net.SecurityProtocolType]::Tls12"));
+    assert!(native.contains("releases/latest"));
+    assert!(native.contains("rusk-$Tag-$Target.tar.gz"));
+    assert!(native.contains("Join-Path $env:LOCALAPPDATA 'Rusk'"));
+    assert!(native.contains("curl.exe -fsSL"));
+    assert!(native.contains("tar.exe -xzf"));
+    assert!(native.contains("--no-startup"));
+    assert!(native.contains("Add Rusk to the Windows Startup folder so the prompt opens at login?"));
+    assert!(native.contains("Rusk.lnk"));
+    assert!(native.contains("& $Exe version"));
+    let release = include_str!("../.github/workflows/release.yml");
+    assert!(release.contains("cp toastset \"dist/${name}/toastset\""));
+    assert!(release.contains("cp toastset.ps1 \"dist/${name}/toastset.ps1\""));
+    assert!(release.contains("Copy-Item \"toastset.ps1\" \"dist/$name/toastset.ps1\""));
+    assert!(release.contains("cp -R rusklib \"dist/${name}/rusklib\""));
+    assert!(release.contains("Copy-Item -Recurse \"rusklib\" \"dist/$name/rusklib\""));
+    let wheat = include_str!("../rusklib/wheat/README.md");
+    assert!(wheat.contains("wheat — a small terminal UI library in Rusk"));
 }
 
 fn gui_source() -> &'static str {

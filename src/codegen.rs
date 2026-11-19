@@ -158,8 +158,20 @@ pub fn compile(program: &Program) -> Result<Baked, String> {
 }
 
 pub fn compile_for(program: &Program, target: Target) -> Result<Baked, String> {
+    compile_for_with_optimization(program, target, true)
+}
+
+/// Compile with the peephole and AST simplification pass on or off. Checking
+/// still runs on the program as written, so both paths accept the same source;
+/// this is used by the benchmarks and optimization regression tests.
+pub fn compile_for_with_optimization(
+    program: &Program,
+    target: Target,
+    optimize: bool,
+) -> Result<Baked, String> {
     let funcs = crate::types::check(program)?;
     crate::ownership::check(program, &funcs)?;
+    let (program, _stats) = crate::optimize::maybe_optimize(program, optimize);
     let mut cg = Codegen::new(funcs, target);
     cg.heap_error = cg.intern(HEAP_ERROR);
 

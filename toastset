@@ -16,8 +16,9 @@
 #   sh toastset --bin-dir "$HOME/.local/bin"
 #
 # Termux and other musl-based systems get a statically linked build, so the
-# installed binary does not depend on the system's C library. Windows runs the
-# script from Git Bash, MSYS2, or Cygwin and installs rusk.exe.
+# installed binary does not depend on the system's C library. On Windows this
+# script delegates to toastset.ps1, so a plain PowerShell window works without
+# Git Bash, MSYS2, or Cygwin; set TOASTSET_POSIX_FORCE=1 to use the old sh path.
 #
 # Unless --no-modify-path or an explicit --bin-dir is used, toastset also adds
 # its bin directory to the shell profile and, on Windows, to the user PATH. On
@@ -99,10 +100,10 @@ OPTIONS:
   -h, --help          show this help
 
 Termux, Alpine, and other musl-based systems automatically get the static
-musl build, which runs without the glibc loader. Windows users should run this
-script from Git Bash, MSYS2, or Cygwin; it installs rusk.exe, updates both the
-shell profile and the Windows user PATH, and asks before adding a shortcut to
-the Startup folder so the prompt opens at login.
+musl build, which runs without the glibc loader. On Windows, toastset uses the
+native toastset.ps1 installer: it installs rusk.exe under %LOCALAPPDATA%\Rusk,
+updates the Windows user PATH, and asks before adding a shortcut to the Startup
+folder so the prompt opens at login. The same options work there.
 
 If Rusk is already installed, toastset replaces it with the requested or
 latest version (an in-place upgrade).
@@ -502,6 +503,40 @@ uninstall() {
     rm -rf "$TOASTSET_HOME"
     info "removed Rusk from $BIN_DIR and $TOASTSET_HOME"
 }
+
+# On Windows the POSIX path below is kept for Unix-like shells and tests, but
+# ordinary installs use the native PowerShell installer. The same arguments are
+# passed through; toastset.ps1 understands both POSIX and PowerShell spellings.
+delegate_to_windows_installer() {
+    if ! ps="$(find_powershell)"; then
+        die "I couldn't find PowerShell; install it or run toastset.ps1 directly"
+    fi
+
+    ps1="${TOASTSET_PS1:-}"
+    if [ -z "$ps1" ] && [ -f "$0" ]; then
+        script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)"
+        if [ -n "$script_dir" ] && [ -f "$script_dir/toastset.ps1" ]; then
+            ps1="$script_dir/toastset.ps1"
+        fi
+    fi
+    if [ -z "$ps1" ]; then
+        tmp="$(mktemp "${TMPDIR:-/tmp}/toastset-ps1.XXXXXX")"
+        raw="https://raw.githubusercontent.com/${REPO}/main/toastset.ps1"
+        if ! fetch "$raw" "$tmp"; then
+            rm -f "$tmp"
+            die "I couldn't download $raw; set TOASTSET_PS1 to a local copy"
+        fi
+        ps1="$tmp"
+    fi
+
+    ps1_win="$(windows_path "$ps1")"
+    info "using the native Windows installer"
+    exec "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ps1_win" "$@"
+}
+
+if is_windows && [ "${TOASTSET_POSIX_FORCE:-0}" != "1" ]; then
+    delegate_to_windows_installer "$@"
+fi
 
 while [ "$#" -gt 0 ]; do
     case "$1" in

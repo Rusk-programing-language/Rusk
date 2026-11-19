@@ -126,7 +126,9 @@ impl Default for Target {
 
 enum Inner {
     AArch64(aarch64::Asm),
-    X86_64(x86_64::Asm),
+    // x86_64 carries the virtual-register allocator tables, so keep the enum
+    // small by moving that state behind a pointer.
+    X86_64(Box<x86_64::Asm>),
 }
 
 /// A target-independent assembly buffer. Each method forwards to the encoder
@@ -139,8 +141,8 @@ impl Asm {
     pub fn new(target: Target) -> Self {
         let inner = match target {
             Target::AArch64 => Inner::AArch64(aarch64::Asm::new()),
-            Target::X86_64 => Inner::X86_64(x86_64::Asm::new()),
-            Target::WindowsX86_64 => Inner::X86_64(x86_64::Asm::new_windows()),
+            Target::X86_64 => Inner::X86_64(Box::default()),
+            Target::WindowsX86_64 => Inner::X86_64(Box::new(x86_64::Asm::new_windows())),
         };
         Asm { inner }
     }

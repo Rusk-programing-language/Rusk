@@ -26,12 +26,12 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             let source = cli_source(&args, &e);
-            let mut reporter = diagnostics::Reporter::new();
+            let reporter = diagnostics::Reporter::new();
             let diagnostic = reporter.report(&e, source.as_deref());
             eprintln!("{}", diagnostic.render(true));
             if let Some(source) = source {
-                if diagnostics::wants_to_edit() {
-                    if let Err(again) = rusk::repl::run_editing(&source, diagnostic.line) {
+                if diagnostics::wants_to_edit(Some(&source), diagnostic.line) {
+                    if let Err(again) = rusk::repl::run_editing(&source) {
                         eprintln!("burnt: {again}");
                     }
                 }

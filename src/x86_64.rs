@@ -194,8 +194,11 @@ pub struct Asm {
     holder: [i8; 16],
     /// Whether a cached physical register holds a value newer than its home.
     dirty: [bool; 16],
-    /// Round-robin victim selection when every pool register is busy.
+    /// Round-robin starting point when a free pool register is wanted.
     next_victim: usize,
+    /// Monotonic clock and last-touch time for least-recently-used spilling.
+    use_clock: u64,
+    last_used: [u64; 16],
     /// True when this emitter is producing Windows x86-64 instead of Linux.
     windows: bool,
     /// The last AArch64 syscall number placed in X8, if any. Windows uses this
@@ -236,6 +239,8 @@ impl Asm {
             holder: [-1; 16],
             dirty: [false; 16],
             next_victim: 0,
+            use_clock: 0,
+            last_used: [0; 16],
             windows,
             last_syscall: None,
             imports: Vec::new(),
@@ -387,19 +392,46 @@ impl Asm {
         self.next_victim = 0;
     }
 
-    /// Find a pool register, spilling the least recently chosen one if needed.
+    /// Mark a pool register as freshly used. Spilling the coldest register
+    /// keeps short-lived values in registers instead of bouncing them through
+    /// their home slots.
+    fn touch(&mut self, phys: u8) {
+        if in_pool(phys) {
+            self.use_clock += 1;
+            self.last_used[phys as usize] = self.use_clock;
+        }
+    }
+
+    /// Find a pool register, spilling the least recently used one if needed.
     fn spare_pool_reg(&mut self) -> u8 {
+        let mut free = None;
         for i in 0..POOL.len() {
             let phys = POOL[(self.next_victim + i) % POOL.len()];
             if self.holder[phys as usize] < 0 {
-                self.next_victim = (self.next_victim + i + 1) % POOL.len();
-                return phys;
+                let better = match free {
+                    Some(old) => self.last_used[phys as usize] < self.last_used[old as usize],
+                    None => true,
+                };
+                if better {
+                    free = Some(phys);
+                }
             }
         }
-        let phys = POOL[self.next_victim];
+        if let Some(phys) = free {
+            self.next_victim = (self.next_victim + 1) % POOL.len();
+            self.touch(phys);
+            return phys;
+        }
+        let mut victim = POOL[0];
+        for &phys in &POOL[1..] {
+            if self.last_used[phys as usize] < self.last_used[victim as usize] {
+                victim = phys;
+            }
+        }
         self.next_victim = (self.next_victim + 1) % POOL.len();
-        self.evict_phys(phys);
-        phys
+        self.evict_phys(victim);
+        self.touch(victim);
+        victim
     }
 
     fn load_vreg(&mut self, phys: u8, reg: u8) {
@@ -410,6 +442,7 @@ impl Asm {
             self.mov_phys_imm64(phys, 0);
             return;
         }
+        self.touch(phys);
         let owner = self.owner[reg as usize];
         if owner == phys as i8 {
             return;
@@ -437,6 +470,7 @@ impl Asm {
             self.discard_phys(old as u8);
         }
         if in_pool(phys) {
+            self.touch(phys);
             if self.holder[phys as usize] != reg as i8 {
                 self.evict_phys(phys);
             }
@@ -453,9 +487,20 @@ impl Asm {
     }
 
     fn mov_phys_imm64(&mut self, phys: u8, value: u64) {
-        self.u8(0x48 | ((phys >> 3) & 1));
-        self.u8(0xB8 + (phys & 7));
-        self.u64(value);
+        if value <= u32::MAX as u64 {
+            // `mov r32, imm32` zero-extends into the full register and is four
+            // bytes shorter than a 64-bit immediate. Most Rusk constants,
+            // syscall numbers, and string words fit here.
+            if phys >= 8 {
+                self.u8(0x41); // REX.B selects r8d-r15d
+            }
+            self.u8(0xB8 + (phys & 7));
+            self.u32(value as u32);
+        } else {
+            self.u8(0x48 | ((phys >> 3) & 1));
+            self.u8(0xB8 + (phys & 7));
+            self.u64(value);
+        }
     }
 
     fn mov_phys_reg(&mut self, dst: u8, src: u8) {
@@ -686,7 +731,7 @@ impl Asm {
     // ---- register moves --------------------------------------------------
 
     pub fn mov_reg_reg(&mut self, rd: u8, rm: u8) {
-        if rd == XZR {
+        if rd == XZR || rd == rm {
             return;
         }
         self.load_vreg(RAX, rm);
@@ -1906,6 +1951,17 @@ mod tests {
         text
     }
 
+    /// Read the constant placed by `mov_imm64`, whichever encoding was used.
+    fn imm_value(text: &[u8]) -> u64 {
+        if text[0] == 0x48 {
+            u64::from_le_bytes(text[2..10].try_into().unwrap())
+        } else if text[0] == 0x41 {
+            u32::from_le_bytes(text[3..7].try_into().unwrap()) as u64
+        } else {
+            u32::from_le_bytes(text[1..5].try_into().unwrap()) as u64
+        }
+    }
+
     /// True if the text contains the save-scratch / movabs / store / restore
     /// sequence used to write a virtual register back to its home slot.
     fn has_absolute_store(text: &[u8]) -> bool {
@@ -1940,7 +1996,7 @@ mod tests {
             a.mov_imm64(X8, aarch64);
             let text = bytes(a);
             assert_eq!(
-                u64::from_le_bytes(text[2..10].try_into().unwrap()),
+                imm_value(&text),
                 x86,
                 "syscall {aarch64} should become {x86}"
             );
@@ -1952,10 +2008,23 @@ mod tests {
         let mut a = Asm::new();
         a.mov_imm64(X8, 0x52_0000);
         let text = bytes(a);
-        assert_eq!(
-            u64::from_le_bytes(text[2..10].try_into().unwrap()),
-            0x52_0000
-        );
+        assert_eq!(imm_value(&text), 0x52_0000);
+    }
+
+    #[test]
+    fn uses_a_short_immediate_for_small_values() {
+        let mut a = Asm::new();
+        a.mov_imm64(X0, 42);
+        let text = bytes(a);
+        assert_eq!(&text[..5], &[0xB8, 42, 0, 0, 0]);
+        assert!(text.len() < 10, "a full movabs would be ten bytes");
+    }
+
+    #[test]
+    fn drops_a_move_to_the_same_register() {
+        let mut a = Asm::new();
+        a.mov_reg_reg(X0, X0);
+        assert!(bytes(a).is_empty());
     }
 
     #[test]

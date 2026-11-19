@@ -2047,6 +2047,7 @@ pub fn run_tui() -> Result<(), String> {
                         if let Some(diagnostic) =
                             submit_in_tui(&mut session, &mut transcript, &mut reporter, &lines)
                         {
+                            transcript.extend(lines.iter().cloned());
                             transcript.push(EDIT_QUESTION.to_string());
                             edit_offer = Some(lines);
                             let _ = diagnostic;
@@ -2075,6 +2076,7 @@ pub fn run_tui() -> Result<(), String> {
                     if let Some(diagnostic) =
                         submit_in_tui(&mut session, &mut transcript, &mut reporter, &lines)
                     {
+                        transcript.extend(lines.iter().cloned());
                         transcript.push(EDIT_QUESTION.to_string());
                         edit_offer = Some(lines);
                         let _ = diagnostic;
@@ -2208,10 +2210,9 @@ pub fn run() -> Result<(), String> {
     run_with(None)
 }
 
-/// Open the REPL with the offending code ready to edit. `line` is one-based
-/// and selects the block around it; without a line the whole source is kept.
-pub fn run_editing(source: &str, line: Option<usize>) -> Result<(), String> {
-    run_with(Some(crate::diagnostics::edit_lines(source, line)))
+/// Open the REPL with the whole submitted source ready to edit.
+pub fn run_editing(source: &str) -> Result<(), String> {
+    run_with(Some(crate::diagnostics::edit_lines(source)))
 }
 
 fn run_with(initial_lines: Option<Vec<String>>) -> Result<(), String> {
@@ -2380,6 +2381,9 @@ fn report_plain(
     if !editor.is_interactive() {
         return None;
     }
+    if let Some(source) = source {
+        crate::diagnostics::show_full_code(source, diagnostic.line);
+    }
     let answer = editor
         .read_answer(&format!("{EDIT_QUESTION} "))
         .ok()
@@ -2389,7 +2393,7 @@ fn report_plain(
         return None;
     }
     if let Some(source) = source {
-        let lines = crate::diagnostics::edit_lines(source, diagnostic.line);
+        let lines = crate::diagnostics::edit_lines(source);
         if !lines.is_empty() {
             return Some(lines);
         }
