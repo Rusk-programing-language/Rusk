@@ -1,0 +1,112 @@
+Yes — one folder per module, same-named file inside. That matches how ruskmods/json/json.rk, ruskmods/path/path.rk, and ruskmods/installwork/ already work.
+ruskmods/
+ruskmods/
+  bytes/
+    bytes.rk
+  json/
+    json.rk
+  text/
+    text.rk
+  semver/
+    semver.rk
+  path/
+    path.rk
+  manifest/
+    manifest.rk
+  lock/
+    lock.rk
+  archive/
+    archive.rk
+  fs/
+    fs.rk
+  maps/
+    maps.rk
+  result/
+    result.rk
+  sha/
+    sha.rk
+  gzip/
+    gzip.rk
+  installwork/
+    installwork.rk
+    text.rk
+    semver.rk        # re-export/wrap shared semver
+    manifest.rk      # Ruskfile support
+    registry.rk
+    resolver.rk
+    installer.rk
+    state.rk         # or migrate to shared lock
+    archive.rk
+    fs.rk
+    cli.rk
+  npmwork/
+    npmwork.rk
+    text.rk
+    manifest.rk
+    lock.rk
+    registry.rk
+    resolver.rk
+    installer.rk
+    global.rk
+    project.rk
+    cli.rk
+Imports:
+import "semver"
+import "json/json"
+import "manifest"
+import "lock"
+import "npmwork"
+rusklib/
+rusklib/
+  http/
+    http.rk
+  cache/
+    cache.rk
+  fs_fast/
+    fs_fast.rk
+  platform/
+    platform.rk
+  term/
+    term.rk
+  bench/
+    bench.rk
+  files/
+    files.rk           # existing files.rk moved into its folder
+  wheat/
+    ...                # existing
+  rusklib.rk           # one-import bundle
+Imports:
+import "rusklib/http"
+import "rusklib/cache"
+import "rusklib/term"
+import "rusklib/rusklib"
+Rule: one folder = one module = one public prefix. Shared generic modules live in ruskmods/<name>/<name>.rk; system/IO modules live in rusklib/<name>/<name>.rk; installer frameworks keep their own folder with internal modules.
+
+One generic library set in ruskmods/
+Module	Name	Merges
+ruskmods/semver.rk	semver	installwork/version.rk, installwork/requirement.rk, filter semver.rk, spec parsing
+ruskmods/json.rk	json	existing ruskmods/json, filter json.rk
+ruskmods/text.rk	text	installwork/text.rk, filter text.rk, wheat text helpers
+ruskmods/path.rk	path	ruskmods/path, installwork path helpers, filter path text logic
+ruskmods/manifest.rk	manifest	installwork/ruskfile.rk + filter manifest.rk (Ruskfile and package.json)
+ruskmods/lock.rk	lock	installwork/state.rk + filter lockfile.rk (installed state + resolution lock)
+ruskmods/archive.rk	archive	installwork/archive.rk + filter tar extraction (RUSKPKG + tar)
+ruskmods/fs.rk	fs	installwork/fs.rk + filter fs helpers + pure parts of rusklib/files.rk
+ruskmods/bytes.rk	bytes	new byte buffer/scanning helpers
+ruskmods/maps.rk	maps	new ordered map/set helpers
+ruskmods/result.rk	result	new ok/error/unwrap helpers
+ruskmods/sha.rk	sha	SHA-1/256/512
+ruskmods/gzip.rk	gzip	inflate/deflate
+One system/IO library set in rusklib/
+Module	Name	Merges
+rusklib/http.rk	http	fetch, retries, ETag, TLS
+rusklib/cache.rk	cache	metadata/tarball cache, atomic writes
+rusklib/fs_fast.rk	fs_fast	hardlink/copy tree, atomic rename, temp files
+rusklib/platform.rk	platform	OS/arch/libc/env/home/tmp detection
+rusklib/term.rk	term	filter progress.rk + colors.rk
+rusklib/bench.rk	bench	timers and phase reports
+rusklib/rusklib.rk	rusklib	one-import bundle
+Installer frameworks
+Framework	Name	Purpose
+ruskmods/installwork/	installwork	existing Rusk package installer
+ruskmods/npmwork/	npmwork	npm/JS/TS installer: registry, resolver, installer, global, project, cli
