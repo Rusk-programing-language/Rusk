@@ -11,8 +11,10 @@ adds the `simple` native GUI library under `fastlib/`. v1.2.2 fixes category
 error codes, full-code REPL editing, and native Windows installation, and adds
 compiler optimizations. v1.2.3 completes the bundled module layout, adds the
 `npmwork` framework, and makes bundled imports work from outside the checkout.
+v1.2.4 adds the shell-backed `rusklib/database` library and fixes library lookup
+for installed compilers.
 
-This guide is for v1.2.3. For the exact language rules, see
+This guide is for v1.2.4. For the exact language rules, see
 [`docs/SPEC.md`](../docs/SPEC.md). For a quick overview, see the
 [`README`](../README.md).
 
@@ -136,7 +138,7 @@ Check the version:
 
 ```console
 $ rusk version
-rusk 1.2.3 — code, baked ahead of time
+rusk 1.2.4 — code, baked ahead of time
 ```
 
 ## 3. Your first program
@@ -1413,7 +1415,7 @@ not a full npm metadata index.
 
 ## 14. What ships with Rusk
 
-Everything in this section is present in the v1.2.3 tree. The helper libraries
+Everything in this section is present in the v1.2.4 tree. The helper libraries
 are ordinary Rusk source, not compiler magic, so you can read or copy them.
 
 | Path | What it is |

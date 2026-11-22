@@ -1,10 +1,10 @@
-# The Rusk Language — Specification v1.2.3
+# The Rusk Language — Specification v1.2.4
 
 Rusk is a small, English-shaped language with an ahead-of-time compiler that
-emits native machine code directly. This document describes exactly what v1.2.3
+emits native machine code directly. This document describes exactly what v1.2.4
 accepts and what it guarantees.
 
-Status: **v1.2.3, Linux on AArch64 and x86-64, plus experimental Windows
+Status: **v1.2.4, Linux on AArch64 and x86-64, plus experimental Windows
 x86-64 output**. The compiler also builds and runs on Windows x86-64. Windows
 x86-64 programs can create native GUI windows through the `simple` primaries;
 on other targets those primaries are safe no-ops. Toast files (`.tst`) can hold
@@ -1429,7 +1429,9 @@ added the native `simple` GUI primaries and the `fastlib/` library folder.
 v1.2.2 fixed category error codes, full-code REPL editing, native Windows
 installation, and added dependency-free compiler optimizations. v1.2.3 added
 the full module/library layout, the `npmwork` framework, nested same-named import
-resolution, and bundled-library lookup beside the compiler. What remains:
+resolution, and bundled-library lookup beside the compiler. v1.2.4 added the
+shell-backed `rusklib/database` library, installed library folders in the POSIX
+installer, and `E05` classification for missing imports. What remains:
 
 - full self-hosting: writing the Rusk compiler itself in Rusk. The current
   bootstrap stage is `selfhost/interpreter.rk`, an integer-expression

@@ -21,6 +21,6 @@ From a checkout of `main`, run that with:
 cargo run -- run your-program.rk
 ```
 
-Every v1.2.3 release archive also contains the full `rusklib/wheat/` tree, so
+Every v1.2.4 release archive also contains the full `rusklib/wheat/` tree, so
 the source is available whether you browse GitHub or download a platform
 archive.
