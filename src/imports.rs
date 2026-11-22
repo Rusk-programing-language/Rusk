@@ -676,6 +676,18 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
             }
         }
         add_root(&mut roots, PathBuf::from("."));
+        // An installed compiler should find the libraries that shipped beside
+        // it, even when the program lives somewhere else. Walk up from the
+        // running executable last, so a file beside the program and the current
+        // directory still win over bundled copies.
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                add_root(&mut roots, dir.to_path_buf());
+                for ancestor in dir.ancestors().skip(1) {
+                    add_root(&mut roots, ancestor.to_path_buf());
+                }
+            }
+        }
 
         for root in &roots {
             for name in &names {
@@ -700,7 +712,7 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "I can't find the file '{raw}' — I looked next to the program and in ruskmods/, rusklib/, and fastlib/"
+        "I can't find the file '{raw}' — I looked next to the program, in the current directory, beside this compiler, and in ruskmods/, rusklib/, and fastlib/ under each"
     ))
 }
 

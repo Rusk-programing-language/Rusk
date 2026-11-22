@@ -543,8 +543,12 @@ fn toastset_has_a_native_windows_installer() {
     assert!(release.contains("cp toastset \"dist/${name}/toastset\""));
     assert!(release.contains("cp toastset.ps1 \"dist/${name}/toastset.ps1\""));
     assert!(release.contains("Copy-Item \"toastset.ps1\" \"dist/$name/toastset.ps1\""));
+    assert!(release.contains("cp -R ruskmods \"dist/${name}/ruskmods\""));
     assert!(release.contains("cp -R rusklib \"dist/${name}/rusklib\""));
+    assert!(release.contains("cp -R fastlib \"dist/${name}/fastlib\""));
+    assert!(release.contains("Copy-Item -Recurse \"ruskmods\" \"dist/$name/ruskmods\""));
     assert!(release.contains("Copy-Item -Recurse \"rusklib\" \"dist/$name/rusklib\""));
+    assert!(release.contains("Copy-Item -Recurse \"fastlib\" \"dist/$name/fastlib\""));
     let wheat = include_str!("../rusklib/wheat/README.md");
     assert!(wheat.contains("wheat — a small terminal UI library in Rusk"));
     let pointer = include_str!("../wheat/README.md");
@@ -656,6 +660,27 @@ fn fastlib_imports_resolve_from_a_nested_program() {
 
     assert!(out.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("looks good"), "{stdout}");
+}
+
+#[test]
+fn bundled_libraries_resolve_from_outside_the_checkout() {
+    let dir = std::env::temp_dir().join(format!("rusk-outside-import-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("gui.rk");
+    std::fs::write(&file, "import \"simple/simple\"\nsay \"ok\"\n").unwrap();
+
+    let out = Command::new(rusk())
+        .arg("check")
+        .arg(&file)
+        .current_dir(&dir)
+        .output()
+        .expect("rusk should start");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("looks good"), "{stdout}{stderr}");
 }
 
 #[test]
