@@ -779,8 +779,9 @@ A bare name (no slash) also finds a module directory, so `import "math"` matches
 `ruskmods/math/math.rk`, `import "wheat"` matches `rusklib/wheat/wheat.rk`, and
 `import "simple"` matches `fastlib/simple/simple.rk`. A path with a slash also
 finds a same-named file inside a folder: `import "json/json"` matches
-`ruskmods/json/json.rk`, and `import "rusklib/http"` matches
-`rusklib/http/http.rk`. Direct files are still tried first, so
+`ruskmods/json/json.rk`, `import "rusklib/http"` matches
+`rusklib/http/http.rk`, and `import "rusklib/database"` matches
+`rusklib/database/database.rk`. Direct files are still tried first, so
 `import "wheat/table"` keeps finding `rusklib/wheat/table.rk`.
 
 The bundle follows **one folder = one module = one public prefix**: generic
@@ -1323,6 +1324,11 @@ value; the ownership pass is what prevents it from being moved or changed.
   failed write, and `read ... from` gives empty text on a bad descriptor. A path
   is limited to 4095 bytes. There are still no threads, signals, or
   random-access file positions.
+- `rusklib/database` is source, not a native binding. It shells out to the
+  `sqlite3` command with CSV output redirected to files, so rows are lists of
+  text, each statement is a separate process, transactions do not survive
+  between calls, and `:memory:` is emulated with a temporary file. It is absent
+  when `sqlite3` is not on `PATH`.
 - The native TUI uses Linux `termios` and ANSI escapes. Baked programs can enter
   raw mode on standard input and read bytes, but the language has no
   window-size query, key decoder, color API, or cursor movement. On Windows the

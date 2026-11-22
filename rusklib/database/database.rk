@@ -1,0 +1,19 @@
+# database.rk — one import for Rusk's SQLite-like database library.
+#
+#     import "rusklib/database"
+#
+# The shape follows Python's `sqlite3`: connect, take a cursor, execute SQL,
+# fetch rows, and close. A connection is `["file", path]` or
+# `["memory", temporary path]`; a cursor is `[database path, rows file,
+# error file]`; rows are lists of text. The public prefix is `db_`.
+#
+# There is no native SQLite binding. Every statement runs the system `sqlite3`
+# command with CSV output redirected to a scratch file. That keeps the compiler
+# dependency-free, but it also means each statement is a separate process,
+# `:memory:` is emulated with a temporary file, and there is no open transaction
+# between statements. See `rusklib/README.md` for the full limit list.
+
+import "dbapi2"
+import "completer"
+import "dump"
+import "cli"

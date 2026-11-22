@@ -1,0 +1,383 @@
+# dbapi2.rk — the core of the Rusk database library.
+#
+# The shape follows Python's `sqlite3`: open a connection, take a cursor,
+# execute SQL, fetch rows, and close the connection. Rusk has no native SQLite
+# binding, so each statement runs the system `sqlite3` command and reads its CSV
+# output back through ordinary files. A cursor is a small list of text:
+# `[database path, rows file, error file]`. A connection is
+# `["file", path]` or `["memory", temporary path]`.
+
+import "text"
+import "os"
+import "result"
+
+# True when the `sqlite3` command is on PATH.
+to db_available:
+    let status be run command "command -v sqlite3 >/dev/null 2>&1"
+    give back status is 0
+
+# The Rusk equivalent of an `sqlite3.OperationalError`: a failed result whose
+# message names the Python exception.
+to db_operational_error with message as a view of text:
+    give back result_error with "OperationalError: " + message
+
+# The installed SQLite version, as a result holding text.
+to db_version:
+    if not (db_available):
+        give back result_error with "sqlite3 is not installed"
+    let out be os_temp_path with "rusk-db-version.txt"
+    let err be os_temp_path with "rusk-db-version.err"
+    let status be run command ("sqlite3 -version > " + (text_quote with out) + " 2> " + (text_quote with err))
+    if status is 127:
+        give back result_error with "sqlite3 is not installed"
+    if status is not 0:
+        let message be db_error_text with err
+        if length of message is 0:
+            set message to "sqlite3 couldn't report its version"
+        give back result_error with message
+    let body be read file out
+    give back result_ok with (text_trim with body)
+
+# Turn a path into a safe stem for scratch files.
+to db_key with path as a view of text:
+    let out be text_replace with path and "/" and "_"
+    set out to text_replace with out and "\\" and "_"
+    set out to text_replace with out and ":" and "_"
+    set out to text_replace with out and " " and "_"
+    give back out
+
+# The path inside a connection.
+to db_connection_path with connection as a view of a list of text:
+    if length of connection is at least 2:
+        give back copy of item 2 of connection
+    give back ""
+
+# Open an existing database file. SQLite creates it when it is missing.
+to db_connect with path as a view of text:
+    give back ["file", copy of path]
+
+# Open a transient database backed by a temporary file. Unlike Python's
+# in-memory database, it survives across statements because each statement is
+# a separate `sqlite3` process. `db_close` removes the file.
+to db_connect_memory with name as a view of text:
+    let stem be db_key with name
+    let path be os_temp_path with ("rusk-db-" + stem + ".sqlite")
+    remove file path
+    give back ["memory", path]
+
+# Take a cursor on a connection. Two cursors on one connection share the same
+# scratch files, so a later execute replaces an earlier result.
+to db_cursor with connection as a view of a list of text:
+    let path be db_connection_path with connection
+    let key be db_key with path
+    let rows be os_temp_path with ("rusk-db-" + key + ".rows")
+    let err be os_temp_path with ("rusk-db-" + key + ".err")
+    give back [copy of path, rows, err]
+
+# A single-quoted SQL literal. Embedded quotes are doubled.
+to db_sql_literal with value as a view of text:
+    give back "'" + (text_replace with value and "'" and "''") + "'"
+
+# A double-quoted SQL identifier. Embedded quotes are doubled.
+to db_quote_identifier with name as a view of text:
+    give back "\"" + (text_replace with name and "\"" and "\"\"") + "\""
+
+# Replace `?` placeholders outside quoted text with SQL literals. Extra
+# arguments are ignored; too few leave the remaining placeholders untouched.
+to db_bind with sql as a view of text and params as a view of a list of text:
+    let n be length of sql
+    let total be length of params
+    let out be ""
+    let i be 1
+    let p be 1
+    let quote_char be ""
+    while i is at most n:
+        let ch be letter i of sql
+        if quote_char is not "":
+            set out to out + ch
+            if ch is quote_char:
+                if (i + 1) is at most n:
+                    if (letter (i + 1) of sql) is quote_char:
+                        set out to out + (letter (i + 1) of sql)
+                        set i to i + 2
+                    otherwise:
+                        set quote_char to ""
+                        set i to i + 1
+                otherwise:
+                    set quote_char to ""
+                    set i to i + 1
+            otherwise:
+                set i to i + 1
+        otherwise:
+            if ch is "'" or ch is "\"":
+                set quote_char to (copy of ch)
+                set out to out + ch
+                set i to i + 1
+            otherwise:
+                if ch is "?" and p is at most total:
+                    set out to out + (db_sql_literal with (item p of params))
+                    set p to p + 1
+                    set i to i + 1
+                otherwise:
+                    set out to out + ch
+                    set i to i + 1
+    give back out
+
+# The last SQLite error message on a cursor, or empty text.
+to db_error_text with path as a view of text:
+    if not (file exists path):
+        give back ""
+    let body be read file path
+    give back text_trim with body
+
+# Run a SQL statement or script on a cursor. The result holds the rows file on
+# success, or the SQLite error message on failure.
+to db_execute_sql with cursor as a view of a list of text and statement as a view of text:
+    if not (db_available):
+        give back result_error with "sqlite3 is not installed"
+    let database be copy of item 1 of cursor
+    let rows be copy of item 2 of cursor
+    let err be copy of item 3 of cursor
+    # Clear the last statement's output. Otherwise a successful statement could
+    # still report an old error through `db_last_error`, and an empty result
+    # could look like the previous result.
+    remove file rows
+    remove file err
+    let command be "sqlite3 -csv -noheader " + (text_quote with database) + " " + (text_quote with statement) + " > " + (text_quote with rows) + " 2> " + (text_quote with err)
+    let status be run command command
+    if status is 127:
+        give back result_error with "sqlite3 is not installed"
+    if status is not 0:
+        let message be db_error_text with err
+        if length of message is 0:
+            set message to "sqlite3 couldn't run the statement"
+        give back db_operational_error with message
+    give back result_ok with rows
+
+# Execute SQL with `?` parameters, like Python's cursor.execute(sql, params).
+to db_execute_params with cursor as a view of a list of text and sql as a view of text and params as a view of a list of text:
+    give back db_execute_sql with cursor and (db_bind with sql and params)
+
+# Execute SQL without parameters.
+to db_execute with cursor as a view of a list of text and sql as a view of text:
+    give back db_execute_params with cursor and sql and (an empty list of text)
+
+# Run one statement or script on a connection, giving back "ok" or an error.
+to db_run with connection as a view of a list of text and sql as a view of text:
+    let cursor be db_cursor with connection
+    let done be db_execute with cursor and sql
+    if not (result_is_ok with done):
+        give back done
+    give back result_ok with "ok"
+
+# Run a query on a connection and give back its rows. Errors give an empty
+# list; use `db_execute` on a cursor when the message matters.
+to db_query_rows with connection as a view of a list of text and sql as a view of text:
+    let cursor be db_cursor with connection
+    let done be db_execute with cursor and sql
+    if not (result_is_ok with done):
+        give back an empty list of lists of text
+    give back db_fetchall with cursor
+
+# Parse one CSV line from `sqlite3 -csv`, including quoted commas and doubled
+# quotes. Rusk has no records, so a row is a list of text.
+to db_parse_csv_line with line as a view of text:
+    let fields be an empty list of text
+    let field be ""
+    let quoted be false
+    let n be length of line
+    let i be 1
+    while i is at most n:
+        let ch be letter i of line
+        if quoted:
+            if ch is "\"":
+                if (i + 1) is at most n:
+                    if (letter (i + 1) of line) is "\"":
+                        set field to field + "\""
+                        set i to i + 2
+                    otherwise:
+                        set quoted to false
+                        set i to i + 1
+                otherwise:
+                    set quoted to false
+                    set i to i + 1
+            otherwise:
+                set field to field + ch
+                set i to i + 1
+        otherwise:
+            if ch is "\"" and length of field is 0:
+                set quoted to true
+                set i to i + 1
+            otherwise:
+                if ch is ",":
+                    add field to fields
+                    set field to ""
+                    set i to i + 1
+                otherwise:
+                    set field to field + ch
+                    set i to i + 1
+    add field to fields
+    give back fields
+
+# Parse the whole CSV result into rows. Scanning the body instead of splitting
+# on newlines keeps quoted fields that contain line breaks intact.
+to db_parse_rows with body as a view of text:
+    let rows be an empty list of lists of text
+    let row be an empty list of text
+    let field be ""
+    let quoted be false
+    let touched be false
+    let n be length of body
+    let i be 1
+    while i is at most n:
+        let ch be letter i of body
+        if quoted:
+            set touched to true
+            if ch is "\"":
+                if (i + 1) is at most n:
+                    if (letter (i + 1) of body) is "\"":
+                        set field to field + "\""
+                        set i to i + 2
+                    otherwise:
+                        set quoted to false
+                        set i to i + 1
+                otherwise:
+                    set quoted to false
+                    set i to i + 1
+            otherwise:
+                if ch is "\r":
+                    set field to field + "\n"
+                    if (i + 1) is at most n:
+                        if (letter (i + 1) of body) is "\n":
+                            set i to i + 2
+                        otherwise:
+                            set i to i + 1
+                    otherwise:
+                        set i to i + 1
+                otherwise:
+                    set field to field + ch
+                    set i to i + 1
+        otherwise:
+            if ch is "\"" and length of field is 0 and not touched:
+                set quoted to true
+                set touched to true
+                set i to i + 1
+            otherwise:
+                if ch is ",":
+                    add (copy of field) to row
+                    set field to ""
+                    set touched to false
+                    set i to i + 1
+                otherwise:
+                    if ch is "\n" or ch is "\r":
+                        if touched or (length of row is more than 0):
+                            add (copy of field) to row
+                            add (copy of row) to rows
+                            set row to an empty list of text
+                        set field to ""
+                        set touched to false
+                        if ch is "\r":
+                            if (i + 1) is at most n:
+                                if (letter (i + 1) of body) is "\n":
+                                    set i to i + 2
+                                otherwise:
+                                    set i to i + 1
+                            otherwise:
+                                set i to i + 1
+                        otherwise:
+                            set i to i + 1
+                    otherwise:
+                        set field to field + ch
+                        set touched to true
+                        set i to i + 1
+    if touched or (length of row is more than 0):
+        add (copy of field) to row
+        add (copy of row) to rows
+    give back rows
+
+# All rows from the cursor's last statement.
+to db_fetchall with cursor as a view of a list of text:
+    let rows be copy of item 2 of cursor
+    if not (file exists rows):
+        give back an empty list of lists of text
+    let body be read file rows
+    give back db_parse_rows with body
+
+# The first row, or an empty list of text when the result has no rows.
+to db_fetchone with cursor as a view of a list of text:
+    let rows be db_fetchall with cursor
+    if length of rows is 0:
+        give back an empty list of text
+    give back copy of item 1 of rows
+
+# Up to `count` leading rows. This is a snapshot, not a streaming cursor.
+to db_fetchmany with cursor as a view of a list of text and count as a number:
+    let rows be db_fetchall with cursor
+    let out be an empty list of lists of text
+    let i be 1
+    while i is at most count and i is at most length of rows:
+        add (copy of (item i of rows)) to out
+        set i to i + 1
+    give back out
+
+# The last error on a cursor, or empty text when the last statement succeeded.
+to db_last_error with cursor as a view of a list of text:
+    give back db_error_text with (item 3 of cursor)
+
+# Close a connection. Temporary in-memory files are removed; ordinary database
+# files are left alone.
+to db_close with connection as a view of a list of text:
+    let path be db_connection_path with connection
+    let key be db_key with path
+    let rows be os_temp_path with ("rusk-db-" + key + ".rows")
+    let err be os_temp_path with ("rusk-db-" + key + ".err")
+    remove file rows
+    remove file err
+    if (item 1 of connection) is "memory":
+        remove file path
+    give back result_ok with "closed"
+
+# The sqlite3 CLI commits each statement when the process exits. These names
+# mirror the Python API; scripts that need a transaction should send BEGIN and
+# COMMIT in one `db_run` call.
+to db_commit with connection as a view of a list of text:
+    give back result_ok with "committed"
+
+# There is no open transaction between CLI processes to roll back.
+to db_rollback with connection as a view of a list of text:
+    give back result_error with "no transaction is open between statements"
+
+# Approximate sqlite3.complete_statement: a finished statement ends with a
+# semicolon outside quotes.
+to db_complete_statement with source as a view of text:
+    let s be text_trim with source
+    if length of s is 0:
+        give back false
+    let quote_char be ""
+    let saw_semicolon be false
+    let n be length of s
+    let i be 1
+    while i is at most n:
+        let ch be letter i of s
+        if quote_char is not "":
+            if ch is quote_char:
+                if (i + 1) is at most n:
+                    if (letter (i + 1) of s) is quote_char:
+                        set i to i + 2
+                    otherwise:
+                        set quote_char to ""
+                        set i to i + 1
+                otherwise:
+                    set quote_char to ""
+                    set i to i + 1
+            otherwise:
+                set i to i + 1
+        otherwise:
+            if ch is "'" or ch is "\"":
+                set quote_char to ch
+                set i to i + 1
+            otherwise:
+                if ch is ";":
+                    set saw_semicolon to true
+                set i to i + 1
+    give back saw_semicolon and ((letter n of s) is ";")

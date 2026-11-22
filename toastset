@@ -29,7 +29,7 @@
 #   TOASTSET_VERSION   release to install (default: latest)
 #   TOASTSET_TARGET    release target (default: detected)
 #   TOASTSET_HOME      toolchain home (default: $HOME/.toastset)
-#   TOASTSET_BIN_DIR   where to put the `rusk` binary
+#   TOASTSET_BIN_DIR   where to put the `rusk` binary and bundled libraries
 #   TOASTSET_NO_MODIFY_PATH=1
 #                      do not edit a shell profile or the Windows PATH
 #   TOASTSET_NO_STARTUP=1
@@ -92,7 +92,7 @@ OPTIONS:
                         x86_64-unknown-linux-musl  aarch64-unknown-linux-musl
                         x86_64-pc-windows-msvc
   --home DIR          toolchain home (default: $HOME/.toastset)
-  --bin-dir DIR       install the `rusk` binary into DIR
+  --bin-dir DIR       install the `rusk` binary and bundled libraries into DIR
   --no-verify         skip SHA-256 verification
   --no-modify-path    do not edit a shell or Windows PATH setting
   --no-startup        do not ask about the Windows Startup shortcut
@@ -500,8 +500,23 @@ uninstall() {
     [ -n "$BIN_DIR" ] || BIN_DIR="$TOASTSET_HOME/bin"
     remove_windows_startup
     rm -f "$BIN_DIR/rusk" "$BIN_DIR/rusk.exe"
+    rm -rf "$BIN_DIR/ruskmods" "$BIN_DIR/rusklib" "$BIN_DIR/fastlib"
     rm -rf "$TOASTSET_HOME"
     info "removed Rusk from $BIN_DIR and $TOASTSET_HOME"
+}
+
+# The compiler finds its bundled libraries by walking up from its own file.
+# Install them beside the binary so a bare `import "math"` works from any
+# directory, not just from inside the release archive or a source checkout.
+install_libraries() {
+    for library in ruskmods rusklib fastlib; do
+        [ -d "$tmpdir/$name/$library" ] || die "the archive didn't contain $library"
+        staged="$BIN_DIR/.rusk.toastset.$$.$library"
+        rm -rf "$staged"
+        cp -R "$tmpdir/$name/$library" "$staged" || die "I couldn't copy $library to $BIN_DIR"
+        rm -rf "$BIN_DIR/$library"
+        mv "$staged" "$BIN_DIR/$library" || die "I couldn't install $library in $BIN_DIR"
+    done
 }
 
 # On Windows the POSIX path below is kept for Unix-like shells and tests, but
@@ -666,6 +681,9 @@ staged="$BIN_DIR/.rusk.toastset.$$$EXE"
 cp "$tmpdir/$name/rusk$EXE" "$staged" || die "I couldn't copy rusk to $BIN_DIR"
 chmod 755 "$staged" 2>/dev/null || true
 mv -f "$staged" "$BIN_DIR/rusk$EXE"
+
+# Put the modules and libraries where the installed compiler can find them.
+install_libraries
 
 # Keep a copy of the installer for `toastset --uninstall` and upgrades.
 mkdir -p "$TOASTSET_HOME/bin"

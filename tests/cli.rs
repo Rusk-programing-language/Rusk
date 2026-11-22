@@ -556,6 +556,20 @@ fn toastset_has_a_native_windows_installer() {
     assert!(pointer.contains("wheat_box_around"));
 }
 
+#[test]
+fn toastset_installs_bundled_libraries_beside_the_binary() {
+    let installer = include_str!("../toastset");
+    assert!(installer.matches("install_libraries").count() >= 2);
+    assert!(installer.contains("for library in ruskmods rusklib fastlib"));
+    assert!(installer.contains("cp -R \"$tmpdir/$name/$library\" \"$staged\""));
+    assert!(installer.contains("mv \"$staged\" \"$BIN_DIR/$library\""));
+    assert!(installer
+        .contains("rm -rf \"$BIN_DIR/ruskmods\" \"$BIN_DIR/rusklib\" \"$BIN_DIR/fastlib\""));
+    let native = include_str!("../toastset.ps1");
+    assert!(native.contains("foreach ($library in 'ruskmods', 'rusklib', 'fastlib')"));
+    assert!(native.contains("Remove-Item -LiteralPath $libraryPath -Recurse -Force"));
+}
+
 fn gui_source() -> &'static str {
     concat!(
         "let w be make simple window titled \"Hello\" wide 320 high 200\n",
@@ -756,6 +770,11 @@ fn every_new_module_file_checks() {
         "ruskmods/npmwork/npmwork.rk",
         "rusklib/http/http.rk",
         "rusklib/cache/cache.rk",
+        "rusklib/database/database.rk",
+        "rusklib/database/dbapi2.rk",
+        "rusklib/database/completer.rk",
+        "rusklib/database/dump.rk",
+        "rusklib/database/cli.rk",
         "rusklib/fs_fast/fs_fast.rk",
         "rusklib/platform/platform.rk",
         "rusklib/term/term.rk",
@@ -798,6 +817,7 @@ fn the_guide_new_imports_check_from_outside_the_checkout() {
             "import \"npmwork\"\n",
             "import \"rusklib/http\"\n",
             "import \"rusklib/cache\"\n",
+            "import \"rusklib/database\"\n",
             "import \"rusklib/term\"\n",
             "import \"rusklib/rusklib\"\n",
             "say \"ok\"\n",

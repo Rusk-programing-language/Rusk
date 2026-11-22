@@ -137,7 +137,11 @@ impl Diagnostic {
             "Check the divisor before dividing; Rusk stops rather than inventing a value."
         } else if lower.contains("can't read") || lower.contains("couldn't read") {
             "Check the path and that the file can be read by this user."
-        } else if lower.contains("import") || lower.contains("cycle") {
+        } else if lower.contains("import")
+            || lower.contains("cycle")
+            || lower.contains("can't find the file")
+            || lower.contains("looked next to the program")
+        {
             "Imports resolve relative to the file that writes them. Check the path and avoid a loop of imports."
         } else {
             match self.kind {
@@ -347,6 +351,8 @@ fn classify(raw: &str) -> Kind {
         || text.contains("export wasn't")
         || text.contains("cycle")
         || text.contains("imports only work")
+        || text.contains("can't find the file")
+        || text.contains("looked next to the program")
         || text.contains("in toast")
         || text.contains("toast")
     {
@@ -462,6 +468,15 @@ mod tests {
             Diagnostic::new("I don't know the command ':wat' — try :help", None).kind,
             Kind::Usage
         );
+    }
+
+    #[test]
+    fn a_missing_module_is_an_import_error() {
+        let raw = "line 1: I can't find the file 'simple/simple' — I looked next to the program, in the current directory, beside this compiler, and in ruskmods/, rusklib/, and fastlib/ under each";
+        let diagnostic = Diagnostic::new(raw, Some("import \"simple/simple\"\n"));
+        assert_eq!(diagnostic.code, "E05");
+        assert_eq!(diagnostic.kind, Kind::Import);
+        assert!(diagnostic.hint().contains("Imports resolve relative"));
     }
 
     #[test]

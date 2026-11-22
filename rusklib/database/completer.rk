@@ -1,0 +1,195 @@
+# completer.rk — tab-completion data for the database CLI.
+#
+# Python's sqlite3 shell raises completion from `_sqlite3.SQLITE_KEYWORDS`,
+# attached schemas, `sqlite_master`, `pragma_table_xinfo`, and
+# `pragma_function_list`. Rusk keeps the same idea as plain lists of text:
+# keywords are bundled here, and the database facade gathers the live names.
+
+import "text"
+import "fs"
+
+# The dot commands the CLI understands. Remember to update db_cli_run_line when
+# this list changes.
+to db_cli_commands:
+    give back [".quit ", ".help ", ".version "]
+
+# SQLite keywords, upper-case as in Python's SQLITE_KEYWORDS tuple.
+to db_keywords:
+    let out be an empty list of text
+    add "ABORT" to out
+    add "ACTION" to out
+    add "ADD" to out
+    add "AFTER" to out
+    add "ALL" to out
+    add "ALTER" to out
+    add "ANALYZE" to out
+    add "AND" to out
+    add "AS" to out
+    add "ASC" to out
+    add "ATTACH" to out
+    add "AUTOINCREMENT" to out
+    add "BEFORE" to out
+    add "BEGIN" to out
+    add "BETWEEN" to out
+    add "BY" to out
+    add "CASCADE" to out
+    add "CASE" to out
+    add "CAST" to out
+    add "CHECK" to out
+    add "COLLATE" to out
+    add "COLUMN" to out
+    add "COMMIT" to out
+    add "CONFLICT" to out
+    add "CONSTRAINT" to out
+    add "CREATE" to out
+    add "CROSS" to out
+    add "CURRENT" to out
+    add "CURRENT_DATE" to out
+    add "CURRENT_TIME" to out
+    add "CURRENT_TIMESTAMP" to out
+    add "DATABASE" to out
+    add "DEFAULT" to out
+    add "DEFERRABLE" to out
+    add "DEFERRED" to out
+    add "DELETE" to out
+    add "DESC" to out
+    add "DETACH" to out
+    add "DISTINCT" to out
+    add "DO" to out
+    add "DROP" to out
+    add "EACH" to out
+    add "ELSE" to out
+    add "END" to out
+    add "ESCAPE" to out
+    add "EXCEPT" to out
+    add "EXCLUDE" to out
+    add "EXCLUSIVE" to out
+    add "EXISTS" to out
+    add "EXPLAIN" to out
+    add "FAIL" to out
+    add "FILTER" to out
+    add "FIRST" to out
+    add "FOLLOWING" to out
+    add "FOR" to out
+    add "FOREIGN" to out
+    add "FROM" to out
+    add "FULL" to out
+    add "GENERATED" to out
+    add "GLOB" to out
+    add "GROUP" to out
+    add "GROUPS" to out
+    add "HAVING" to out
+    add "IF" to out
+    add "IGNORE" to out
+    add "IMMEDIATE" to out
+    add "IN" to out
+    add "INDEX" to out
+    add "INDEXED" to out
+    add "INITIALLY" to out
+    add "INNER" to out
+    add "INSERT" to out
+    add "INSTEAD" to out
+    add "INTERSECT" to out
+    add "INTO" to out
+    add "IS" to out
+    add "ISNULL" to out
+    add "JOIN" to out
+    add "KEY" to out
+    add "LAST" to out
+    add "LEFT" to out
+    add "LIKE" to out
+    add "LIMIT" to out
+    add "MATCH" to out
+    add "MATERIALIZED" to out
+    add "NATURAL" to out
+    add "NO" to out
+    add "NOT" to out
+    add "NOTHING" to out
+    add "NOTNULL" to out
+    add "NULL" to out
+    add "NULLS" to out
+    add "OF" to out
+    add "OFFSET" to out
+    add "ON" to out
+    add "OR" to out
+    add "ORDER" to out
+    add "OTHERS" to out
+    add "OUTER" to out
+    add "OVER" to out
+    add "PARTITION" to out
+    add "PLAN" to out
+    add "PRAGMA" to out
+    add "PRECEDING" to out
+    add "PRIMARY" to out
+    add "QUERY" to out
+    add "RAISE" to out
+    add "RANGE" to out
+    add "RECURSIVE" to out
+    add "REFERENCES" to out
+    add "REGEXP" to out
+    add "REINDEX" to out
+    add "RELEASE" to out
+    add "RENAME" to out
+    add "REPLACE" to out
+    add "RESTRICT" to out
+    add "RETURNING" to out
+    add "RIGHT" to out
+    add "ROLLBACK" to out
+    add "ROW" to out
+    add "ROWS" to out
+    add "SAVEPOINT" to out
+    add "SELECT" to out
+    add "SET" to out
+    add "TABLE" to out
+    add "TEMP" to out
+    add "TEMPORARY" to out
+    add "THEN" to out
+    add "TIES" to out
+    add "TO" to out
+    add "TRANSACTION" to out
+    add "TRIGGER" to out
+    add "UNBOUNDED" to out
+    add "UNION" to out
+    add "UNIQUE" to out
+    add "UPDATE" to out
+    add "USING" to out
+    add "VACUUM" to out
+    add "VALUES" to out
+    add "VIEW" to out
+    add "VIRTUAL" to out
+    add "WHEN" to out
+    add "WHERE" to out
+    add "WINDOW" to out
+    add "WITH" to out
+    add "WITHOUT" to out
+    give back out
+
+# Case-insensitive prefix check.
+to db_starts_with_ci with text as a view of text and prefix as a view of text:
+    let upper be text_upper with text
+    give back text_starts_with with upper and (text_upper with prefix)
+
+# Remove duplicate text items, keeping the first occurrence.
+to db_unique_text with items as a view of a list of text:
+    let out be an empty list of text
+    for each item_text in items:
+        let seen be false
+        for each kept in out:
+            if kept is item_text:
+                set seen to true
+        if not seen:
+            add (copy of item_text) to out
+    give back out
+
+# Keep names starting with `prefix`, add a trailing space, dedupe, and sort.
+to db_filter_completions with candidates as a view of a list of text and prefix as a view of text:
+    let matches be an empty list of text
+    for each candidate in candidates:
+        if db_starts_with_ci with candidate and prefix:
+            let completion be copy of candidate
+            let n be length of completion
+            if n is at least 1:
+                if (letter n of completion) is not " ":
+                    set completion to completion + " "
+            add completion to matches
+    give back fs_sort with (db_unique_text with matches)

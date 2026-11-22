@@ -65,6 +65,7 @@ the language's own file primitives instead. The canonical source is
 |---|---|---|
 | `http/http.rk` | `http_` | `curl`-backed GET, retries, status, headers, ETag, cache key |
 | `cache/cache.rk` | `cache_` | metadata and tarball cache with atomic writes |
+| `database/database.rk` | `db_` | SQLite-like connect/cursor/execute/fetch, dump, CLI, completion |
 | `fs_fast/fs_fast.rk` | `fs_fast_` | hardlink/copy trees, atomic rename, temp files |
 | `platform/platform.rk` | `platform_` | OS, arch, libc, home, temp, shell, environment |
 | `term/term.rk` | `term_` | colour, progress bars, gauges, spinners, rules |
@@ -85,6 +86,55 @@ say http_cache_key with "https://example.com"
 say cache_root
 say term_progress with 3 and 10 and 20
 ```
+
+## `database/` — SQLite-like files
+
+`import "rusklib/database"` is Rusk's answer to Python's `sqlite3` package. It
+gathers five files, each modelled on the Python file named beside it:
+
+| File | Python model | What it holds |
+|---|---|---|
+| `dbapi2.rk` | `dbapi2.py` | connections, cursors, execute, bind, fetch, close, version |
+| `completer.rk` | `_completer.py` | keywords, dot commands, prefix filtering, sorted matches |
+| `dump.rk` | `dump.py` | `db_iterdump`, filtered dumps, dump files, restore |
+| `cli.rk` | `__main__.py` | banner, help, row formatting, one-line driver, REPL |
+| `database.rk` | `sqlite3/__init__.py` | the one-import facade |
+
+A connection is `["file", path]` or `["memory", temporary path]`; a cursor is
+`[database path, rows file, error file]`; rows are lists of text. Operations
+give back `result` values (`["ok", value]` or `["error", message]`), matching
+the rest of `ruskmods/result`.
+
+```rusk
+import "rusklib/database"
+
+if not db_available:
+    stop with 1
+
+let con be db_connect_memory with "demo"
+let cur be db_cursor with con
+say db_run with con and "create table lang(name text, year integer)"
+say db_execute_params with cur and "insert into lang values (?, ?)" and ["C", "1972"]
+say db_execute with cur and "select name, year from lang"
+say db_fetchall with cur            # [[C, 1972]]
+say db_cli_complete with con and "SE"
+say db_dump with con
+say db_close with con
+```
+
+`db_cli_main with con and "select 1;"` runs one statement and prints its rows.
+With empty text it starts a small REPL with `.help`, `.version`, and `.quit`;
+`db_cli_complete` supplies the tab-completion candidates a host program can use.
+
+The library needs the system `sqlite3` command on `PATH`; `db_available` and
+`db_version` report when it is missing. Each statement is a separate CLI
+process with output redirected to files, so there is no native binding, no
+transaction held between calls, no streaming cursor, and no type fidelity in
+results (NULL and empty text both read back as empty text). `:memory:` is a
+temporary file that `db_close` removes. `?` parameters are quoted text
+substitutions, not full DB-API binding. Dumps are lists of statements rather
+than a generator. The CLI uses `read line`, so it has no history, raw-mode
+editing, or callbacks; an empty line or end of input leaves the loop.
 
 ## `wheat/` — terminal UI
 
@@ -133,7 +183,7 @@ modes, and the limits.
 - `bytes`, `text`, `semver`, `maps`, `result`
 - `manifest`, `lock`, `archive`, `fs`, `sha`, `gzip`
 - `installwork` and `npmwork`
-- the system modules `http`, `cache`, `fs_fast`, `platform`, `term`, `bench`
+- the system modules `http`, `cache`, `database`, `fs_fast`, `platform`, `term`, `bench`
 - `files` and `wheat/wheat`
 
 The bundle mostly uses explicit relative imports so it works from a checkout and
@@ -166,6 +216,9 @@ convenience, but a program that only wants widgets need not.
 - `sys` reads Linux `/proc` files and returns empty text or `0` when a file is
   not readable. `run command` shares output instead of capturing it, so helpers
   that need output read a file.
+- `database` shells out to `sqlite3` and reads CSV files. It has no native
+  binding, no type fidelity in rows, no transaction between statements, and
+  emulates `:memory:` with a temporary file. See its section above.
 - File copies keep the file contents in memory as text. They are for ordinary
   files, not multi-gigabyte data.
 - `wheat` does not query the terminal, does not detect a tty, and does not

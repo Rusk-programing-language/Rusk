@@ -1019,7 +1019,7 @@ modules (`math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`,
 `os`, `path`, `shutils`, `text`, `bytes`, `maps`, `result`, `semver`, `manifest`,
 `lock`, `archive`, `fs`, `sha`, `gzip`) and the `installwork/` and `npmwork/`
 installer frameworks. `rusklib/` adds system/IO modules (`http`, `cache`,
-`fs_fast`, `platform`, `term`, `bench`), file helpers, the `wheat/` terminal UI
+`database`, `fs_fast`, `platform`, `term`, `bench`), file helpers, the `wheat/` terminal UI
 library, and one bundle. `fastlib/` adds libraries whose bottom layer is a
 language primary, starting with the `simple/` GUI:
 
@@ -1028,6 +1028,7 @@ import "date"
 import "semver"
 import "npmwork"
 import "rusklib/http"
+import "rusklib/database"
 import "rusklib/files"
 import "wheat/wheat"
 import "simple/simple"
@@ -1035,6 +1036,7 @@ import "simple/simple"
 say date_format_iso with 2026 and 11 and 12
 say semver_valid with "1.2.3"
 say http_cache_key with "https://example.com"
+say db_available
 say files_exists with "notes.txt"
 say wheat_box_around with "hello" and 0 and "rounded"
 ```
@@ -1049,6 +1051,7 @@ import "lock"
 import "npmwork"
 import "rusklib/http"
 import "rusklib/cache"
+import "rusklib/database"
 import "rusklib/term"
 import "rusklib/rusklib"
 ```
@@ -1064,7 +1067,7 @@ say files_size with "notes.txt"
 say wheat_bar with 3 and 10 and 10
 ```
 
-Each module keeps a prefix (`date_`, `path_`, `files_`, `http_`, `npmwork_`,
+Each module keeps a prefix (`date_`, `path_`, `files_`, `http_`, `db_`, `npmwork_`,
 `wheat_`, `simple_`, ...) because a plain import shares one global namespace. See
 [`ruskmods/README.md`](../ruskmods/README.md),
 [`rusklib/README.md`](../rusklib/README.md),
@@ -1418,7 +1421,7 @@ are ordinary Rusk source, not compiler magic, so you can read or copy them.
 | `ruskmods/` | generic modules: `math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`, `shutils`, `text`, `bytes`, `maps`, `result`, `semver`, `manifest`, `lock`, `archive`, `fs`, `sha`, `gzip` |
 | `ruskmods/installwork/` | Rusk package registry, version requirements, resolver, archives, install prefix, and CLI |
 | `ruskmods/npmwork/` | npm/JS/TS framework: manifest, registry, resolver, installer, lock, global, project, and CLI |
-| `rusklib/http/`, `cache/`, `fs_fast/`, `platform/`, `term/`, `bench/` | system/IO helpers that shell out or read the environment |
+| `rusklib/http/`, `cache/`, `database/`, `fs_fast/`, `platform/`, `term/`, `bench/` | system/IO helpers that shell out or read the environment |
 | `rusklib/files/files.rk` | canonical file and directory helpers; `rusklib/files.rk` forwards to it |
 | `rusklib/rusklib.rk` | one import that pulls in the whole helper bundle |
 | `rusklib/wheat/` | **wheat**, the terminal UI library: widths, colours, styles, boxes, tables, progress bars, panels, layout, and themes |
@@ -1428,6 +1431,32 @@ are ordinary Rusk source, not compiler magic, so you can read or copy them.
 | `src/optimize.rs` | constant folding, constant branches, and dead-code removal before codegen |
 | `src/repl.rs`, `src/tui.rs` | the line session and the full-screen terminal session |
 | `examples/` | small runnable programs used by the guide and tests |
+
+### database
+
+`rusklib/database` mirrors the shape of Python's `sqlite3`: connect, take a
+cursor, execute SQL, fetch rows, and close. It needs the `sqlite3` command on
+`PATH` because it runs each statement as a separate process and reads CSV output
+back through files. Connections are `["file", path]` or
+`["memory", temporary path]`; rows are lists of text.
+
+```rusk
+import "rusklib/database"
+
+let con be db_connect_memory with "demo"
+let cur be db_cursor with con
+say db_run with con and "create table note(body text)"
+say db_execute_params with cur and "insert into note values (?)" and ["hello"]
+say db_execute with cur and "select body from note"
+say db_fetchall with cur         # [[hello]]
+say db_dump with con
+say db_close with con
+```
+
+`db_iterdump` gives the dump as statements, `db_cli_main` drives a small
+SQLite-like REPL, and `db_cli_complete` supplies completion candidates. There is
+no native SQLite binding, no type fidelity in rows, and no transaction held
+between statements; see [`rusklib/README.md`](../rusklib/README.md) for details.
 
 ### wheat
 

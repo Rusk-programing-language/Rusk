@@ -1,0 +1,131 @@
+# dump.rk — SQL dumps for the Rusk database library.
+#
+# Python's `sqlite3.dump.iterdump()` yields the statements needed to rebuild a
+# database. Rusk has no generators, so `db_iterdump` gives back a list of text
+# instead. The result is meant to be written to a file or sent to `db_run` as
+# one script. Virtual tables and SQLite's internal bookkeeping tables are
+# handled conservatively; see the database README for the full limit list.
+
+import "text"
+import "result"
+import "dbapi2"
+
+# Schema rows of one kind, or of every index/trigger/view when `kind` is empty.
+to db_dump_schema_rows with connection as a view of a list of text and kind as a view of text and filter as a view of text:
+    let sql be "SELECT \"name\", \"type\", \"sql\" FROM \"sqlite_master\" WHERE \"sql\" IS NOT NULL"
+    if length of kind is 0:
+        set sql to sql + " AND \"type\" IN ('index', 'trigger', 'view')"
+    otherwise:
+        set sql to sql + " AND \"type\" = " + (db_sql_literal with kind)
+    if length of filter is not 0:
+        set sql to sql + " AND \"name\" LIKE " + (db_sql_literal with filter)
+    set sql to sql + " ORDER BY \"name\""
+    give back db_query_rows with connection and sql
+
+# Column names from `PRAGMA table_info`, in declaration order.
+to db_dump_columns with connection as a view of a list of text and table as a view of text:
+    let out be an empty list of text
+    let rows be db_query_rows with connection and ("PRAGMA table_info(" + (db_quote_identifier with table) + ")")
+    for each row in rows:
+        if length of row is at least 2:
+            add (copy of item 2 of row) to out
+    give back out
+
+# The DELETE and INSERT statements SQLite uses for AUTOINCREMENT counters.
+to db_dump_sequence_statements with connection as a view of a list of text:
+    let out be an empty list of text
+    add "DELETE FROM \"sqlite_sequence\";" to out
+    for each row in (db_query_rows with connection and "SELECT * FROM \"sqlite_sequence\";"):
+        if length of row is at least 2:
+            add ("INSERT INTO \"sqlite_sequence\" VALUES(" + (db_sql_literal with (item 1 of row)) + "," + (item 2 of row) + ");") to out
+    give back out
+
+# Build one INSERT statement for each row. The SQL mirrors Python's dumper:
+# SQLite's own `quote()` function handles every value type, so Rusk only has
+# to assemble the statement text.
+to db_dump_insert_statements with connection as a view of a list of text and table as a view of text and columns as a view of a list of text:
+    let out be an empty list of text
+    if length of columns is 0:
+        give back out
+    let ident be db_quote_identifier with table
+    let parts be an empty list of text
+    for each column in columns:
+        add ("||quote(" + (db_quote_identifier with column) + ")||") to parts
+    let expr be text_join with parts and "','"
+    let sql be "SELECT 'INSERT INTO " + ident + " VALUES('" + expr + "')' FROM " + ident + ";"
+    for each row in (db_query_rows with connection and sql):
+        if length of row is at least 1:
+            add ((item 1 of row) + ";") to out
+    give back out
+
+# Yield the statements needed to rebuild `connection`. An empty `filter` dumps
+# everything; otherwise only objects whose names match the SQL LIKE pattern
+# are included, as in Python's `iterdump(filter=...)`.
+to db_iterdump with connection as a view of a list of text and filter as a view of text:
+    let out be an empty list of text
+    let violations be db_query_rows with connection and "PRAGMA foreign_key_check"
+    if length of violations is more than 0:
+        add "PRAGMA foreign_keys=OFF;" to out
+    add "BEGIN TRANSACTION;" to out
+    let writeable be false
+
+    for each row in (db_dump_schema_rows with connection and "table" and filter):
+        if length of row is at least 3:
+            let name be copy of item 1 of row
+            let sql be copy of item 3 of row
+            if name is "sqlite_sequence":
+                for each statement in (db_dump_sequence_statements with connection):
+                    add statement to out
+            otherwise:
+                if not (text_starts_with with name and "sqlite_"):
+                    if length of sql is more than 0:
+                        if text_starts_with with sql and "CREATE VIRTUAL TABLE":
+                            if not writeable:
+                                add "PRAGMA writable_schema=ON;" to out
+                                set writeable to true
+                            add ("INSERT INTO sqlite_master(type,name,tbl_name,rootpage,sql) VALUES('table'," + (db_sql_literal with name) + "," + (db_sql_literal with name) + ",0," + (db_sql_literal with sql) + ");") to out
+                        otherwise:
+                            add sql + ";" to out
+                        let columns be db_dump_columns with connection and name
+                        for each statement in (db_dump_insert_statements with connection and name and columns):
+                            add statement to out
+
+    for each row in (db_dump_schema_rows with connection and "" and filter):
+        if length of row is at least 3:
+            let object_name be copy of item 1 of row
+            let object_sql be copy of item 3 of row
+            if not (text_starts_with with object_name and "sqlite_"):
+                if length of object_sql is more than 0:
+                    add object_sql + ";" to out
+
+    if writeable:
+        add "PRAGMA writable_schema=OFF;" to out
+    add "COMMIT;" to out
+    give back out
+
+# Every object, as a list of statements.
+to db_iterdump_all with connection as a view of a list of text:
+    give back db_iterdump with connection and ""
+
+# The dump as one script, ready for `db_run` or a file.
+to db_dump with connection as a view of a list of text:
+    let statements be db_iterdump with connection and ""
+    give back result_ok with (text_join with statements and "\n")
+
+# The dump as one script, restricted to names matching `filter`.
+to db_dump_filtered with connection as a view of a list of text and filter as a view of text:
+    let statements be db_iterdump with connection and filter
+    give back result_ok with (text_join with statements and "\n")
+
+# Write a dump to a file. Python callers usually do this with `iterdump`; in
+# Rusk a file can be handed straight to `sqlite3` or `db_restore`.
+to db_dump_to_file with connection as a view of a list of text and path as a view of text:
+    let dump be db_dump with connection
+    let body be result_value with dump
+    write body to file path
+    give back result_ok with copy of path
+
+# Read a dump file and run it as one SQL script.
+to db_restore with connection as a view of a list of text and path as a view of text:
+    let body be read file path
+    give back db_run with connection and body

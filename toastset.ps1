@@ -65,7 +65,7 @@ OPTIONS:
   --version VERSION   install a specific release (for example 1.2.1)
   --target TARGET     install a specific target (default: x86_64-pc-windows-msvc)
   --home DIR          toolchain home (default: %LOCALAPPDATA%\Rusk)
-  --bin-dir DIR       install rusk.exe into DIR
+  --bin-dir DIR       install rusk.exe and bundled libraries into DIR
   --no-verify         skip SHA-256 verification
   --no-modify-path    do not change the Windows user PATH
   --no-startup        do not ask about the Windows Startup shortcut
@@ -162,6 +162,10 @@ if ($Uninstall) {
     Remove-StartupShortcut
     if (Test-Path -LiteralPath $Exe) { Remove-Item -LiteralPath $Exe -Force }
     if (Test-Path -LiteralPath $VersionFile) { Remove-Item -LiteralPath $VersionFile -Force }
+    foreach ($library in 'ruskmods', 'rusklib', 'fastlib') {
+        $libraryPath = Join-Path $BinDir $library
+        if (Test-Path -LiteralPath $libraryPath) { Remove-Item -LiteralPath $libraryPath -Recurse -Force }
+    }
     Say-Info "removed Rusk from $BinDir"
     exit 0
 }

@@ -883,6 +883,60 @@ fn lists_are_homogeneous_and_empty_lists_need_a_kind() {
 // ---- imports ---------------------------------------------------------
 
 #[test]
+fn the_database_helpers_run_without_sqlite3() {
+    let src = concat!(
+        "import \"rusklib/database\"\n",
+        "say db_complete_statement with \"select 1;\"\n",
+        "say db_parse_csv_line with \"a,\\\"b,c\\\"\"\n",
+        "say db_cli_format_row with [\"Ada\", \"1972\"]\n",
+        "say db_filter_completions with [\".quit \", \".help \"] and \".q\"\n",
+    );
+    let (stdout, stderr, code) = run_full("database_helpers", src);
+    assert_eq!(
+        stdout,
+        concat!("true\n", "[a, b,c]\n", "('Ada', '1972')\n", "[.quit ]\n",)
+    );
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn database_sql_runs_with_sqlite3_when_available() {
+    if find_in_path("sqlite3").is_none() {
+        return;
+    }
+    let src = concat!(
+        "import \"rusklib/database\"\n",
+        "let con be db_connect_memory with (\"e2e-\" + argument 1)\n",
+        "let cur be db_cursor with con\n",
+        "say db_run with con and \"CREATE TABLE lang(name TEXT, year INTEGER)\"\n",
+        "say db_execute_params with cur and \"INSERT INTO lang VALUES (?, ?)\" and [\"C\", \"1972\"]\n",
+        "say db_execute with cur and \"SELECT name, year FROM lang\"\n",
+        "say db_fetchall with cur\n",
+        "say db_dump with con\n",
+        "say db_close with con\n",
+    );
+    let path = bake_to_disk("database_sqlite3", src);
+    let mut command = program_command(&path);
+    command.arg(std::process::id().to_string());
+    let out = output_with_retry(&mut command);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "sqlite3 test failed: {stdout}{stderr}"
+    );
+    assert!(stdout.contains("[[C, 1972]]"), "{stdout}");
+    assert!(stdout.contains("CREATE TABLE lang"), "{stdout}");
+    assert!(
+        stdout.contains("INSERT INTO \"lang\" VALUES('C',1972);"),
+        "{stdout}"
+    );
+    assert_eq!(stderr, "");
+}
+
+#[test]
 fn a_program_can_import_several_modules() {
     let dir = std::env::temp_dir().join(format!("rusk-e2e-imports-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("lib")).unwrap();

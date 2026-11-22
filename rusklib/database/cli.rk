@@ -1,0 +1,160 @@
+# cli.rk — the small SQLite-like command line for the database library.
+#
+# Python's `sqlite3.__main__` wraps `InteractiveConsole`: it runs one SQL
+# statement when one is supplied, otherwise it starts a REPL with `.help`,
+# `.version`, and `.quit` commands. Rusk has no `readline` or callbacks, so this
+# module exposes the same pieces as ordinary functions. `db_cli_main` drives a
+# line-based REPL; `db_cli_complete` supplies tab-completion candidates.
+
+import "text"
+import "result"
+import "dbapi2"
+import "completer"
+
+# The banner printed by `db_cli_main`.
+to db_cli_banner with connection as a view of a list of text:
+    let version be db_version
+    let version_text be "unknown"
+    if result_is_ok with version:
+        set version_text to result_value with version
+    let label be "a transient in-memory database"
+    if (item 1 of connection) is "file":
+        set label to "'" + (db_connection_path with connection) + "'"
+    give back "sqlite3 shell, running on SQLite version " + version_text + "\nConnected to " + label + "\n\nEach command will be run using db_execute on a cursor.\nType \".help\" for more information; type \".quit\" or CTRL-D to quit."
+
+# The text printed by `.help`.
+to db_cli_help:
+    give back "Enter SQL code or one of the below commands, and press enter.\n\n.version    Print underlying SQLite library version\n.help       Print this help message\n.quit       Exit the CLI, equivalent to CTRL-D\n\nRows are lists of text: every column is printed in single quotes."
+
+# Print one row the way the Python sqlite3 shell does. Rusk rows hold text
+# only, so numbers are quoted too.
+to db_cli_format_row with row as a view of a list of text:
+    let parts be an empty list of text
+    for each value in row:
+        add ("'" + (text_replace with value and "'" and "''") + "'") to parts
+    give back "(" + (text_join with parts and ", ") + ")"
+
+# Execute SQL on a cursor, print its rows, and give back the row count as text.
+# Errors are written to standard error; `suppress_errors` false ends the
+# program with status 1, as Python's CLI does for a bad command-line statement.
+to db_cli_execute with cursor as a view of a list of text and sql as a view of text and suppress_errors as a truth value:
+    let done be db_execute with cursor and sql
+    if not (result_is_ok with done):
+        warn result_error_message with done
+        if not suppress_errors:
+            stop with 1
+        give back done
+    let rows be db_fetchall with cursor
+    for each row in rows:
+        say db_cli_format_row with row
+    give back result_ok with (text_from_number with (length of rows))
+
+# Append one column of query rows to a list of names.
+to db_cli_add_names with names as a list of text and rows as a view of a list of lists of text and column as a number:
+    for each row in rows:
+        if length of row is at least column:
+            add (copy of (item column of row)) to names
+    give back names
+
+# Completion candidates for `prefix`, matching Python's `_completer`: dot
+# commands, keywords, schema/table/index/trigger/view names, columns, and
+# functions. A trailing space is added to every match.
+to db_cli_complete with connection as a view of a list of text and prefix as a view of text:
+    if length of prefix is more than 0:
+        if (letter 1 of prefix) is ".":
+            give back db_filter_completions with (db_cli_commands) and prefix
+
+    let candidates be an empty list of text
+    for each keyword in (db_keywords):
+        add keyword to candidates
+    set candidates to db_cli_add_names with candidates and (db_query_rows with connection and "SELECT name FROM sqlite_master") and 1
+    set candidates to db_cli_add_names with candidates and (db_query_rows with connection and "PRAGMA database_list") and 2
+    set candidates to db_cli_add_names with candidates and (db_query_rows with connection and "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')") and 1
+
+    for each row in (db_query_rows with connection and "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"):
+        if length of row is at least 1:
+            let table be copy of item 1 of row
+            let columns be db_query_rows with connection and ("PRAGMA table_info(" + (db_quote_identifier with table) + ")")
+            set candidates to db_cli_add_names with candidates and columns and 2
+
+    set candidates to db_cli_add_names with candidates and (db_query_rows with connection and "SELECT DISTINCT UPPER(name) || '(' FROM pragma_function_list() WHERE name NOT IN ('->', '->>')") and 1
+    give back db_filter_completions with candidates and prefix
+
+# The prompt for a fresh line or a continued statement.
+to db_cli_prompt with continuing as a truth value:
+    if continuing:
+        give back "    ... "
+    give back "sqlite> "
+
+# Handle one input line. A dot command is handled immediately; SQL is buffered
+# by `db_cli_main` until `db_complete_statement` says it is finished. The value
+# is "quit", "continue", "help", or a row count on success.
+to db_cli_run_line with connection as a view of a list of text and line as a view of text:
+    let s be text_trim with line
+    if length of s is 0:
+        give back result_ok with ""
+
+    if (letter 1 of s) is ".":
+        let command be text_trim with (part 2 to (length of s) of s)
+        if command is "quit":
+            give back result_ok with "quit"
+        if command is "help":
+            say db_cli_help
+            give back result_ok with "help"
+        if command is "version":
+            let version be db_version
+            if result_is_ok with version:
+                say result_value with version
+            otherwise:
+                warn result_error_message with version
+            give back version
+        let message be "unknown command: \"" + command + "\""
+        warn "Error: " + message
+        give back result_error with message
+
+    if not (db_complete_statement with s):
+        give back result_ok with "continue"
+
+    let cursor be db_cursor with connection
+    give back db_cli_execute with cursor and s and true
+
+# Run one SQL statement when `initial_sql` is not empty. Otherwise print the
+# banner and read lines until `.quit` or end of input. `read line` gives empty
+# text at end of input, so a blank line also ends this Rusk CLI session.
+to db_cli_main with connection as a view of a list of text and initial_sql as a view of text:
+    if length of (text_trim with initial_sql) is not 0:
+        let cursor be db_cursor with connection
+        give back db_cli_execute with cursor and initial_sql and false
+
+    say db_cli_banner with connection
+    say ""
+    let pending be ""
+    while true:
+        let prompt be db_cli_prompt with (length of pending is more than 0)
+        let prompt_status be run command ("printf '%s' " + (text_quote with prompt))
+        let line be read line
+        if length of line is 0:
+            say ""
+            give back result_ok with "bye"
+
+        let trimmed be text_trim with line
+        if length of pending is more than 0:
+            set pending to pending + "\n" + line
+            if db_complete_statement with pending:
+                let continued_done be db_cli_run_line with connection and pending
+                set pending to ""
+                if (result_value with continued_done) is "quit":
+                    give back continued_done
+        otherwise:
+            if length of trimmed is more than 0:
+                if (letter 1 of trimmed) is ".":
+                    let dot_done be db_cli_run_line with connection and trimmed
+                    if (result_value with dot_done) is "quit":
+                        give back dot_done
+                otherwise:
+                    set pending to copy of line
+                    if db_complete_statement with pending:
+                        let fresh_done be db_cli_run_line with connection and pending
+                        set pending to ""
+                        if (result_value with fresh_done) is "quit":
+                            give back fresh_done
