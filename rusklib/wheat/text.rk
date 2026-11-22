@@ -1,11 +1,9 @@
-# text.rk — text helpers, measurement, wrapping, and markup.
+# text.rk — text measurement, wrapping, and markup for wheat.
 #
-# This file began as the small `text_*` helper module and now also carries the
-# text layer of wheat. The old names are kept so existing programs keep
-# working:
-#
-#     text_is_empty, text_first, text_last, text_repeat, text_reverse,
-#     text_shout, text_initials, text_contains
+# The small general-purpose `text_*` helpers now live in the shared module at
+# `ruskmods/text/text.rk`. This file imports them explicitly so wheat keeps its
+# old names available, and adds the `wheat_text_*` layer for widths, wrapping,
+# and markup.
 #
 # Rusk strings are byte strings with 1-based indexes. `length of` counts bytes,
 # not display cells. That is fine for ASCII. wheat's own drawing glyphs are
@@ -14,47 +12,7 @@
 # UTF-8 byte length; the README says so plainly rather than pretending to be a
 # Unicode width engine.
 
-# Is this text empty?
-to text_is_empty with s as view of text:
-    give back length of s is 0
-
-# The first letter. Empty text is a runtime error, just like `letter 1 of ""`.
-to text_first with s as view of text:
-    give back letter 1 of s
-
-# The last letter. Empty text is a runtime error.
-to text_last with s as view of text:
-    give back letter (length of s) of s
-
-# Write `s` next to itself `n` times. A count of zero or less gives "".
-to text_repeat with s as view of text and n as a number:
-    let out be ""
-    let i be 0
-    while i is less than n:
-        set out to out + s
-        set i to i + 1
-    give back out
-
-# Turn text around, one letter at a time.
-to text_reverse with s as view of text:
-    let out be ""
-    let i be length of s
-    while i is at least 1:
-        set out to out + letter i of s
-        set i to i - 1
-    give back out
-
-# Add an exclamation mark.
-to text_shout with s as view of text:
-    give back s + "!"
-
-# The first letters of a given name and a family name.
-to text_initials with given as view of text and family as view of text:
-    give back letter 1 of given + letter 1 of family
-
-# Does `haystack` contain `needle`? The empty needle is always found.
-to text_contains with haystack as view of text and needle as view of text:
-    give back wheat_text_contains with haystack and needle
+import "../../ruskmods/text/text"
 
 # Spaces around `s` removed.
 to wheat_text_trim with s as view of text:

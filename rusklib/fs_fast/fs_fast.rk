@@ -1,0 +1,69 @@
+# fs_fast.rk — fast POSIX file-tree operations and atomic file writes.
+#
+# Import it with `import "fs_fast/fs_fast"`. Every public name starts with
+# `fs_fast_`. Tree operations shell out to `cp -al`, `cp -R`, `mv`, `rm`, and
+# `mkdir -p`, so they give back shell statuses; paths are quoted for `/bin/sh`.
+# Hardlinks need the source and destination on one filesystem. Atomic writes use
+# Rusk's own `write ... to file` followed by `rename`, so they only hold for
+# text content and for paths on one filesystem. Paths are POSIX-oriented.
+
+import "path"
+
+# Quote text for `/bin/sh` with single quotes.
+to fs_fast_quote with s as a view of text:
+    let out be "'"
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "'":
+            set out to out + "'\\''"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out + "'"
+
+# A scratch path below TMPDIR (or /tmp). The file is not created here.
+to fs_fast_temp_path with name as a view of text:
+    let temp be environment "TMPDIR"
+    if temp is "":
+        set temp to "/tmp"
+    give back path_join with (path_trim_end with temp) and (copy of name)
+
+# Hardlink a whole tree with `cp -al`. Gives back the shell status.
+to fs_fast_hardlink_tree with source as a view of text and destination as a view of text:
+    give back run command ("cp -al " + (fs_fast_quote with source) + " " + (fs_fast_quote with destination))
+
+# Copy a whole tree with `cp -R`. Gives back the shell status.
+to fs_fast_copy_tree with source as a view of text and destination as a view of text:
+    give back run command ("cp -R " + (fs_fast_quote with source) + " " + (fs_fast_quote with destination))
+
+# Write text through a temporary sibling and rename it into place. Gives back
+# true when the final path is present.
+to fs_fast_atomic_write with path as a view of text and value as a view of text:
+    let parent be path_dir with (copy of path)
+    run command ("mkdir -p " + (fs_fast_quote with parent))
+    let temporary be (copy of path) + ".tmp"
+    write (copy of value) to file temporary
+    rename temporary to path
+    give back file exists path
+
+# Rename one path with `mv -f`, giving back the shell status. Within one
+# filesystem this is an atomic rename.
+to fs_fast_atomic_rename with source as a view of text and destination as a view of text:
+    give back run command ("mv -f " + (fs_fast_quote with source) + " " + (fs_fast_quote with destination))
+
+# Remove a file or directory tree. Missing paths are ignored. Gives back the
+# shell status.
+to fs_fast_remove with path as a view of text:
+    give back run command ("rm -rf " + (fs_fast_quote with path))
+
+# True when two paths name the same directory entry, using POSIX `test -ef`.
+# Symlinks are resolved by the shell test.
+to fs_fast_is_same_path with left as a view of text and right as a view of text:
+    let command_text be "test " + (fs_fast_quote with left) + " -ef " + (fs_fast_quote with right) + " >/dev/null 2>&1"
+    give back (run command command_text) is 0
+
+# Make a directory and any missing parents. Gives back the shell status.
+to fs_fast_mkdir with path as a view of text:
+    give back run command ("mkdir -p " + (fs_fast_quote with path))

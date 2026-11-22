@@ -1,0 +1,53 @@
+# text.rk — npm-specific text helpers for npmwork.
+#
+# This is an internal module of the npmwork framework. Every public name uses
+# the framework prefix `npmwork_text_`, so it can share one namespace with the
+# shared `text_*` module it imports below.
+
+import "../text/text"
+
+# The manifest file npmwork reads by default.
+to npmwork_text_manifest_name:
+    give back "package.json"
+
+# The lock file npmwork writes by default.
+to npmwork_text_lock_name:
+    give back "npm-lock.rk"
+
+# True when a package name starts with an npm scope.
+to npmwork_text_is_scoped with name as a view of text:
+    give back text_starts_with with name and "@"
+
+# The unscoped part of a package name: `@scope/pkg` gives `pkg`.
+to npmwork_text_short_name with name as a view of text:
+    let cut be text_index_of with name and "/"
+    if cut is 0:
+        give back copy of name
+    give back text_drop with name and cut
+
+# A filesystem-safe folder name for a package, including scoped names.
+to npmwork_text_folder_name with name as a view of text:
+    let short be npmwork_text_short_name with name
+    if not (npmwork_text_is_scoped with name):
+        give back short
+    let scope be text_take with name and (text_index_of with name and "/")
+    give back (text_replace with scope and "@" and "") + "__" + short
+
+# The tarball file name npm publishes for a package version.
+to npmwork_text_tarball_name with name as a view of text and version as a view of text:
+    give back (npmwork_text_short_name with name) + "-" + version + ".tgz"
+
+# The command name a package exposes: the part after the last slash.
+to npmwork_text_bin_name with name as a view of text:
+    let cut be text_index_of with name and "/"
+    if cut is 0:
+        give back copy of name
+    give back text_drop with name and cut
+
+# Quote text for a POSIX shell command.
+to npmwork_text_quote with s as a view of text:
+    give back text_quote with s
+
+# Split a requirement such as `left-pad ^1.3.0` into words.
+to npmwork_text_requirement_words with requirement as a view of text:
+    give back text_words with requirement

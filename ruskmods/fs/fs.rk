@@ -1,0 +1,213 @@
+# fs.rk — text-file and directory-tree helpers written in Rusk.
+#
+# Data shape: paths and file bodies are text; listings are lists of text;
+# recursive helpers return lists of relative paths. Every public name starts
+# with `fs_`. Import it with `import "fs"` or `import "fs/fs"`.
+#
+# Limits: Rusk text is byte text, so these helpers copy files with the
+# language's own read/write primitives and are meant for source and other text
+# files, not arbitrary binaries. The shell is used only where the primitives
+# have no equivalent: `fs_make_dirs` uses `mkdir -p`, and the optional
+# shell-backed helpers from rusklib use `cp`/`rm`. Everything else uses
+# `read file`, `write ... to file`, `file exists`, `list directory`,
+# `make directory`, `remove file`, and `remove directory`.
+
+import "text"
+import "path"
+
+# True when the path names something that exists, file or directory.
+to fs_exists with path as a view of text:
+    if path is "":
+        give back false
+    give back file exists path
+
+# True when the path names a directory. Checking `path/.` keeps a plain file
+# from being mistaken for a directory.
+to fs_is_directory with path as a view of text:
+    if path is "":
+        give back false
+    if not (file exists path):
+        give back false
+    give back file exists (path_join with (copy of path) and ".")
+
+# True when the path names a plain file (or a symlink to one).
+to fs_is_file with path as a view of text:
+    if not (file exists path):
+        give back false
+    give back not (fs_is_directory with path)
+
+# Sort names alphabetically, in place, with a small insertion sort.
+to fs_sort with names as a list of text:
+    let n be length of names
+    for each i from 2 to n:
+        let j be i
+        while j is more than 1:
+            let left be item (j - 1) of names
+            let right be item j of names
+            if right is less than left:
+                set item (j - 1) of names to right
+                set item j of names to left
+                set j to j - 1
+            otherwise:
+                break
+    give back names
+
+# Directory entry names in alphabetical order. Missing directories and files
+# give an empty list instead of an error.
+to fs_entries with path as a view of text:
+    let out be an empty list of text
+    if not (fs_is_directory with path):
+        give back out
+    for each entry in (list directory path):
+        add entry to out
+    give back fs_sort with out
+
+# Create `path` and its missing parents by walking the path from the left.
+to fs_ensure_directory with path as a view of text:
+    let p be text_trim with path
+    if p is "" or p is ".":
+        give back true
+    if fs_is_directory with p:
+        give back true
+    let absolute be (letter 1 of p) is "/"
+    let built be ""
+    if absolute:
+        set built to "/"
+    for each piece in (text_split with p and "/"):
+        if piece is not "" and piece is not ".":
+            if built is "":
+                set built to piece
+            otherwise if built is "/":
+                set built to "/" + piece
+            otherwise:
+                set built to built + "/" + piece
+            if not (fs_is_directory with built):
+                make directory built
+    give back fs_is_directory with p
+
+# Make sure the directory that will hold `path` exists.
+to fs_ensure_parent with path as a view of text:
+    give back fs_ensure_directory with (path_dir with (copy of path))
+
+# Read a text file. A missing file gives empty text.
+to fs_read with path as a view of text:
+    if not (fs_is_file with path):
+        give back ""
+    give back read file path
+
+# Replace a text file, creating its parent directory first.
+to fs_write with path as a view of text and body as a view of text:
+    if not (fs_ensure_parent with path):
+        give back false
+    write body to file path
+    give back true
+
+# Add text at the end of a file, creating the file when needed.
+to fs_append with path as a view of text and body as a view of text:
+    let old be fs_read with path
+    give back fs_write with path and (old + body)
+
+# Copy one text file. Missing sources give false.
+to fs_copy_file with from as a view of text and to as a view of text:
+    if not (fs_is_file with from):
+        give back false
+    if not (fs_ensure_parent with to):
+        give back false
+    write (read file from) to file to
+    give back true
+
+# Copy a directory tree recursively, creating directories as needed.
+to fs_copy_tree with from as a view of text and to as a view of text:
+    if not (fs_is_directory with from):
+        give back false
+    if not (fs_ensure_directory with to):
+        give back false
+    for each entry in (fs_entries with from):
+        let source be path_join with (copy of from) and (copy of entry)
+        let target be path_join with (copy of to) and entry
+        if fs_is_directory with source:
+            if not (fs_copy_tree with source and target):
+                give back false
+        otherwise:
+            if not (fs_copy_file with source and target):
+                give back false
+    give back true
+
+# Remove a file or a whole directory tree. A missing path is already gone.
+to fs_remove_tree with path as a view of text:
+    if not (file exists path):
+        give back true
+    if fs_is_file with path:
+        remove file path
+        give back not (file exists path)
+    for each entry in (fs_entries with path):
+        let child be path_join with (copy of path) and entry
+        if fs_is_directory with child:
+            if not (fs_remove_tree with child):
+                give back false
+        otherwise:
+            remove file child
+    remove directory path
+    give back not (file exists path)
+
+# Every file below `root` as paths relative to `root`, sorted.
+to fs_files_under with root as a view of text:
+    let out be an empty list of text
+    for each entry in (fs_entries with root):
+        let child be path_join with (copy of root) and (copy of entry)
+        if fs_is_directory with child:
+            for each nested in (fs_files_under with child):
+                add (path_join with (copy of entry) and nested) to out
+        otherwise:
+            add entry to out
+    give back out
+
+# Total byte length of the text files below `root`.
+to fs_tree_size with root as a view of text:
+    let total be 0
+    for each entry in (fs_entries with root):
+        let child be path_join with (copy of root) and entry
+        if fs_is_directory with child:
+            set total to total + (fs_tree_size with child)
+        otherwise:
+            set total to total + (length of (fs_read with child))
+    give back total
+
+# Quote text for `/bin/sh`, escaping embedded single quotes.
+to fs_quote with s as a view of text:
+    let out be "'"
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "'":
+            set out to out + "'\\''"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out + "'"
+
+# Make a directory and its parents with `mkdir -p`; gives back the exit status.
+to fs_make_dirs with path as a view of text:
+    give back run command ("mkdir -p " + (fs_quote with path))
+
+# The entry names of a directory, or an empty list when it is missing.
+to fs_list with path as a view of text:
+    let out be an empty list of text
+    if not (fs_is_directory with path):
+        give back out
+    for each entry in (list directory path):
+        add entry to out
+    give back out
+
+# The size in bytes of a text file. Missing files count as zero.
+to fs_size with path as a view of text:
+    if not (file exists path):
+        give back 0
+    give back length of (read file path)
+
+# True when the path exists and has no bytes; missing files count as empty.
+to fs_is_empty with path as a view of text:
+    if not (file exists path):
+        give back true
+    give back (length of (read file path)) is 0

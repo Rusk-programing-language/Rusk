@@ -1,0 +1,4 @@
+# maps.rk — compatibility shim for ruskmods/maps/maps.rk.
+#
+# `import "maps"` loads the folder module; this file only forwards to it.
+import "maps/maps"

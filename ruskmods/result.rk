@@ -1,0 +1,4 @@
+# result.rk — compatibility shim for ruskmods/result/result.rk.
+#
+# `import "result"` loads the folder module; this file only forwards to it.
+import "result/result"

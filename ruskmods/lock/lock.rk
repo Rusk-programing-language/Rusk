@@ -1,0 +1,188 @@
+# lock.rk — installed-state and resolution locks written in Rusk.
+#
+# Data shape: a lock is plain text with one `name version` pair per line.
+# Blank lines and lines starting with `#` are comments and are preserved by
+# edits. In memory, `lock_entries` gives `[name, version]` pairs (lists of two
+# text items); `lock_names` and `lock_versions` give aligned text lists. Every
+# public name starts with `lock_`.
+#
+# Limits: this is a text format, not a database. Names and versions may not
+# contain spaces, and version checks only accept dotted decimal numbers.
+# Import with `import "lock"` or `import "lock/lock"`.
+
+import "text"
+import "path"
+
+# Default lock file inside a project directory.
+to lock_path with root as a view of text:
+    give back path_join with (copy of root) and "rusk.lock"
+
+# Default resolution file inside a project directory.
+to lock_resolution_path with root as a view of text:
+    give back path_join with (copy of root) and "resolution.lock"
+
+# Internal: create the parent directory of `path`, one prefix at a time.
+to lock_ensure_parent with path as a view of text:
+    let parent be path_dir with (copy of path)
+    if parent is "." or parent is "":
+        give back true
+    if file exists parent:
+        give back true
+    let absolute be (letter 1 of parent) is "/"
+    let built be ""
+    if absolute:
+        set built to "/"
+    for each piece in (text_split with parent and "/"):
+        if piece is not "" and piece is not ".":
+            if built is "":
+                set built to piece
+            otherwise if built is "/":
+                set built to "/" + piece
+            otherwise:
+                set built to built + "/" + piece
+            if not (file exists built):
+                make directory built
+    give back file exists parent
+
+# Read a lock file. A missing file gives empty text.
+to lock_read with path as a view of text:
+    if not (file exists path):
+        give back ""
+    give back read file path
+
+# Replace a lock file, creating its parent directory first.
+to lock_write with path as a view of text and body as a view of text:
+    if not (lock_ensure_parent with path):
+        give back false
+    write body to file path
+    give back true
+
+# Read the resolution lock for a project directory.
+to lock_resolution_read with root as a view of text:
+    give back lock_read with (lock_resolution_path with root)
+
+# Write the resolution lock for a project directory.
+to lock_resolution_write with root as a view of text and body as a view of text:
+    give back lock_write with (lock_resolution_path with root) and body
+
+# Internal: the `[name, version]` pairs in a lock body.
+to lock_parse with body as a view of text:
+    let out be an empty list of list of text
+    for each line in (text_lines with body):
+        let t be text_trim with line
+        if t is "":
+            continue
+        if text_starts_with with t and "#":
+            continue
+        let bits be text_split with t and " "
+        let name be item 1 of bits
+        let version be ""
+        if length of bits is at least 2:
+            set version to text_trim with (item 2 of bits)
+        let pair be [name, version]
+        add pair to out
+    give back out
+
+# Add or replace one entry, giving back the new lock text.
+to lock_add with body as a view of text and name as a view of text and version as a view of text:
+    let out be an empty list of text
+    let replaced be false
+    for each line in (text_lines with body):
+        let t be text_trim with line
+        if t is not "" and not (text_starts_with with t and "#"):
+            let bits be text_split with t and " "
+            if (item 1 of bits) is name:
+                add (name + " " + version) to out
+                set replaced to true
+                continue
+        add (copy of line) to out
+    if not replaced:
+        add (name + " " + version) to out
+    give back (text_join with out and "\n") + "\n"
+
+# True when a name is present in the lock.
+to lock_has with body as a view of text and name as a view of text:
+    for each entry in (lock_parse with body):
+        if (item 1 of entry) is name:
+            give back true
+    give back false
+
+# The version recorded for a name, or empty text when it is absent.
+to lock_get with body as a view of text and name as a view of text:
+    for each entry in (lock_parse with body):
+        if (item 1 of entry) is name:
+            give back item 2 of entry
+    give back ""
+
+# Remove every entry for a name, giving back the new lock text.
+to lock_remove with body as a view of text and name as a view of text:
+    let out be an empty list of text
+    for each line in (text_lines with body):
+        let t be text_trim with line
+        if t is not "" and not (text_starts_with with t and "#"):
+            let bits be text_split with t and " "
+            if (item 1 of bits) is name:
+                continue
+        add (copy of line) to out
+    if length of out is 0:
+        give back ""
+    give back (text_join with out and "\n") + "\n"
+
+# All `[name, version]` pairs, in file order.
+to lock_entries with body as a view of text:
+    give back lock_parse with body
+
+# All names, in file order.
+to lock_names with body as a view of text:
+    let out be an empty list of text
+    for each entry in (lock_parse with body):
+        let name be item 1 of entry
+        add name to out
+    give back out
+
+# All versions, aligned with `lock_names`.
+to lock_versions with body as a view of text:
+    let out be an empty list of text
+    for each entry in (lock_parse with body):
+        let version be item 2 of entry
+        add version to out
+    give back out
+
+# Internal: is this a dotted decimal version such as `1.2.0`?
+to lock_version_ok with version as a view of text:
+    let parts be text_split with version and "."
+    if length of parts is less than 2:
+        give back false
+    for each piece in parts:
+        if piece is "":
+            give back false
+        let n be text_to_number with piece
+        if n is less than 0:
+            give back false
+        if (text_from_number with n) is not piece:
+            give back false
+    give back true
+
+# Problems with a lock body as a list of sentences; empty means valid.
+to lock_validate with body as a view of text:
+    let out be an empty list of text
+    for each entry in (lock_parse with body):
+        let name be item 1 of entry
+        let version be item 2 of entry
+        if name is "":
+            add "a lock entry has no name" to out
+        if version is "":
+            add ("the entry '" + name + "' has no version") to out
+        otherwise if not (lock_version_ok with version):
+            add ("the version '" + version + "' is not dotted decimal") to out
+    give back out
+
+# Merge `other` into `body`; entries already in `body` keep their versions.
+to lock_merge with body as a view of text and other as a view of text:
+    let out be copy of body
+    for each entry in (lock_parse with other):
+        let name be item 1 of entry
+        let version be item 2 of entry
+        if not (lock_has with out and name):
+            set out to lock_add with out and name and version
+    give back out

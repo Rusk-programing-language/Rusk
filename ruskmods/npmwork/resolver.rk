@@ -1,0 +1,124 @@
+# resolver.rk — choose npm package versions for npmwork.
+#
+# npmwork resolves against a list of available `name version` pairs instead of a
+# local directory registry. A result list starts with `"ok"` or `"error"`, the
+# same convention installwork uses. The shared `result_` module supplies the
+# error helper; selections are plain text so they can be written to a lock file.
+
+import "text"
+import "semver"
+import "result"
+import "json/json"
+
+# The package name at the front of a requirement.
+to npmwork_resolver_requirement_name with requirement as a view of text:
+    give back semver_requirement_name with requirement
+
+# The version spec after the package name, or `*`.
+to npmwork_resolver_requirement_spec with requirement as a view of text:
+    give back semver_requirement_spec with requirement
+
+# Turn the `dependencies` object of a package.json into `name spec` lines. The
+# reader is deliberately small: keys and values must be quoted and must not
+# contain commas or colons.
+to npmwork_resolver_parse_dependencies with body as a view of text:
+    let out be an empty list of text
+    let raw be json_extract with (copy of body) and "dependencies"
+    if raw is "" or raw is "{}":
+        give back out
+    let n be length of raw
+    let inner be copy of raw
+    if n is at least 2 and (letter 1 of raw) is "{" and (letter n of raw) is "}":
+        set inner to part 2 to (n - 1) of raw
+    for each piece in (text_split with inner and ","):
+        let cut be text_index_of with piece and ":"
+        if cut is not 0:
+            let name be text_unquote with (text_trim with (part 1 to (cut - 1) of piece))
+            let spec be text_unquote with (text_trim with (text_drop with piece and cut))
+            if name is not "":
+                add (name + " " + spec) to out
+    give back out
+
+# The package name in an available or selected `name version` pair.
+to npmwork_resolver_selection_name with selection as a view of text:
+    let cut be text_index_of with selection and " "
+    if cut is 0:
+        give back copy of selection
+    give back part 1 to (cut - 1) of selection
+
+# The version in an available or selected `name version` pair.
+to npmwork_resolver_selection_version with selection as a view of text:
+    let cut be text_index_of with selection and " "
+    if cut is 0:
+        give back ""
+    give back part (cut + 1) to (length of selection) of selection
+
+# The best available version of `name` matching `spec`, or empty text.
+to npmwork_resolver_best with available as a view of a list of text and name as a view of text and spec as a view of text:
+    let best be ""
+    for each candidate in available:
+        if (npmwork_resolver_selection_name with candidate) is name:
+            let version be npmwork_resolver_selection_version with candidate
+            if semver_satisfies with version and spec:
+                if best is "" or (semver_compare with version and best) is 1:
+                    set best to version
+    give back best
+
+# A one-item error result.
+to npmwork_resolver_error with message as a view of text:
+    give back result_error with message
+
+# Resolve requirements against the available list. Repeated packages must agree
+# on one version; the first matching spec wins.
+to npmwork_resolver_resolve with requirements as a view of a list of text and available as a view of a list of text:
+    let selections be an empty list of text
+    let names be an empty list of text
+    for each requirement_text in requirements:
+        if not (semver_requirement_valid with requirement_text):
+            give back npmwork_resolver_error with ("I can't read the requirement '" + requirement_text + "'")
+        let name be npmwork_resolver_requirement_name with requirement_text
+        let spec be npmwork_resolver_requirement_spec with requirement_text
+        let at be 0
+        let i be 1
+        while i is at most length of names:
+            if (item i of names) is name:
+                set at to i
+                break
+            set i to i + 1
+        if at is not 0:
+            let chosen be npmwork_resolver_selection_version with (item at of selections)
+            if not (semver_satisfies with chosen and spec):
+                give back npmwork_resolver_error with (name + " " + spec + " conflicts with the chosen " + chosen)
+        otherwise:
+            let best be npmwork_resolver_best with available and name and spec
+            if best is "":
+                give back npmwork_resolver_error with ("no available version of " + name + " matches " + spec)
+            add (copy of name) to names
+            add (name + " " + best) to selections
+    let out be ["ok"]
+    for each selection in selections:
+        add selection to out
+    give back out
+
+# True when a result list starts with "ok".
+to npmwork_resolver_succeeded with result as a view of a list of text:
+    if length of result is 0:
+        give back false
+    give back (item 1 of result) is "ok"
+
+# The message in a failed result.
+to npmwork_resolver_message with result as a view of a list of text:
+    if length of result is less than 2:
+        give back ""
+    give back item 2 of result
+
+# A readable plan, one `name version` per line.
+to npmwork_resolver_plan_text with result as a view of a list of text:
+    if length of result is less than 2:
+        give back "(nothing to install)\n"
+    let out be ""
+    let i be 2
+    while i is at most length of result:
+        set out to out + (item i of result) + "\n"
+        set i to i + 1
+    give back out

@@ -1,0 +1,157 @@
+# bytes.rk — byte helpers for Rusk text, written in Rusk.
+#
+# Rusk text is a byte string: `letter N of s` and `part A to B of s` count
+# bytes, not Unicode code points. Every name here starts with `bytes_` so the
+# module can share the one global namespace. Hex codecs cover the single-byte
+# range that source text can spell directly (NUL, tab, LF, CR, and printable
+# ASCII); other bytes encode as "??" and hex pairs above 7f decode to "".
+
+import "text"
+
+# How many bytes `s` holds.
+to bytes_length with s as a view of text:
+    give back length of s
+
+# The byte at 1-based position `i`, as a one-byte text.
+to bytes_at with s as a view of text and i as a number:
+    give back letter i of s
+
+# Bytes `start` through `finish`, clipped to the ends of `s`.
+# An empty range gives back "".
+to bytes_slice with s as a view of text and start as a number and finish as a number:
+    let n be length of s
+    let first be start
+    if first is less than 1:
+        set first to 1
+    let last be finish
+    if last is more than n:
+        set last to n
+    if first is more than last or first is more than n:
+        give back ""
+    give back part first to last of s
+
+# The 1-based position of `needle` in `haystack`, or 0 when absent.
+to bytes_find with haystack as a view of text and needle as a view of text:
+    give back text_index_of with haystack and needle
+
+# Split `s` on every occurrence of `separator`. Empty pieces are kept.
+to bytes_split with s as a view of text and separator as a view of text:
+    give back text_split with s and separator
+
+# Join text pieces together with no separator.
+to bytes_concat with pieces as a view of a list of text:
+    give back text_join with pieces and ""
+
+# `s` written next to itself `count` times. A count below one gives "".
+to bytes_repeat with s as a view of text and count as a number:
+    give back text_repeat with s and count
+
+# The bytes of `s` in reverse order.
+to bytes_reverse with s as a view of text:
+    give back text_reverse with s
+
+# True when `s` starts with `prefix`.
+to bytes_starts_with with s as a view of text and prefix as a view of text:
+    give back text_starts_with with s and prefix
+
+# True when `s` ends with `suffix`.
+to bytes_ends_with with s as a view of text and suffix as a view of text:
+    give back text_ends_with with s and suffix
+
+# Remove spaces, tabs, carriage returns, and newlines from both ends.
+to bytes_trim with s as a view of text:
+    give back text_trim with s
+
+# The whole text as a number, or -1 when it isn't decimal text.
+to bytes_number with s as a view of text:
+    give back text_to_number with s
+
+# Printable ASCII bytes, indexed from 1 (byte 32 through byte 126).
+constant bytes_printable be " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+# The value of one byte, or -1 when this module cannot spell the byte.
+to bytes_value with ch as a view of text:
+    if ch is "\0":
+        give back 0
+    if ch is "\t":
+        give back 9
+    if ch is "\n":
+        give back 10
+    if ch is "\r":
+        give back 13
+    let i be 1
+    while i is at most length of bytes_printable:
+        if ch is letter i of bytes_printable:
+            give back 31 + i
+        set i to i + 1
+    give back -1
+
+# The one-byte text for a value this module can spell, or "" for other values.
+to bytes_char with value as a number:
+    if value is 0:
+        give back "\0"
+    if value is 9:
+        give back "\t"
+    if value is 10:
+        give back "\n"
+    if value is 13:
+        give back "\r"
+    if value is at least 32 and value is at most 126:
+        give back letter (value - 31) of bytes_printable
+    give back ""
+
+# Two lower-case hex digits for each byte. Unspellable bytes become "??".
+to bytes_hex with s as a view of text:
+    let out be ""
+    let i be 1
+    while i is at most length of s:
+        let value be bytes_value with (letter i of s)
+        if value is less than 0:
+            set out to out + "??"
+        otherwise:
+            let high be value / 16
+            let low be value - high * 16
+            set out to out + (letter (high + 1) of "0123456789abcdef")
+            set out to out + (letter (low + 1) of "0123456789abcdef")
+        set i to i + 1
+    give back out
+
+# The value of one hex digit, or -1 when `ch` is not a hex digit.
+to bytes_hex_digit with ch as a view of text:
+    let d be text_digit with ch
+    if d is at least 0:
+        give back d
+    if ch is "a" or ch is "A":
+        give back 10
+    if ch is "b" or ch is "B":
+        give back 11
+    if ch is "c" or ch is "C":
+        give back 12
+    if ch is "d" or ch is "D":
+        give back 13
+    if ch is "e" or ch is "E":
+        give back 14
+    if ch is "f" or ch is "F":
+        give back 15
+    give back -1
+
+# Decode hex text into bytes. An odd length, a non-hex digit, or a pair above
+# 7f gives back "".
+to bytes_from_hex with s as a view of text:
+    let n be length of s
+    if n / 2 * 2 is not n:
+        give back ""
+    let out be ""
+    let i be 1
+    while i is at most n:
+        let high be bytes_hex_digit with (letter i of s)
+        let low be bytes_hex_digit with (letter (i + 1) of s)
+        if high is less than 0 or low is less than 0:
+            give back ""
+        let value be high * 16 + low
+        let ch be bytes_char with value
+        if ch is "":
+            give back ""
+        set out to out + ch
+        set i to i + 2
+    give back out

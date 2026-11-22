@@ -1,0 +1,4 @@
+# manifest.rk — compatibility shim for ruskmods/manifest/manifest.rk.
+# The canonical source is the folder module; this file only forwards to it.
+
+import "manifest/manifest"

@@ -2,14 +2,16 @@
 #
 #     import "rusklib/rusklib"
 #
-# pulls in every module under `ruskmods/`, the higher-level file helpers in
-# `rusklib/files.rk`, and the wheat terminal library. Each module keeps its own
-# prefix, so the shared namespace stays readable. If a program only needs one
-# area, import that file directly:
+# pulls in every module under `ruskmods/`, the installer frameworks, the
+# system/IO helpers under `rusklib/`, and the wheat terminal library. Each
+# module keeps its own prefix, so the shared namespace stays readable. If a
+# program only needs one area, import that file directly:
 #
 #     import "date"
 #     import "math"
 #     import "rusklib/files"
+#     import "rusklib/http"
+#     import "npmwork"
 #     import "wheat/wheat"
 #
 # Bare names resolve next to the program, then in `ruskmods/` and `rusklib/`.
@@ -28,6 +30,24 @@ import "../ruskmods/sys/sys"
 import "../ruskmods/os/os"
 import "../ruskmods/path/path"
 import "../ruskmods/shutils/shutils"
+import "../ruskmods/bytes/bytes"
+import "../ruskmods/text/text"
+import "../ruskmods/semver/semver"
+import "../ruskmods/maps/maps"
+import "../ruskmods/result/result"
+import "../ruskmods/manifest/manifest"
+import "../ruskmods/lock/lock"
+import "../ruskmods/archive/archive"
+import "../ruskmods/fs/fs"
+import "../ruskmods/sha/sha"
+import "../ruskmods/gzip/gzip"
 import "../ruskmods/installwork/installwork"
+import "../ruskmods/npmwork/npmwork"
+import "../rusklib/http/http"
+import "../rusklib/cache/cache"
+import "../rusklib/fs_fast/fs_fast"
+import "../rusklib/platform/platform"
+import "../rusklib/term/term"
+import "../rusklib/bench/bench"
 import "files"
 import "wheat/wheat"

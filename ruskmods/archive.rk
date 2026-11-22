@@ -1,0 +1,4 @@
+# archive.rk — compatibility shim for ruskmods/archive/archive.rk.
+# The canonical source is the folder module; this file only forwards to it.
+
+import "archive/archive"

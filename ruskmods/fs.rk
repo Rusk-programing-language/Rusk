@@ -1,0 +1,4 @@
+# fs.rk — compatibility shim for ruskmods/fs/fs.rk.
+# The canonical source is the folder module; this file only forwards to it.
+
+import "fs/fs"

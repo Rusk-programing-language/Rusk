@@ -1719,3 +1719,57 @@ fn a_line_drops_a_carriage_return_before_the_newline() {
     assert_eq!(stderr, "");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn the_new_module_libraries_run_together() {
+    let src = concat!(
+        "import \"semver\"\n",
+        "import \"json/json\"\n",
+        "import \"text\"\n",
+        "import \"manifest\"\n",
+        "import \"lock\"\n",
+        "import \"npmwork\"\n",
+        "\n",
+        "say semver_valid with \"1.2.3\"\n",
+        "say semver_satisfies with \"1.2.3\" and \"^1.0.0\"\n",
+        "say semver_requirement_name with \"math ^1.2.0\"\n",
+        "say text_from_number with 42\n",
+        "say json_string with \"hi\"\n",
+        "\n",
+        "let body be \"{\\\"name\\\":\\\"demo\\\",\\\"version\\\":\\\"1.2.3\\\",\\\"dependencies\\\":{\\\"left-pad\\\":\\\"^1.3.0\\\"}}\"\n",
+        "say npmwork_manifest_name with body\n",
+        "say npmwork_manifest_version with body\n",
+        "for each requirement_text in (npmwork_manifest_requires with body):\n",
+        "    say requirement_text\n",
+        "\n",
+        "let requirements be [\"left-pad ^1.3.0\"]\n",
+        "let available be [\"left-pad 1.2.0\", \"left-pad 1.3.0\"]\n",
+        "let plan be npmwork_resolver_resolve with requirements and available\n",
+        "say npmwork_resolver_succeeded with plan\n",
+        "say npmwork_resolver_plan_text with plan\n",
+        "\n",
+        "let entries be an empty list of text\n",
+        "let updated be npmwork_lock_set with entries and \"left-pad\" and \"1.3.0\" and \"\"\n",
+        "say npmwork_lock_get with updated and \"left-pad\"\n",
+    );
+    let (stdout, stderr, code) = run_full("new_modules", src);
+    assert_eq!(
+        stdout,
+        concat!(
+            "true\n",
+            "true\n",
+            "math\n",
+            "42\n",
+            "\"hi\"\n",
+            "demo\n",
+            "1.2.3\n",
+            "left-pad ^1.3.0\n",
+            "true\n",
+            "left-pad 1.3.0\n",
+            "\n",
+            "1.3.0\n",
+        )
+    );
+    assert_eq!(stderr, "");
+    assert_eq!(code, 0);
+}

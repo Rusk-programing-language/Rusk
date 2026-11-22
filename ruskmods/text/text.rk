@@ -1,0 +1,500 @@
+# text.rk — shared text helpers written in Rusk.
+#
+# Import it with `import "text"`. Every public name starts with `text_`, so the
+# module can share one namespace with the rest of the bundled library. The
+# helpers are deliberately small: Rusk strings are byte strings with 1-based
+# indexes, so these functions count bytes rather than display cells. They never
+# touch the filesystem or the shell.
+
+# Is this text empty?
+to text_is_empty with s as view of text:
+    give back length of s is 0
+
+# The first letter. Empty text is a runtime error, just like `letter 1 of ""`.
+to text_first with s as view of text:
+    give back letter 1 of s
+
+# The last letter. Empty text is a runtime error.
+to text_last with s as view of text:
+    give back letter (length of s) of s
+
+# Spaces, tabs, carriage returns, and newlines removed from the left.
+to text_ltrim with s as view of text:
+    let n be length of s
+    let start be 1
+    while start is at most n:
+        let ch be letter start of s
+        if ch is " " or ch is "\t" or ch is "\r" or ch is "\n":
+            set start to start + 1
+        otherwise:
+            break
+    if start is more than n:
+        give back ""
+    give back part start to n of s
+
+# Spaces, tabs, carriage returns, and newlines removed from the right.
+to text_rtrim with s as view of text:
+    let n be length of s
+    let finish be n
+    while finish is at least 1:
+        let ch be letter finish of s
+        if ch is " " or ch is "\t" or ch is "\r" or ch is "\n":
+            set finish to finish - 1
+        otherwise:
+            break
+    if finish is less than 1:
+        give back ""
+    give back part 1 to finish of s
+
+# Spaces around `s` removed.
+to text_trim with s as view of text:
+    give back text_rtrim with (text_ltrim with s)
+
+# Write `s` next to itself `n` times. A count of zero or less gives empty text.
+to text_repeat with s as view of text and n as a number:
+    let out be ""
+    let i be 0
+    while i is less than n:
+        set out to out + s
+        set i to i + 1
+    give back out
+
+# Turn text around, one letter at a time.
+to text_reverse with s as view of text:
+    let out be ""
+    let i be length of s
+    while i is at least 1:
+        set out to out + (letter i of s)
+        set i to i - 1
+    give back out
+
+# Add an exclamation mark.
+to text_shout with s as view of text:
+    give back s + "!"
+
+# The first letters of a given name and a family name.
+to text_initials with given as view of text and family as view of text:
+    give back (letter 1 of given) + (letter 1 of family)
+
+# The 1-based position of `needle` in `s`, or 0 when it is absent.
+to text_index_of with s as view of text and needle as view of text:
+    give back text_index_from with s and needle and 1
+
+# The 1-based position of `needle` at or after `start`, or 0.
+to text_index_from with s as view of text and needle as view of text and start as a number:
+    if start is less than 1:
+        give back 0
+    let n be length of s
+    let m be length of needle
+    if m is 0:
+        if start is at most (n + 1):
+            give back start
+        give back 0
+    if start is more than n:
+        give back 0
+    let last be n - m + 1
+    let i be start
+    while i is at most last:
+        if (part i to (i + m - 1) of s) is needle:
+            give back i
+        set i to i + 1
+    give back 0
+
+# Does `haystack` contain `needle`? The empty needle is always found.
+to text_contains with haystack as view of text and needle as view of text:
+    give back (text_index_of with haystack and needle) is not 0
+
+# How many times `needle` occurs in `s`. The empty needle counts 0.
+to text_count with s as view of text and needle as view of text:
+    let m be length of needle
+    if m is 0:
+        give back 0
+    let total be 0
+    let at be text_index_of with s and needle
+    while at is not 0:
+        set total to total + 1
+        set at to text_index_from with s and needle and (at + m)
+    give back total
+
+# True when `s` starts with `prefix`.
+to text_starts_with with s as view of text and prefix as view of text:
+    let n be length of prefix
+    if n is more than length of s:
+        give back false
+    if n is 0:
+        give back true
+    give back (part 1 to n of s) is prefix
+
+# True when `s` ends with `suffix`.
+to text_ends_with with s as view of text and suffix as view of text:
+    let n be length of suffix
+    let m be length of s
+    if n is more than m:
+        give back false
+    if n is 0:
+        give back true
+    give back (part (m - n + 1) to m of s) is suffix
+
+# Split on a literal separator. An empty separator gives one piece holding `s`.
+to text_split with s as view of text and separator as view of text:
+    let out be an empty list of text
+    let m be length of separator
+    if m is 0:
+        add (copy of s) to out
+        give back out
+    let start be 1
+    let n be length of s
+    let at be text_index_of with s and separator
+    while at is not 0:
+        add (part start to (at - 1) of s) to out
+        set start to at + m
+        set at to text_index_from with s and separator and start
+    add (part start to n of s) to out
+    give back out
+
+# Words separated by spaces, tabs, carriage returns, and newlines.
+to text_words with s as view of text:
+    let out be an empty list of text
+    let n be length of s
+    let start be 1
+    while start is at most n:
+        let ch be letter start of s
+        if ch is " " or ch is "\t" or ch is "\n" or ch is "\r":
+            set start to start + 1
+        otherwise:
+            let finish be start
+            while finish is at most n:
+                let inner be letter finish of s
+                if inner is " " or inner is "\t" or inner is "\n" or inner is "\r":
+                    break
+                set finish to finish + 1
+            add (part start to (finish - 1) of s) to out
+            set start to finish
+    give back out
+
+# Lines without their newlines. A trailing newline does not add an empty line.
+to text_lines with s as view of text:
+    let out be an empty list of text
+    let n be length of s
+    if n is 0:
+        give back out
+    let start be 1
+    let i be 1
+    while i is at most n:
+        if (letter i of s) is "\n":
+            let finish be i - 1
+            if finish is at least start and (letter finish of s) is "\r":
+                set finish to finish - 1
+            if finish is at least start:
+                add (part start to finish of s) to out
+            otherwise:
+                add "" to out
+            set start to i + 1
+        set i to i + 1
+    if start is at most n:
+        add (part start to n of s) to out
+    give back out
+
+# Join items with `separator` between them.
+to text_join with items as a view of a list of text and separator as view of text:
+    let out be ""
+    let first be true
+    for each item_text in items:
+        if not first:
+            set out to out + separator
+        set out to out + item_text
+        set first to false
+    give back out
+
+# Replace every occurrence of `from` with `to`. An empty `from` gives `s` back.
+to text_replace with s as view of text and from as view of text and to as view of text:
+    let m be length of from
+    if m is 0:
+        give back copy of s
+    let out be ""
+    let n be length of s
+    let i be 1
+    let start be 1
+    while i is at most (n - m + 1):
+        if (part i to (i + m - 1) of s) is from:
+            if i is more than start:
+                set out to out + (part start to (i - 1) of s)
+            set out to out + to
+            set i to i + m
+            set start to i
+        otherwise:
+            set i to i + 1
+    if start is at most n:
+        set out to out + (part start to n of s)
+    give back out
+
+# Remove one layer of double or single quotes, then trim the ends.
+to text_unquote with s as view of text:
+    let t be text_trim with s
+    let n be length of t
+    if n is at least 2:
+        let first be letter 1 of t
+        let last be letter n of t
+        if (first is "\"" and last is "\"") or (first is "'" and last is "'"):
+            give back part 2 to (n - 1) of t
+    give back t
+
+# Quote text for `/bin/sh` with single quotes, escaping embedded quotes.
+to text_quote with s as view of text:
+    let out be "'"
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "'":
+            set out to out + "'\\''"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out + "'"
+
+# A decimal digit as a number. Anything else gives -1.
+to text_digit with ch as view of text:
+    if ch is "0":
+        give back 0
+    if ch is "1":
+        give back 1
+    if ch is "2":
+        give back 2
+    if ch is "3":
+        give back 3
+    if ch is "4":
+        give back 4
+    if ch is "5":
+        give back 5
+    if ch is "6":
+        give back 6
+    if ch is "7":
+        give back 7
+    if ch is "8":
+        give back 8
+    if ch is "9":
+        give back 9
+    give back -1
+
+# Parse a whole number. Anything else gives -1.
+to text_to_number with s as view of text:
+    let t be text_trim with s
+    let n be length of t
+    if n is 0:
+        give back -1
+    let sign be 1
+    let start be 1
+    if (letter 1 of t) is "-":
+        set sign to 0 - 1
+        set start to 2
+    if start is more than n:
+        give back -1
+    let value be 0
+    let i be start
+    while i is at most n:
+        let d be text_digit with (letter i of t)
+        if d is less than 0:
+            give back -1
+        set value to value * 10 + d
+        set i to i + 1
+    give back value * sign
+
+# Render an integer as decimal text. Rusk has no built-in number-to-text
+# conversion, so build the digits from the right and prepend each one.
+to text_from_number with n as a number:
+    if n is 0:
+        give back "0"
+    let digits be ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    let value be n
+    let negative be n is less than 0
+    if negative:
+        set value to 0 - value
+    let out be ""
+    while value is more than 0:
+        let digit be value - (value / 10) * 10
+        set out to (item (digit + 1) of digits) + out
+        set value to value / 10
+    if negative:
+        set out to "-" + out
+    give back out
+
+# ASCII lower-case text. Letters outside a to z are left alone.
+to text_lower with s as view of text:
+    let out be ""
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "A" or ch is "B" or ch is "C" or ch is "D" or ch is "E" or ch is "F" or ch is "G":
+            set out to out + text_lower_letter with ch
+        otherwise if ch is "H" or ch is "I" or ch is "J" or ch is "K" or ch is "L" or ch is "M" or ch is "N":
+            set out to out + text_lower_letter with ch
+        otherwise if ch is "O" or ch is "P" or ch is "Q" or ch is "R" or ch is "S" or ch is "T" or ch is "U":
+            set out to out + text_lower_letter with ch
+        otherwise if ch is "V" or ch is "W" or ch is "X" or ch is "Y" or ch is "Z":
+            set out to out + text_lower_letter with ch
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+# One ASCII upper-case letter as lower case.
+to text_lower_letter with ch as view of text:
+    if ch is "A":
+        give back "a"
+    if ch is "B":
+        give back "b"
+    if ch is "C":
+        give back "c"
+    if ch is "D":
+        give back "d"
+    if ch is "E":
+        give back "e"
+    if ch is "F":
+        give back "f"
+    if ch is "G":
+        give back "g"
+    if ch is "H":
+        give back "h"
+    if ch is "I":
+        give back "i"
+    if ch is "J":
+        give back "j"
+    if ch is "K":
+        give back "k"
+    if ch is "L":
+        give back "l"
+    if ch is "M":
+        give back "m"
+    if ch is "N":
+        give back "n"
+    if ch is "O":
+        give back "o"
+    if ch is "P":
+        give back "p"
+    if ch is "Q":
+        give back "q"
+    if ch is "R":
+        give back "r"
+    if ch is "S":
+        give back "s"
+    if ch is "T":
+        give back "t"
+    if ch is "U":
+        give back "u"
+    if ch is "V":
+        give back "v"
+    if ch is "W":
+        give back "w"
+    if ch is "X":
+        give back "x"
+    if ch is "Y":
+        give back "y"
+    if ch is "Z":
+        give back "z"
+    give back copy of ch
+
+# ASCII upper-case text. Letters outside a to z are left alone.
+to text_upper with s as view of text:
+    let out be ""
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "a" or ch is "b" or ch is "c" or ch is "d" or ch is "e" or ch is "f" or ch is "g":
+            set out to out + text_upper_letter with ch
+        otherwise if ch is "h" or ch is "i" or ch is "j" or ch is "k" or ch is "l" or ch is "m" or ch is "n":
+            set out to out + text_upper_letter with ch
+        otherwise if ch is "o" or ch is "p" or ch is "q" or ch is "r" or ch is "s" or ch is "t" or ch is "u":
+            set out to out + text_upper_letter with ch
+        otherwise if ch is "v" or ch is "w" or ch is "x" or ch is "y" or ch is "z":
+            set out to out + text_upper_letter with ch
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out
+
+# One ASCII lower-case letter as upper case.
+to text_upper_letter with ch as view of text:
+    if ch is "a":
+        give back "A"
+    if ch is "b":
+        give back "B"
+    if ch is "c":
+        give back "C"
+    if ch is "d":
+        give back "D"
+    if ch is "e":
+        give back "E"
+    if ch is "f":
+        give back "F"
+    if ch is "g":
+        give back "G"
+    if ch is "h":
+        give back "H"
+    if ch is "i":
+        give back "I"
+    if ch is "j":
+        give back "J"
+    if ch is "k":
+        give back "K"
+    if ch is "l":
+        give back "L"
+    if ch is "m":
+        give back "M"
+    if ch is "n":
+        give back "N"
+    if ch is "o":
+        give back "O"
+    if ch is "p":
+        give back "P"
+    if ch is "q":
+        give back "Q"
+    if ch is "r":
+        give back "R"
+    if ch is "s":
+        give back "S"
+    if ch is "t":
+        give back "T"
+    if ch is "u":
+        give back "U"
+    if ch is "v":
+        give back "V"
+    if ch is "w":
+        give back "W"
+    if ch is "x":
+        give back "X"
+    if ch is "y":
+        give back "Y"
+    if ch is "z":
+        give back "Z"
+    give back copy of ch
+
+# Pad `s` on the left with `ch` until it is `width` bytes long.
+to text_pad_left with s as view of text and ch as view of text and width as a number:
+    let gap be width - (length of s)
+    give back (text_repeat with ch and gap) + s
+
+# Pad `s` on the right with `ch` until it is `width` bytes long.
+to text_pad_right with s as view of text and ch as view of text and width as a number:
+    let gap be width - (length of s)
+    give back s + (text_repeat with ch and gap)
+
+# The first `count` letters of `s`.
+to text_take with s as view of text and count as a number:
+    if count is less than 1:
+        give back ""
+    let n be length of s
+    if count is more than n:
+        give back copy of s
+    give back part 1 to count of s
+
+# The text after the first `count` letters.
+to text_drop with s as view of text and count as a number:
+    let n be length of s
+    if count is less than 1:
+        give back copy of s
+    if count is at least n:
+        give back ""
+    give back part (count + 1) to n of s

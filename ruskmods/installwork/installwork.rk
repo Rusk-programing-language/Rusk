@@ -13,7 +13,9 @@
 
 import "text"
 import "version"
+import "semver"
 import "ruskfile"
+import "manifest"
 import "requirement"
 import "registry"
 import "resolver"

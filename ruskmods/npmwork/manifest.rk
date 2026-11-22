@@ -1,0 +1,91 @@
+# manifest.rk — package.json support for the npmwork framework.
+#
+# The generic reader lives in `ruskmods/manifest/manifest.rk`. This internal
+# module adds the npm-shaped helpers npmwork needs and keeps every public name
+# under the `npmwork_manifest_` prefix.
+
+import "../manifest/manifest"
+import "text"
+import "path"
+import "json/json"
+import "semver"
+
+# The default path of a project's package.json.
+to npmwork_manifest_path with dir as a view of text:
+    let file_name be npmwork_text_manifest_name
+    give back path_join with (copy of dir) and file_name
+
+# Read package.json from `dir`. A missing file gives empty text.
+to npmwork_manifest_read with dir as a view of text:
+    let path be npmwork_manifest_path with dir
+    if not (file exists path):
+        give back ""
+    give back read file path
+
+# True when `dir` holds a package.json.
+to npmwork_manifest_exists with dir as a view of text:
+    give back file exists (npmwork_manifest_path with dir)
+
+# The package name from a package.json body.
+to npmwork_manifest_name with body as a view of text:
+    give back manifest_package_json_name with body
+
+# The package version.
+to npmwork_manifest_version with body as a view of text:
+    give back manifest_package_json_version with body
+
+# The entry point from the `main` field.
+to npmwork_manifest_main with body as a view of text:
+    give back manifest_package_json_main with body
+
+# Dependency requirements in `name spec` form.
+to npmwork_manifest_requires with body as a view of text:
+    give back manifest_package_json_requires with body
+
+# Any field as raw text, already unescaped when it is a JSON string.
+to npmwork_manifest_field with body as a view of text and field as a view of text:
+    give back json_extract with (copy of body) and (copy of field)
+
+# Metadata problems as a list of sentences. An empty list means the manifest is
+# usable by npmwork.
+to npmwork_manifest_validate with body as a view of text:
+    let out be an empty list of text
+    if not (json_valid with (copy of body)):
+        add "package.json is not valid JSON" to out
+        give back out
+    if (npmwork_manifest_name with body) is "":
+        add "package.json has no name" to out
+    if (npmwork_manifest_version with body) is "":
+        add "package.json has no version" to out
+    for each requirement_text in (npmwork_manifest_requires with body):
+        if not (semver_requirement_valid with requirement_text):
+            add ("I can't read the dependency '" + requirement_text + "'") to out
+    give back out
+
+# Render a minimal package.json. Requirements are `name spec` strings and are
+# split back into the dependencies object.
+to npmwork_manifest_render with name as a view of text and version as a view of text and main as a view of text and requirements as a view of a list of text:
+    let out be "{\n"
+    set out to out + "  \"name\": " + (json_string with (copy of name)) + ",\n"
+    set out to out + "  \"version\": " + (json_string with (copy of version)) + ",\n"
+    set out to out + "  \"main\": " + (json_string with (copy of main)) + ",\n"
+    set out to out + "  \"dependencies\": {"
+    let first be true
+    for each requirement_text in requirements:
+        let dep be semver_requirement_name with requirement_text
+        let spec be semver_requirement_spec with requirement_text
+        if not first:
+            set out to out + ","
+        set out to out + "\n    " + (json_string with (copy of dep)) + ": " + (json_string with (copy of spec))
+        set first to false
+    if not first:
+        set out to out + "\n  "
+    set out to out + "}\n}\n"
+    give back out
+
+# Write a starter package.json into `dir`.
+to npmwork_manifest_init with dir as a view of text and name as a view of text:
+    let body be npmwork_manifest_render with name and "0.1.0" and "index.js" and (an empty list of text)
+    let target be npmwork_manifest_path with dir
+    write body to file target
+    give back target

@@ -1,0 +1,118 @@
+# sha.rk — shell-backed SHA-1/256/512 helpers written in Rusk.
+#
+# Data shape: algorithms are the text "1", "256", or "512"; digests are
+# lowercase hex text. `sha_tmp_path` names a file from the byte length plus the
+# first and last bytes of its seed, so hashing text writes it to a deterministic
+# temporary file and captures `sha*sum` output through a shell redirect.
+# Every public name starts with `sha_`.
+#
+# Limits: this needs POSIX `sha1sum`, `sha256sum`, and `sha512sum` on PATH, and
+# Rusk text files only. Deterministic temp names are predictable and shared, so
+# this is not hardened against a hostile local user and is unsafe for
+# concurrent calls with colliding seeds. Import with `import "sha"` or
+# `import "sha/sha"`.
+
+import "text"
+import "path"
+
+# The directory for temporary files, from TMPDIR or /tmp.
+to sha_tmp_dir:
+    let dir be environment "TMPDIR"
+    if dir is "":
+        give back "/tmp"
+    give back dir
+
+# Internal: the byte value of a printable ASCII letter, or 0 for other bytes.
+to sha_byte_code with ch as a view of text:
+    let table be " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    let at be text_index_of with table and ch
+    if at is 0:
+        give back 0
+    give back at + 31
+
+# A deterministic temporary path for a seed (length + first/last bytes).
+to sha_tmp_path with data as a view of text:
+    let n be length of data
+    let first be 0
+    let last be 0
+    if n is more than 0:
+        set first to sha_byte_code with (letter 1 of data)
+        set last to sha_byte_code with (letter n of data)
+    give back (sha_tmp_dir + "/rusk_sha_" + (text_from_number with n) + "_" + (text_from_number with first) + "_" + (text_from_number with last))
+
+# Write text to its deterministic temporary file and give back that path.
+to sha_write_temp with data as a view of text:
+    let p be sha_tmp_path with data
+    let dir be path_dir with (copy of p)
+    if not (file exists dir):
+        make directory dir
+    write (copy of data) to file p
+    give back p
+
+# Internal: the sha*sum program for an algorithm, or "" when unknown.
+to sha_tool with algorithm as a view of text:
+    if algorithm is "1":
+        give back "sha1sum"
+    if algorithm is "256":
+        give back "sha256sum"
+    if algorithm is "512":
+        give back "sha512sum"
+    give back ""
+
+# Internal: the first whitespace-delimited word of a sha*sum output file.
+to sha_first_field with out_path as a view of text:
+    if not (file exists out_path):
+        give back ""
+    let raw be read file out_path
+    let bits be text_split with raw and " "
+    if length of bits is 0:
+        give back ""
+    give back item 1 of bits
+
+# Hash text with "1", "256", or "512". "" means a bad algorithm or command.
+to sha_digest with algorithm as a view of text and data as a view of text:
+    let tool be sha_tool with algorithm
+    if tool is "":
+        give back ""
+    let in_path be sha_write_temp with data
+    let out_path be sha_tmp_path with (data + "|" + algorithm + "|out")
+    let status be run command (tool + " " + (text_quote with in_path) + " > " + (text_quote with out_path))
+    if status is not 0:
+        give back ""
+    give back sha_first_field with out_path
+
+# SHA-1 of text as lowercase hex.
+to sha1 with data as a view of text:
+    give back sha_digest with "1" and data
+
+# SHA-256 of text as lowercase hex.
+to sha256 with data as a view of text:
+    give back sha_digest with "256" and data
+
+# SHA-512 of text as lowercase hex.
+to sha512 with data as a view of text:
+    give back sha_digest with "512" and data
+
+# Hash a text file with "1", "256", or "512" as lowercase hex.
+to sha_file with algorithm as a view of text and path as a view of text:
+    let tool be sha_tool with algorithm
+    if tool is "":
+        give back ""
+    let out_path be sha_tmp_path with (path + "|file|" + algorithm)
+    let status be run command (tool + " " + (text_quote with path) + " > " + (text_quote with out_path))
+    if status is not 0:
+        give back ""
+    give back sha_first_field with out_path
+
+# True for a 40, 64, or 128 character lowercase hex digest.
+to sha_validate_hex with digest as a view of text:
+    let n be length of digest
+    if not (n is 40 or n is 64 or n is 128):
+        give back false
+    let digits be "0123456789abcdef"
+    let i be 1
+    while i is at most n:
+        if (text_index_of with digits and (letter i of digest)) is 0:
+            give back false
+        set i to i + 1
+    give back true

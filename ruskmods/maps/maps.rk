@@ -1,0 +1,112 @@
+# maps.rk — ordered maps and ordered sets written in Rusk.
+#
+# A map is a `list of list of text`: each item is a two-item `[key, value]`
+# pair, kept in insertion order. Keys are compared as exact bytes and duplicates
+# are not allowed. An ordered set is just a `list of text` with unique items.
+# These are plain lists, so read-only parameters are views and every function
+# that gives a collection back builds a fresh one.
+
+# A new, empty map.
+to maps_empty:
+    give back an empty list of lists of text
+
+# The value for `key`, or "" when the key is absent.
+to maps_get with pairs as a view of a list of list of text and key as a view of text:
+    for each pair in pairs:
+        if item 1 of pair is key:
+            give back copy of item 2 of pair
+    give back ""
+
+# True when `key` is in the map.
+to maps_has with pairs as a view of a list of list of text and key as a view of text:
+    for each pair in pairs:
+        if item 1 of pair is key:
+            give back true
+    give back false
+
+# A copy of `pairs` with `key` set to `value`. An existing key keeps its place.
+to maps_set with pairs as a view of a list of list of text and key as a view of text and value as a view of text:
+    let out be an empty list of lists of text
+    let found be false
+    for each pair in pairs:
+        if item 1 of pair is key:
+            add [copy of key, copy of value] to out
+            set found to true
+        otherwise:
+            add [copy of item 1 of pair, copy of item 2 of pair] to out
+    if not found:
+        add [copy of key, copy of value] to out
+    give back out
+
+# A copy of `pairs` without `key`.
+to maps_remove with pairs as a view of a list of list of text and key as a view of text:
+    let out be an empty list of lists of text
+    for each pair in pairs:
+        if item 1 of pair is not key:
+            add [copy of item 1 of pair, copy of item 2 of pair] to out
+    give back out
+
+# The keys, in map order.
+to maps_keys with pairs as a view of a list of list of text:
+    let out be an empty list of text
+    for each pair in pairs:
+        add copy of item 1 of pair to out
+    give back out
+
+# The values, in map order.
+to maps_values with pairs as a view of a list of list of text:
+    let out be an empty list of text
+    for each pair in pairs:
+        add copy of item 2 of pair to out
+    give back out
+
+# How many pairs the map holds.
+to maps_length with pairs as a view of a list of list of text:
+    give back length of pairs
+
+# Pair corresponding items of two lists, up to the shorter length.
+to maps_from_lists with keys as a view of a list of text and values as a view of a list of text:
+    let out be an empty list of lists of text
+    let n be length of keys
+    if length of values is less than n:
+        set n to length of values
+    let i be 1
+    while i is at most n:
+        add [copy of item i of keys, copy of item i of values] to out
+        set i to i + 1
+    give back out
+
+# A new, empty ordered set.
+to maps_set_empty:
+    give back an empty list of text
+
+# A copy of `items` with `value` appended when it is not already there.
+to maps_set_add with items as a view of a list of text and value as a view of text:
+    let out be an empty list of text
+    let found be false
+    for each item_text in items:
+        add copy of item_text to out
+        if item_text is value:
+            set found to true
+    if not found:
+        add copy of value to out
+    give back out
+
+# True when `value` is in the ordered set.
+to maps_set_has with items as a view of a list of text and value as a view of text:
+    for each item_text in items:
+        if item_text is value:
+            give back true
+    give back false
+
+# A copy of `items` without `value`.
+to maps_set_remove with items as a view of a list of text and value as a view of text:
+    let out be an empty list of text
+    for each item_text in items:
+        if item_text is not value:
+            add copy of item_text to out
+    give back out
+
+# An independent copy of the ordered set's items.
+to maps_set_items with items as a view of a list of text:
+    give back copy of items

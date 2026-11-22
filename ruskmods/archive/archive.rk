@@ -1,0 +1,180 @@
+# archive.rk — a tiny text archive format written in Rusk.
+#
+# Data shape: an archive is text with a `RUSKPKG 1` header, followed by
+# `FILE <byte-length> <relative-path>` lines, each file's exact text, and a
+# final `END` line. In memory, entries are lists of two text items:
+# `[path, content]`. `archive_pack` and `archive_unpack` convert between the
+# two shapes. Every public name starts with `archive_`.
+#
+# Limits: RUSKPKG is text-only and not compressed. It stores no permissions,
+# symlinks, or binary data; byte lengths count text bytes. The two tar helpers
+# only build command strings for POSIX `tar` — they do not run anything.
+# Import with `import "archive"` or `import "archive/archive"`.
+
+import "text"
+import "path"
+
+# The first line of every RUSKPKG archive.
+to archive_magic:
+    give back "RUSKPKG 1"
+
+# The 1-based index of the next newline at or after `start`, or 0.
+to archive_newline_from with body as a view of text and start as a number:
+    let n be length of body
+    let i be start
+    while i is at most n:
+        if (letter i of body) is "\n":
+            give back i
+        set i to i + 1
+    give back 0
+
+# Internal: records written `<size> <path>`, skipping content by its size.
+to archive_scan with body as a view of text:
+    let out be an empty list of text
+    let n be length of body
+    if n is 0:
+        give back out
+    let first_end be archive_newline_from with body and 1
+    if first_end is 0:
+        give back out
+    let first be part 1 to (first_end - 1) of body
+    if first is not archive_magic:
+        give back out
+    let pos be first_end + 1
+    while pos is at most n:
+        let line_end be archive_newline_from with body and pos
+        if line_end is 0:
+            break
+        let line be part pos to (line_end - 1) of body
+        if line is "END":
+            break
+        if not (text_starts_with with line and "FILE "):
+            break
+        let rest be part 6 to (length of line) of line
+        let cut be text_index_of with rest and " "
+        if cut is 0:
+            break
+        let size_text be part 1 to (cut - 1) of rest
+        let entry_path be part (cut + 1) to (length of rest) of rest
+        let size be text_to_number with size_text
+        if size is less than 0 or entry_path is "":
+            break
+        add (size_text + " " + entry_path) to out
+        set pos to line_end + 1 + size + 1
+    give back out
+
+# True when the header and the terminating `END` line are both present.
+to archive_valid with body as a view of text:
+    let n be length of body
+    if n is 0:
+        give back false
+    let first_end be archive_newline_from with body and 1
+    if first_end is 0:
+        give back false
+    if (part 1 to (first_end - 1) of body) is not archive_magic:
+        give back false
+    let last_nl be 0
+    let i be n
+    while i is at least 1:
+        if (letter i of body) is "\n":
+            set last_nl to i
+            break
+        set i to i - 1
+    if last_nl is 0:
+        give back false
+    let last_start be last_nl
+    set i to last_nl - 1
+    while i is at least 1:
+        if (letter i of body) is "\n":
+            set last_start to i + 1
+            break
+        set i to i - 1
+    give back (part last_start to (last_nl - 1) of body) is "END"
+
+# Pack `[path, content]` pairs into archive text. Paths are stored in the
+# order given, so callers control reproducibility.
+to archive_pack with entries as a view of a list of list of text:
+    let out be archive_magic + "\n"
+    for each entry in entries:
+        if length of entry is at least 2:
+            let entry_path be item 1 of entry
+            let content be item 2 of entry
+            set out to out + "FILE " + (text_from_number with (length of content)) + " " + entry_path + "\n"
+            set out to out + content + "\n"
+    give back out + "END\n"
+
+# Parse archive text into `[path, content]` pairs. Malformed archives give
+# back the pairs read before the damage.
+to archive_unpack with body as a view of text:
+    let out be an empty list of list of text
+    if not (archive_valid with body):
+        give back out
+    let n be length of body
+    let first_end be archive_newline_from with body and 1
+    let pos be first_end + 1
+    while pos is at most n:
+        let line_end be archive_newline_from with body and pos
+        if line_end is 0:
+            break
+        let line be part pos to (line_end - 1) of body
+        if line is "END":
+            break
+        if not (text_starts_with with line and "FILE "):
+            break
+        let rest be part 6 to (length of line) of line
+        let cut be text_index_of with rest and " "
+        if cut is 0:
+            break
+        let size be text_to_number with (part 1 to (cut - 1) of rest)
+        let entry_path be part (cut + 1) to (length of rest) of rest
+        if size is less than 0 or entry_path is "":
+            break
+        let content_start be line_end + 1
+        let content_end be content_start + size - 1
+        if content_end is more than n:
+            break
+        let content be ""
+        if size is more than 0:
+            set content to part content_start to content_end of body
+        let pair be [entry_path, content]
+        add pair to out
+        set pos to content_end + 2
+    give back out
+
+# How many file records the archive declares.
+to archive_count with body as a view of text:
+    give back length of (archive_scan with body)
+
+# The 1-based `[path, content]` pair, or an empty list when out of range.
+to archive_entry with body as a view of text and index as a number:
+    if index is less than 1:
+        give back an empty list of text
+    let entries be archive_unpack with body
+    if index is more than length of entries:
+        give back an empty list of text
+    give back item index of entries
+
+# A one-file archive made from a path and its text.
+to archive_create_text with entry_path as a view of text and content as a view of text:
+    let path_copy be copy of entry_path
+    let content_copy be copy of content
+    give back archive_pack with [[path_copy, content_copy]]
+
+# The content stored for `entry_path`, or empty text when it is absent.
+to archive_extract_text with body as a view of text and entry_path as a view of text:
+    for each entry in (archive_unpack with body):
+        if (item 1 of entry) is entry_path:
+            give back item 2 of entry
+    give back ""
+
+# A POSIX shell command that creates a gzip tarball holding `source`'s own
+# name. The command is returned as text; callers decide whether to run it.
+to archive_tar_create_command with source as a view of text and archive as a view of text:
+    let dir be path_dir with (copy of source)
+    let base be path_base with (copy of source)
+    give back "tar -czf " + (text_quote with archive) + " -C " + (text_quote with dir) + " " + (text_quote with base)
+
+# A POSIX shell command that creates `destination` and unpacks a gzip tarball
+# into it. Returned as text only.
+to archive_tar_extract_command with archive as a view of text and destination as a view of text:
+    give back "mkdir -p " + (text_quote with destination) + " && tar -xzf " + (text_quote with archive) + " -C " + (text_quote with destination)

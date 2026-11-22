@@ -1,0 +1,17 @@
+# npmwork.rk — one import for the npm/JS/TS installer framework.
+#
+#     import "npmwork"
+#
+# pulls in the text, manifest, lock, registry, resolver, installer, global,
+# project, and cli modules in this folder. Each internal module keeps the
+# `npmwork_` prefix, so a plain import can share one namespace safely.
+
+import "text"
+import "manifest"
+import "lock"
+import "registry"
+import "resolver"
+import "installer"
+import "global"
+import "project"
+import "cli"

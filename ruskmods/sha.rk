@@ -1,0 +1,4 @@
+# sha.rk — compatibility shim for ruskmods/sha/sha.rk.
+# The canonical source is the folder module; this file only forwards to it.
+
+import "sha/sha"

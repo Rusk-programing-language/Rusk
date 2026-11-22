@@ -765,19 +765,29 @@ Resolution order, for a relative path:
 
 1. next to the file that wrote the import;
 2. inside `ruskmods/`, `rusklib/`, and `fastlib/` next to that file;
-3. the same four places in each parent directory of that file;
-4. the same four places relative to the current directory.
+3. the same places in each parent directory of that file;
+4. the same places relative to the current directory;
+5. the same places beside the running compiler, so an installed compiler finds
+   the libraries that shipped with it even when the program lives elsewhere.
 
 Each directory is checked completely before the next one, so a file beside the
-importing file always wins over an unrelated module with the same name. Within
-one directory the order is: the path as written, then the path inside
+importing file wins over the current directory, which wins over a bundled copy.
+Within one directory the order is: the path as written, then the path inside
 `ruskmods/`, then inside `rusklib/`, then inside `fastlib/`.
 
 A bare name (no slash) also finds a module directory, so `import "math"` matches
 `ruskmods/math/math.rk`, `import "wheat"` matches `rusklib/wheat/wheat.rk`, and
-`import "simple"` matches `fastlib/simple/simple.rk`. The parent walk is what
-lets a program in `examples/` or `tests/` write `import "math"` and still find
-the checkout's `ruskmods/math.rk`.
+`import "simple"` matches `fastlib/simple/simple.rk`. A path with a slash also
+finds a same-named file inside a folder: `import "json/json"` matches
+`ruskmods/json/json.rk`, and `import "rusklib/http"` matches
+`rusklib/http/http.rk`. Direct files are still tried first, so
+`import "wheat/table"` keeps finding `rusklib/wheat/table.rk`.
+
+The bundle follows **one folder = one module = one public prefix**: generic
+modules are `ruskmods/<name>/<name>.rk`, system/IO modules are
+`rusklib/<name>/<name>.rk`, and installer frameworks keep internal modules in
+their own folder. A root-level `<name>.rk` file is only a compatibility shim
+that forwards to the folder module.
 
 An absolute path is used as written. A file and a namespace are expanded **at
 most once** per bake, so several modules can import the same helper without

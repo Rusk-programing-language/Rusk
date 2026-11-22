@@ -1,0 +1,118 @@
+# installer.rk — fetch and place npm packages for npmwork.
+#
+# A package is downloaded into the shared cache, unpacked into a staging
+# directory, and moved into `node_modules` with an atomic rename. The lock file
+# records the selected version after a successful move. Results start with
+# `"ok"` or `"error"`.
+#
+# Limits: extraction uses the POSIX `tar`/`gzip` tools through `rusklib/gzip`;
+# npm lifecycle scripts and symlink/binary handling are not run.
+
+import "text"
+import "path"
+import "fs"
+import "fs_fast"
+import "cache"
+import "gzip"
+import "result"
+import "registry"
+import "lock"
+
+# The node_modules directory for a project.
+to npmwork_installer_node_modules with dir as a view of text:
+    give back path_join with (copy of dir) and "node_modules"
+
+# The directory one package occupies. Scoped packages get an `@scope` folder.
+to npmwork_installer_package_dir with dir as a view of text and name as a view of text:
+    let root be npmwork_installer_node_modules with dir
+    if not (npmwork_text_is_scoped with name):
+        give back path_join with root and (copy of name)
+    let scope be text_take with name and (text_index_of with name and "/")
+    let scoped be path_join with root and scope
+    give back path_join with scoped and (npmwork_text_short_name with name)
+
+# A staging directory beside the cached tarball.
+to npmwork_installer_stage_dir with dir as a view of text and name as a view of text and version as a view of text:
+    let cache_path be npmwork_registry_cache_path with name and version
+    give back cache_path + ".stage"
+
+# A one-item error result.
+to npmwork_installer_error with message as a view of text:
+    give back result_error with message
+
+# True when a package directory is present.
+to npmwork_installer_installed with dir as a view of text and name as a view of text:
+    give back fs_is_directory with (npmwork_installer_package_dir with dir and name)
+
+# Download, unpack, and place one `name version` selection.
+to npmwork_installer_install_one with dir as a view of text and registry as a view of text and name as a view of text and version as a view of text:
+    let target be npmwork_installer_package_dir with dir and name
+    if npmwork_installer_installed with dir and name:
+        give back ["ok", name + " " + version + " (already present)"]
+
+    let status be npmwork_registry_fetch_tarball with registry and name and version
+    if status is not 0:
+        give back npmwork_installer_error with ("can't download " + name + " " + version)
+
+    let tarball be npmwork_registry_cache_path with name and version
+    if not (file exists tarball):
+        give back npmwork_installer_error with ("the download for " + name + " " + version + " is missing")
+
+    let stage be npmwork_installer_stage_dir with dir and name and version
+    fs_fast_remove with stage
+    fs_fast_mkdir with stage
+    gzip_tar_extract with tarball and stage
+
+    let parent be path_dir with (copy of target)
+    fs_fast_mkdir with parent
+    fs_fast_atomic_rename with stage and target
+    if not (fs_is_directory with target):
+        give back npmwork_installer_error with ("can't place " + name + " " + version)
+
+    npmwork_lock_add with dir and name and version and ""
+    give back ["ok", name + " " + version]
+
+# Install every `name version` selection. The result collects each package's
+# outcome; the first line becomes "error" if anything failed.
+to npmwork_installer_install_all with dir as a view of text and registry as a view of text and selections as a view of a list of text:
+    let out be ["ok"]
+    for each selection in selections:
+        let parts be text_split with selection and " "
+        let name be item 1 of parts
+        let version be item 2 of parts
+        let one be npmwork_installer_install_one with dir and registry and name and version
+        let i be 2
+        while i is at most length of one:
+            add (item i of one) to out
+            set i to i + 1
+        if (item 1 of one) is "error":
+            set item 1 of out to "error"
+    give back out
+
+# Remove one installed package and its lock record.
+to npmwork_installer_remove with dir as a view of text and name as a view of text:
+    let target be npmwork_installer_package_dir with dir and name
+    if not (fs_is_directory with target):
+        give back npmwork_installer_error with (name + " is not installed")
+    fs_remove_tree with target
+    let entries be npmwork_lock_read with dir
+    let updated be npmwork_lock_remove with entries and name
+    npmwork_lock_write with dir and updated
+    give back ["ok", "removed " + name]
+
+# A readable list of installed package directories.
+to npmwork_installer_list with dir as a view of text:
+    let root be npmwork_installer_node_modules with dir
+    if not (fs_is_directory with root):
+        give back "(no node_modules in " + dir + ")\n"
+    let out be ""
+    for each entry in (fs_list with root):
+        if (text_starts_with with entry and "@"):
+            let scope_path be path_join with (copy of root) and (copy of entry)
+            for each scoped in (fs_list with scope_path):
+                set out to out + entry + "/" + scoped + "\n"
+        otherwise:
+            set out to out + entry + "\n"
+    if out is "":
+        give back "(node_modules is empty)\n"
+    give back out

@@ -1,0 +1,56 @@
+# result.rk — success and error values written in Rusk.
+#
+# A result is a two-item `list of text`: `["ok", value]` on success and
+# `["error", message]` on failure. There is no record type, so callers read
+# item 1 for the tag and item 2 for the payload. Every function that gives text
+# back builds a fresh value; inputs are borrowed views.
+
+# A successful result holding `value`.
+to result_ok with value as a view of text:
+    give back ["ok", copy of value]
+
+# A failed result holding `message`.
+to result_error with message as a view of text:
+    give back ["error", copy of message]
+
+# True when `r` is a successful result.
+to result_is_ok with r as a view of a list of text:
+    if length of r is at least 1:
+        give back item 1 of r is "ok"
+    give back false
+
+# True when `r` is a failed result.
+to result_is_error with r as a view of a list of text:
+    if length of r is at least 1:
+        give back item 1 of r is "error"
+    give back false
+
+# The value of a success, or "" for an error.
+to result_value with r as a view of a list of text:
+    if length of r is at least 2:
+        if item 1 of r is "ok":
+            give back copy of item 2 of r
+    give back ""
+
+# The message of an error, or "" for a success.
+to result_error_message with r as a view of a list of text:
+    if length of r is at least 2:
+        if item 1 of r is "error":
+            give back copy of item 2 of r
+    give back ""
+
+# The value of a success, or "" for an error.
+to result_unwrap with r as a view of a list of text:
+    give back result_value with r
+
+# The value of a success, or `fallback` for an error.
+to result_unwrap_or with r as a view of a list of text and fallback as a view of text:
+    if result_is_ok with r:
+        give back result_value with r
+    give back copy of fallback
+
+# A sentence describing `r`, including its error message when it failed.
+to result_expect_text with r as a view of a list of text:
+    if result_is_ok with r:
+        give back "The result is a success."
+    give back "Expected a success, but got an error: " + (result_error_message with r)

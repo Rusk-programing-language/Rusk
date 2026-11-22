@@ -1,0 +1,83 @@
+# project.rk — project-level commands for npmwork.
+#
+# A project is a directory with a package.json and an npmwork lock. This module
+# ties the manifest, resolver, installer, and lock modules together. It does not
+# run npm scripts and does not parse the full npm registry metadata format.
+
+import "text"
+import "path"
+import "fs"
+import "manifest"
+import "lock"
+import "resolver"
+import "installer"
+
+# Create a new npmwork project directory.
+to npmwork_project_init with dir as a view of text and name as a view of text:
+    if not (fs_ensure_directory with dir):
+        give back ["error", "can't create " + dir]
+    let manifest_path be npmwork_manifest_init with dir and name
+    write "node_modules/\n" to file (path_join with (copy of dir) and ".gitignore")
+    give back ["ok", "created " + manifest_path]
+
+# The dependency requirements declared by a project.
+to npmwork_project_requirements with dir as a view of text:
+    give back npmwork_manifest_requires with (npmwork_manifest_read with dir)
+
+# Validate a project's package.json.
+to npmwork_project_check with dir as a view of text:
+    let body be npmwork_manifest_read with dir
+    if body is "":
+        give back ["error", "no package.json in " + dir]
+    let problems be npmwork_manifest_validate with body
+    if length of problems is 0:
+        give back ["ok", "package.json looks good"]
+    let out be ["error"]
+    for each problem in problems:
+        add problem to out
+    give back out
+
+# A dependency plan for the declared requirements and a supplied available
+# list of `name version` pairs. The caller obtains that list from a registry
+# index; npmwork does not pretend a tarball download is a version index.
+to npmwork_project_plan with dir as a view of text and available as a view of a list of text:
+    give back npmwork_resolver_resolve with (npmwork_project_requirements with dir) and available
+
+# Install an already-chosen list of `name version` selections.
+to npmwork_project_install with dir as a view of text and registry as a view of text and selections as a view of a list of text:
+    give back npmwork_installer_install_all with dir and registry and selections
+
+# Compare the lock file with the directories under node_modules.
+to npmwork_project_status with dir as a view of text:
+    let entries be npmwork_lock_read with dir
+    let out be ""
+    for each entry in entries:
+        let parts be text_split with entry and " "
+        let name be item 1 of parts
+        let version be item 2 of parts
+        let present be npmwork_installer_installed with dir and name
+        if present:
+            set out to out + name + " " + version + " installed\n"
+        otherwise:
+            set out to out + name + " " + version + " missing\n"
+    if out is "":
+        give back "(the npmwork lock is empty)\n"
+    give back out
+
+# Remove node_modules and clear the lock.
+to npmwork_project_clean with dir as a view of text:
+    let modules be npmwork_installer_node_modules with dir
+    fs_remove_tree with modules
+    write "# npmwork lock — name version integrity\n" to file (npmwork_lock_path with dir)
+    give back ["ok", "cleaned " + modules]
+
+# A readable dependency tree from the lock file.
+to npmwork_project_tree with dir as a view of text:
+    let entries be npmwork_lock_read with dir
+    if length of entries is 0:
+        give back "(no locked packages in " + dir + ")\n"
+    let package_name be npmwork_manifest_name with (npmwork_manifest_read with dir)
+    let out be package_name + "\n"
+    for each entry in entries:
+        set out to out + "├─ " + entry + "\n"
+    give back out

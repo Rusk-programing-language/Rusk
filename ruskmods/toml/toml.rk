@@ -98,14 +98,14 @@ to toml_bare_letter with ch as text:
 to toml_key with key as text:
     if length of key is 0:
         give back "\"\""
-    let simple be true
+    let bare be true
     let at be 1
     let n be length of key
     while at is at most n:
         if not toml_bare_letter with (letter at of key):
-            set simple to false
+            set bare to false
         set at to at + 1
-    if simple:
+    if bare:
         give back key
     give back toml_string with key
 

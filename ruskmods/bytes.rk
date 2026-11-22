@@ -1,0 +1,4 @@
+# bytes.rk — compatibility shim for ruskmods/bytes/bytes.rk.
+#
+# `import "bytes"` loads the folder module; this file only forwards to it.
+import "bytes/bytes"

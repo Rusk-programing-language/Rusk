@@ -1,0 +1,89 @@
+# bench.rk — timers and phase reports built on POSIX `date`.
+#
+# Import it with `import "bench/bench"`. Every public name starts with `bench_`.
+# Rusk has no native clock primary, so `bench_now` runs `date +%s%N` with stdout
+# redirected to a scratch file and reads the nanoseconds back as text. Parsing
+# assumes a 19-digit decimal timestamp; `bench_parse` gives -1 for anything
+# else. This needs a POSIX `date` that understands `%N`, and `/bin/sh` for the
+# redirect. Times are wall-clock readings, not monotonic measurements.
+
+import "text"
+
+# Quote text for `/bin/sh` with single quotes.
+to bench_quote with s as a view of text:
+    give back text_quote with (copy of s)
+
+# A scratch file under TMPDIR (or /tmp) for one clock reading.
+to bench_tmp_path with name as a view of text:
+    let temp be environment "TMPDIR"
+    if temp is "":
+        set temp to "/tmp"
+    let clean be temp
+    if length of clean is more than 1 and (letter (length of clean) of clean) is "/":
+        set clean to part 1 to ((length of clean) - 1) of clean
+    give back clean + "/rusk-bench-" + (copy of name) + ".txt"
+
+# The current Unix time in nanoseconds, as decimal text.
+to bench_now:
+    let path be bench_tmp_path with "now"
+    write "0" to file (copy of path)
+    run command ("date +%s%N > " + (bench_quote with path))
+    give back text_trim with (read file (copy of path))
+
+# Parse a nanosecond timestamp. Non-digits give -1.
+to bench_parse with raw as a view of text:
+    let t be text_trim with raw
+    let n be length of t
+    if n is 0:
+        give back -1
+    let digits be "0123456789"
+    for each i from 1 to n:
+        if (text_index_of with digits and (letter i of t)) is 0:
+            give back -1
+    give back text_to_number with t
+
+# Nanoseconds between two readings from bench_now, or 0 for bad input.
+to bench_elapsed with start as a view of text and finish as a view of text:
+    let first be bench_parse with start
+    let second be bench_parse with finish
+    if first is less than 0 or second is less than 0:
+        give back 0
+    if second is less than first:
+        give back 0
+    give back second - first
+
+# Whole seconds in a nanosecond count, rounded down.
+to bench_seconds with nanos as a number:
+    if nanos is less than 0:
+        give back 0
+    give back nanos / 1000000000
+
+# Three digits with leading zeroes, for the fractional part of a second.
+to bench_padded3 with n as a number:
+    let value be n
+    if value is less than 0:
+        set value to 0
+    let digits be text_from_number with value
+    let padding be 3 - (length of digits)
+    if padding is less than 0:
+        set padding to 0
+    give back (text_repeat with "0" and padding) + digits
+
+# A nanosecond count as `seconds.milliseconds` text.
+to bench_seconds_text with nanos as a number:
+    let value be nanos
+    if value is less than 0:
+        set value to 0
+    let seconds be value / 1000000000
+    let fraction be (value - seconds * 1000000000) / 1000000
+    give back (text_from_number with seconds) + "." + (bench_padded3 with fraction)
+
+# A one-line report for a start and end reading from bench_now.
+to bench_report with start as a view of text and finish as a view of text:
+    let nanos be bench_elapsed with start and finish
+    give back "elapsed " + (text_from_number with nanos) + " ns (" + (bench_seconds_text with nanos) + " s)"
+
+# A named phase report for a start and end reading from bench_now.
+to bench_phase with name as a view of text and start as a view of text and finish as a view of text:
+    let nanos be bench_elapsed with start and finish
+    give back (copy of name) + ": " + (text_from_number with nanos) + " ns (" + (bench_seconds_text with nanos) + " s)"

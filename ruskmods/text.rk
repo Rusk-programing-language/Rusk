@@ -1,0 +1,7 @@
+# text.rk — compatibility entry point for ruskmods/text/text.rk.
+#
+# `import "text"` loads the shared text helpers from the folder module. The
+# canonical source is `ruskmods/text/text.rk`; this file only forwards to it so
+# the checkout keeps the same shape as `math.rk` and `math/math.rk`.
+
+import "text/text"

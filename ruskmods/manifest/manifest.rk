@@ -1,0 +1,279 @@
+# manifest.rk — Ruskfile and package.json metadata readers written in Rusk.
+#
+# Data shape: a manifest is source text. Ruskfile metadata is read from
+# top-level `let package_NAME be VALUE` lines; package.json metadata is read
+# with the flat-object helpers from `json/json`. Lists of requirements are
+# text items shaped `name spec`. Every public name starts with `manifest_`.
+#
+# Limits: Ruskfile values are single-line text with one layer of quotes
+# removed; list items may not contain commas. package.json support is
+# best-effort: `json_extract` reads a flat object, and the dependencies object
+# is found with a small balanced-brace scan and split on commas and colons
+# rather than parsed as a full JSON tree.
+# Import with `import "manifest"` or `import "manifest/manifest"`.
+
+import "text"
+import "path"
+import "json/json"
+
+# The text after `let NAME be ` on the first matching top-level line.
+to manifest_value with body as a view of text and name as a view of text:
+    let prefix be "let " + name + " be "
+    let pn be length of prefix
+    for each line in (text_lines with body):
+        let t be text_trim with line
+        if not (text_starts_with with t and "#"):
+            if text_starts_with with t and prefix:
+                give back text_trim with (part (pn + 1) to (length of t) of t)
+    give back ""
+
+# A metadata value as text, with one layer of quotes removed.
+to manifest_text with body as a view of text and name as a view of text:
+    give back text_unquote with (manifest_value with body and name)
+
+# A metadata list such as `["a", "b"]`. Commas separate items; quoted items
+# may not contain a comma. A missing value gives an empty list.
+to manifest_list with body as a view of text and name as a view of text:
+    let raw be manifest_value with body and name
+    let n be length of raw
+    if n is less than 2:
+        give back an empty list of text
+    if not ((letter 1 of raw) is "[" and (letter n of raw) is "]"):
+        give back an empty list of text
+    let inner be part 2 to (n - 1) of raw
+    let out be an empty list of text
+    for each piece in (text_split with inner and ","):
+        let item be text_unquote with (text_trim with piece)
+        if item is not "":
+            add item to out
+    give back out
+
+# The package name.
+to manifest_name with body as a view of text:
+    give back manifest_text with body and "package_name"
+
+# The package version.
+to manifest_version with body as a view of text:
+    give back manifest_text with body and "package_version"
+
+# The program entry point, relative to the Ruskfile.
+to manifest_entry with body as a view of text:
+    give back manifest_text with body and "package_entry"
+
+# A one-line description.
+to manifest_description with body as a view of text:
+    give back manifest_text with body and "package_description"
+
+# The license name.
+to manifest_license with body as a view of text:
+    give back manifest_text with body and "package_license"
+
+# Dependency requirements, each written `name spec`.
+to manifest_requires with body as a view of text:
+    give back manifest_list with body and "package_requires"
+
+# The names of `to NAME:` tasks declared in a Ruskfile.
+to manifest_tasks with body as a view of text:
+    let out be an empty list of text
+    for each line in (text_lines with body):
+        let t be text_trim with line
+        if text_starts_with with t and "to ":
+            if text_ends_with with t and ":":
+                let rest be part 4 to (length of t) of t
+                let cut be text_index_of with rest and " "
+                if cut is 0:
+                    add (part 1 to (length of rest - 1) of rest) to out
+                otherwise:
+                    add (part 1 to (cut - 1) of rest) to out
+    give back out
+
+# Internal: is this a dotted decimal version such as `1.2.0`?
+to manifest_version_ok with version as a view of text:
+    let parts be text_split with version and "."
+    if length of parts is less than 2:
+        give back false
+    for each piece in parts:
+        if piece is "":
+            give back false
+        let n be text_to_number with piece
+        if n is less than 0:
+            give back false
+        if (text_from_number with n) is not piece:
+            give back false
+    give back true
+
+# Walk from `start` towards the root for a Ruskfile, or give back "".
+to manifest_find_from with start as a view of text:
+    let dir be text_trim with start
+    if dir is "":
+        set dir to environment "PWD"
+    if dir is "":
+        give back ""
+    let guard be 0
+    while length of dir is more than 0 and guard is less than 256:
+        let capital be path_join with (copy of dir) and "Ruskfile"
+        if file exists capital:
+            give back capital
+        let lower be path_join with (copy of dir) and "ruskfile"
+        if file exists lower:
+            give back lower
+        let parent be path_dir with (copy of dir)
+        if parent is dir:
+            give back ""
+        set dir to parent
+        set guard to guard + 1
+    give back ""
+
+# Look for a Ruskfile from the current working directory upward.
+to manifest_find:
+    give back manifest_find_from with (environment "PWD")
+
+# Read a manifest file. A missing path gives empty text.
+to manifest_read with path as a view of text:
+    if not (file exists path):
+        give back ""
+    give back read file path
+
+# Metadata problems as a list of sentences; empty means ready to install.
+to manifest_validate with body as a view of text:
+    let out be an empty list of text
+    let name be manifest_name with body
+    let version be manifest_version with body
+    let entry be manifest_entry with body
+    if name is "":
+        add "the Ruskfile has no package_name" to out
+    if version is "":
+        add "the Ruskfile has no package_version" to out
+    otherwise if not (manifest_version_ok with version):
+        add "package_version is not a dotted number" to out
+    if entry is "":
+        add "the Ruskfile has no package_entry" to out
+    for each req in (manifest_requires with body):
+        let spec be text_split with req and " "
+        if length of spec is less than 2:
+            add ("the requirement '" + req + "' needs a version spec") to out
+    give back out
+
+# Render a Ruskfile from its parts.
+to manifest_render with name as a view of text and version as a view of text and description as a view of text and entry as a view of text and license as a view of text and requires as a view of a list of text:
+    let out be "# Ruskfile — project metadata and tasks.\n"
+    set out to out + "let package_name be \"" + name + "\"\n"
+    set out to out + "let package_version be \"" + version + "\"\n"
+    set out to out + "let package_description be \"" + description + "\"\n"
+    set out to out + "let package_entry be \"" + entry + "\"\n"
+    set out to out + "let package_license be \"" + license + "\"\n"
+    set out to out + "let package_requires be "
+    if length of requires is 0:
+        set out to out + "an empty list of text\n\n"
+    otherwise:
+        set out to out + "["
+        let first be true
+        for each req in requires:
+            if not first:
+                set out to out + ", "
+            set out to out + "\"" + req + "\""
+            set first to false
+        set out to out + "]\n\n"
+    set out to out + "to build:\n    say \"building \" + package_name\n    make directory \"bin\"\n    let status be run command \"rusk build " + entry + " -o bin/" + name + "\"\n    if status is not 0:\n        warn \"build failed\"\n\n"
+    set out to out + "to test:\n    say \"testing \" + package_name\n\n"
+    set out to out + "to clean:\n    let status be run command \"rm -rf bin\"\n\n"
+    set out to out + "# Default task.\nbuild\n"
+    give back out
+
+# A starter Ruskfile for a new package.
+to manifest_template with name as a view of text:
+    give back manifest_render with name and "0.1.0" and "A Rusk package" and "src/main.rk" and "MIT" and (an empty list of text)
+
+# The raw JSON value for a package.json field, or "" when absent.
+to manifest_package_json_field with body as a view of text and key as a view of text:
+    give back json_extract with (copy of body) and (copy of key)
+
+# package.json `name`.
+to manifest_package_json_name with body as a view of text:
+    give back manifest_package_json_field with body and "name"
+
+# package.json `version`.
+to manifest_package_json_version with body as a view of text:
+    give back manifest_package_json_field with body and "version"
+
+# package.json `main`.
+to manifest_package_json_main with body as a view of text:
+    give back manifest_package_json_field with body and "main"
+
+# Internal: the balanced `{...}` value following `key`, or "" when absent.
+# `json_extract` is flat and stops at a comma inside a nested object, so the
+# dependencies object needs its own small scanner.
+to manifest_object_value with body as a view of text and key as a view of text:
+    let needle be "\"" + key + "\""
+    let at be text_index_of with body and needle
+    if at is 0:
+        give back ""
+    let n be length of body
+    let i be at + (length of needle)
+    while i is at most n:
+        let ch be letter i of body
+        if ch is " " or ch is "\t" or ch is "\n" or ch is "\r" or ch is ":":
+            set i to i + 1
+        otherwise:
+            break
+    if i is more than n or (letter i of body) is not "{":
+        give back ""
+    let start be i
+    let depth be 0
+    let in_string be false
+    while i is at most n:
+        let scanned be letter i of body
+        if in_string:
+            if scanned is "\\":
+                set i to i + 2
+                continue
+            if scanned is "\"":
+                set in_string to false
+        otherwise:
+            if scanned is "\"":
+                set in_string to true
+            otherwise if scanned is "{":
+                set depth to depth + 1
+            otherwise if scanned is "}":
+                set depth to depth - 1
+                if depth is 0:
+                    give back part start to i of body
+        set i to i + 1
+    give back ""
+
+# Best-effort `dependencies` object as `name spec` requirements.
+to manifest_package_json_requires with body as a view of text:
+    let out be an empty list of text
+    let deps be manifest_object_value with body and "dependencies"
+    let t be text_trim with deps
+    if t is "":
+        give back out
+    let n be length of t
+    let inner be copy of t
+    if (letter 1 of t) is "{":
+        if n is at least 2:
+            set inner to part 2 to (n - 1) of t
+        otherwise:
+            give back out
+    for each piece in (text_split with inner and ","):
+        let bits be text_split with piece and ":"
+        if length of bits is at least 2:
+            let dep be text_unquote with (item 1 of bits)
+            let spec be text_unquote with (item 2 of bits)
+            if dep is not "":
+                add (dep + " " + spec) to out
+    give back out
+
+# Which manifest format does this body look like: "ruskfile",
+# "package.json", or ""?
+to manifest_detect with body as a view of text:
+    if (manifest_name with body) is not "":
+        give back "ruskfile"
+    let t be text_trim with body
+    if t is "":
+        give back ""
+    if not ((letter 1 of t) is "{"):
+        give back ""
+    if json_has with (copy of body) and "name":
+        give back "package.json"
+    give back ""

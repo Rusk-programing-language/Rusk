@@ -1,0 +1,75 @@
+# global.rk — a user-owned global install prefix for npmwork.
+#
+# The prefix comes from `NPM_CONFIG_PREFIX`, then `HOME`, and defaults to
+# `.npm-global` in the current directory. On Windows the command directory is
+# `Scripts`; elsewhere it is `bin`. All public names use `npmwork_global_`.
+
+import "text"
+import "path"
+import "fs"
+import "platform"
+import "installer"
+
+# The global prefix root.
+to npmwork_global_root:
+    let configured be environment "NPM_CONFIG_PREFIX"
+    if configured is not "":
+        give back configured
+    let home be platform_home
+    if home is "":
+        give back ".npm-global"
+    give back path_join with (copy of home) and ".npm-global"
+
+# The directory holding global commands.
+to npmwork_global_bin:
+    let root be npmwork_global_root
+    let windows be platform_is_windows
+    if windows:
+        give back path_join with (copy of root) and "Scripts"
+    give back path_join with (copy of root) and "bin"
+
+# The directory holding a globally installed package.
+to npmwork_global_package_dir with name as a view of text:
+    let root be npmwork_global_root
+    let packages be path_join with (path_join with (copy of root) and "lib") and "node_modules"
+    give back npmwork_installer_package_dir with packages and name
+
+# Write a launcher for one package binary into the global command directory.
+to npmwork_global_link with project as a view of text and name as a view of text and relative_bin as a view of text:
+    let bin_dir be npmwork_global_bin
+    fs_ensure_directory with bin_dir
+    let package be npmwork_global_package_dir with name
+    let source be path_join with package and (copy of relative_bin)
+    let command be npmwork_text_bin_name with name
+    let target be path_join with (copy of bin_dir) and (copy of command)
+    let script be "#!/bin/sh\n"
+    set script to script + "# launcher written by npmwork\n"
+    set script to script + "exec node " + (text_quote with source) + " \"$@\"\n"
+    if not (fs_write with target and script):
+        give back ["error", "can't write " + target]
+    run command ("chmod +x " + (text_quote with target) + " 2>/dev/null")
+    give back ["ok", command]
+
+# Remove a global command launcher.
+to npmwork_global_unlink with name as a view of text:
+    let command be npmwork_text_bin_name with name
+    let bin_dir be npmwork_global_bin
+    let target be path_join with (copy of bin_dir) and (copy of command)
+    fs_remove_tree with target
+    give back ["ok", "removed " + command]
+
+# The global command names currently installed.
+to npmwork_global_commands:
+    let bin_dir be npmwork_global_bin
+    if not (fs_is_directory with bin_dir):
+        give back an empty list of text
+    give back fs_list with bin_dir
+
+# A readable global prefix report.
+to npmwork_global_report:
+    let root be npmwork_global_root
+    let out be "prefix: " + root + "\n"
+    set out to out + "bin: " + (npmwork_global_bin) + "\n"
+    for each command in (npmwork_global_commands):
+        set out to out + "  " + command + "\n"
+    give back out

@@ -1,0 +1,27 @@
+# semver.rk — installwork's view of the shared semver module.
+#
+# The implementation lives in `ruskmods/semver/semver.rk` so other packages can
+# use the same version rules. This wrapper gives installwork a few `installwork_`
+# names and keeps the framework import list readable.
+
+import "../semver/semver"
+
+# True when `version` is a dotted number installwork can compare.
+to installwork_semver_valid with version as a view of text:
+    give back semver_valid with version
+
+# -1, 0, or 1 when `left` is older than, equal to, or newer than `right`.
+to installwork_semver_compare with left as a view of text and right as a view of text:
+    give back semver_compare with left and right
+
+# True when `version` matches a requirement such as `^1.2.0`.
+to installwork_semver_satisfies with version as a view of text and spec as a view of text:
+    give back semver_satisfies with version and spec
+
+# The package name at the front of a `name spec` requirement.
+to installwork_semver_requirement_name with requirement as a view of text:
+    give back semver_requirement_name with requirement
+
+# The version spec after the package name, or `*`.
+to installwork_semver_requirement_spec with requirement as a view of text:
+    give back semver_requirement_spec with requirement

@@ -1,0 +1,141 @@
+# platform.rk — operating system, architecture, libc, and environment facts.
+#
+# Import it with `import "platform/platform"`. Every public name starts with
+# `platform_`. Environment variables are read first; when they are absent the
+# module runs `uname -s`, `uname -m`, `ldd --version`, and `uname -a`, capturing
+# their output in files under TMPDIR because `run command` shares stdout.
+# libc detection is best-effort: `ldd --version` is a convention, not a portable
+# API, so an unrecognised answer becomes "unknown". Paths are POSIX-oriented.
+
+import "text"
+import "path"
+
+# Quote text for `/bin/sh` with single quotes.
+to platform_quote with s as a view of text:
+    give back text_quote with (copy of s)
+
+# Read one environment variable; unset means empty text.
+to platform_env with name as a view of text:
+    give back environment name
+
+# The temporary directory used for captured command output.
+to platform_tmp:
+    let temp be environment "TMPDIR"
+    if temp is not "":
+        give back path_trim_end with temp
+    let other be environment "TEMP"
+    if other is not "":
+        give back path_trim_end with other
+    give back "/tmp"
+
+# The user's home directory, from HOME or from `cd && pwd`.
+to platform_home:
+    let home be environment "HOME"
+    if home is not "":
+        give back path_trim_end with home
+    let path be platform_capture_path with "home"
+    run command ("cd && pwd > " + (platform_quote with path))
+    if not (file exists (copy of path)):
+        give back "/"
+    let found be text_trim with (read file (copy of path))
+    if found is "":
+        give back "/"
+    give back found
+
+# A scratch file name for one detected fact.
+to platform_capture_path with name as a view of text:
+    give back path_join with (platform_tmp) and ("rusk-platform-" + (copy of name) + ".txt")
+
+# Run a command with stdout redirected into `path`, then give back the trimmed
+# first line, or `fallback` when the file is missing or empty.
+to platform_shell_text with command_text as a view of text and path as a view of text and fallback as a view of text:
+    run command ((copy of command_text) + " > " + (platform_quote with path))
+    if not (file exists (copy of path)):
+        give back copy of fallback
+    let found be text_trim with (read file (copy of path))
+    if found is "":
+        give back copy of fallback
+    give back found
+
+# A short operating system name: linux, macos, windows, or the lower-cased
+# value reported by uname. RUSK_OS overrides detection.
+to platform_os:
+    let configured be environment "RUSK_OS"
+    if configured is not "":
+        give back text_lower with configured
+    let path be platform_capture_path with "os"
+    let raw be platform_shell_text with "uname -s 2>/dev/null" and path and ""
+    let name be text_lower with raw
+    if name is "linux":
+        give back "linux"
+    if name is "darwin":
+        give back "macos"
+    if (text_contains with name and "mingw") or (text_contains with name and "msys") or (text_contains with name and "cygwin"):
+        give back "windows"
+    if name is "":
+        give back "unknown"
+    give back name
+
+# A normalised machine architecture. RUSK_ARCH overrides detection.
+to platform_arch:
+    let configured be environment "RUSK_ARCH"
+    if configured is not "":
+        give back text_lower with configured
+    let path be platform_capture_path with "arch"
+    let raw be platform_shell_text with "uname -m 2>/dev/null" and path and ""
+    let name be text_lower with raw
+    if name is "x86_64" or name is "amd64":
+        give back "x86_64"
+    if name is "aarch64" or name is "arm64":
+        give back "aarch64"
+    if name is "i386" or name is "i486" or name is "i586" or name is "i686":
+        give back "x86"
+    if name is "":
+        give back "unknown"
+    give back name
+
+# Best-effort libc name: musl, glibc, or unknown. RUSK_LIBC overrides it.
+to platform_libc:
+    let configured be environment "RUSK_LIBC"
+    if configured is not "":
+        give back text_lower with configured
+    let path be platform_capture_path with "libc"
+    let raw be platform_shell_text with "ldd --version 2>&1" and path and ""
+    let lower be text_lower with raw
+    if text_contains with lower and "musl":
+        give back "musl"
+    if (text_contains with lower and "glibc") or (text_contains with lower and "gnu libc"):
+        give back "glibc"
+    give back "unknown"
+
+# True for Windows-like environments.
+to platform_is_windows:
+    if (environment "OS") is "Windows_NT":
+        give back true
+    give back (platform_os) is "windows"
+
+# True on Linux.
+to platform_is_linux:
+    give back (platform_os) is "linux"
+
+# True when libc detection found musl.
+to platform_is_musl:
+    give back (platform_libc) is "musl"
+
+# The shell Rusk's `run command` starts, or /bin/sh as the POSIX default.
+to platform_shell:
+    let shell be environment "SHELL"
+    if shell is not "":
+        give back shell
+    give back "/bin/sh"
+
+# The path separator for the detected platform.
+to platform_path_separator:
+    if platform_is_windows:
+        give back "\\"
+    give back "/"
+
+# The whole `uname -a` line, trimmed, or empty text when unavailable.
+to platform_uname:
+    let path be platform_capture_path with "uname"
+    give back platform_shell_text with "uname -a 2>/dev/null" and path and ""

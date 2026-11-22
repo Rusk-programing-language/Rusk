@@ -1,0 +1,169 @@
+# http.rk — HTTP requests through the external `curl` program.
+#
+# Import it with `import "http/http"`. Every public name starts with `http_`.
+# Rusk has no native TLS and its socket primaries are IPv4-only, so this module
+# does not use them: `curl` supplies TLS, DNS, redirects, retries, and timeouts.
+# Responses are written to files because `run command` shares standard output;
+# capture the status with a redirect and read the files back with Rusk primaries.
+# Paths are POSIX-oriented and are quoted for `/bin/sh` before use.
+
+import "text"
+import "path"
+
+# Quote text for `/bin/sh` with single quotes.
+to http_quote with s as a view of text:
+    give back text_quote with (copy of s)
+
+# A scratch directory below TMPDIR (or /tmp) for one request.
+to http_tmp_dir with name as a view of text:
+    let temp be environment "TMPDIR"
+    if temp is "":
+        set temp to "/tmp"
+    let clean be path_trim_end with temp
+    give back path_join with clean and (copy of name)
+
+# The body file for a request name.
+to http_body_path with name as a view of text:
+    give back path_join with (http_tmp_dir with name) and "body"
+
+# The header file for a request name (curl's -D output).
+to http_header_path with name as a view of text:
+    give back path_join with (http_tmp_dir with name) and "headers"
+
+# The status file for a request name (curl's -w output).
+to http_status_path with name as a view of text:
+    give back path_join with (http_tmp_dir with name) and "status"
+
+# The numeric HTTP code in a saved status file, or -1 when it is not a code.
+# `curl -w "%{http_code}"` writes exactly three digits, including "000" when
+# the request never completed.
+to http_status_number with status_text as a view of text:
+    let t be text_trim with status_text
+    if length of t is not 3:
+        give back -1
+    let digits be "0123456789"
+    for each i from 1 to 3:
+        if (text_index_of with digits and (letter i of t)) is 0:
+            give back -1
+    give back text_to_number with t
+
+# A short reason phrase for a status code, or empty text when unknown.
+to http_status_text with code as a number:
+    if code is 200:
+        give back "OK"
+    if code is 201:
+        give back "Created"
+    if code is 202:
+        give back "Accepted"
+    if code is 204:
+        give back "No Content"
+    if code is 301:
+        give back "Moved Permanently"
+    if code is 302:
+        give back "Found"
+    if code is 303:
+        give back "See Other"
+    if code is 304:
+        give back "Not Modified"
+    if code is 307:
+        give back "Temporary Redirect"
+    if code is 308:
+        give back "Permanent Redirect"
+    if code is 400:
+        give back "Bad Request"
+    if code is 401:
+        give back "Unauthorized"
+    if code is 403:
+        give back "Forbidden"
+    if code is 404:
+        give back "Not Found"
+    if code is 405:
+        give back "Method Not Allowed"
+    if code is 409:
+        give back "Conflict"
+    if code is 410:
+        give back "Gone"
+    if code is 429:
+        give back "Too Many Requests"
+    if code is 500:
+        give back "Internal Server Error"
+    if code is 501:
+        give back "Not Implemented"
+    if code is 502:
+        give back "Bad Gateway"
+    if code is 503:
+        give back "Service Unavailable"
+    if code is 504:
+        give back "Gateway Timeout"
+    give back ""
+
+# Fetch `url` into the three given files. Retries and the timeout are passed to
+# curl, so `curl` owns their behaviour. Gives back the HTTP status number from
+# the status file (0 or -1 when curl never produced a code).
+to http_fetch with url as a view of text and body_path as a view of text and header_path as a view of text and status_path as a view of text and retries as a number and timeout as a number:
+    let body_dir be path_dir with (copy of body_path)
+    let header_dir be path_dir with (copy of header_path)
+    let status_dir be path_dir with (copy of status_path)
+    let prepare be "mkdir -p " + (http_quote with body_dir) + " " + (http_quote with header_dir) + " " + (http_quote with status_dir)
+    run command prepare
+    write "000" to file (copy of status_path)
+    let command_text be "curl -sS -L --retry " + (text_from_number with retries) + " --max-time " + (text_from_number with timeout) + " -o " + (http_quote with body_path) + " -D " + (http_quote with header_path) + " -w \"%{http_code}\" " + (http_quote with url) + " > " + (http_quote with status_path)
+    run command command_text
+    give back http_status_number with (read file (copy of status_path))
+
+# The value of one response header from a saved header file. Names are matched
+# without regard to case; an absent header gives empty text.
+to http_header with name as a view of text and header_path as a view of text:
+    if not (file exists (copy of header_path)):
+        give back ""
+    let raw be read file (copy of header_path)
+    let wanted be text_lower with name
+    for each line in (text_lines with raw):
+        let at be text_index_of with line and ":"
+        if at is 0:
+            continue
+        let field be text_trim with (part 1 to (at - 1) of line)
+        if (text_lower with field) is wanted:
+            give back text_trim with (part (at + 1) to (length of line) of line)
+    give back ""
+
+# The ETag response header, or empty text.
+to http_etag with header_path as a view of text:
+    give back http_header with "etag" and header_path
+
+# The Last-Modified response header, or empty text.
+to http_last_modified with header_path as a view of text:
+    give back http_header with "last-modified" and header_path
+
+# The 1-based slot of one letter in a URL-safe alphabet, or 0 when absent.
+to http_char_slot with ch as a view of text:
+    let alphabet be "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:/?#[]@!$&'()*+,;=% "
+    give back text_index_of with alphabet and ch
+
+# A short, deterministic text hash used for scratch names and cache keys.
+to http_cache_key with url as a view of text:
+    let h1 be 2166136261
+    let h2 be 5381
+    let i be 1
+    let n be length of url
+    while i is at most n:
+        let slot be http_char_slot with (letter i of url)
+        let next1 be h1 * 33 + slot
+        set h1 to next1 - (next1 / 1000003) * 1000003
+        let next2 be h2 * 31 + slot
+        set h2 to next2 - (next2 / 1000033) * 1000033
+        set i to i + 1
+    give back "h" + (text_from_number with h1) + "-" + (text_from_number with h2) + "-" + (text_from_number with n)
+
+# GET a URL and give back its body. Uses two retries and a 30 second timeout.
+to http_get with url as a view of text:
+    give back http_get_with_retries with url and 2 and 30
+
+# GET a URL with an explicit curl retry count and timeout in seconds.
+to http_get_with_retries with url as a view of text and retries as a number and timeout as a number:
+    let name be "http-" + (http_cache_key with url)
+    let body be http_body_path with name
+    let headers be http_header_path with name
+    let status be http_status_path with name
+    http_fetch with url and body and headers and status and retries and timeout
+    give back read file body

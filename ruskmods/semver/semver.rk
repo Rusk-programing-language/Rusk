@@ -1,0 +1,192 @@
+# semver.rk — semantic versions and requirements written in Rusk.
+#
+# Versions are decimal, dot-separated numbers: `1`, `1.2`, `1.2.3`, or four
+# parts. Missing parts pad with zero, so `1.2` and `1.2.0` compare equal.
+# Pre-release labels are not supported: `1.2.3-rc1` is rejected.
+#
+# Requirement specs: `*`, `1.2.3`, `=`/`==` exact, `>=`, `<=`, `>`, `<`, `^`
+# (compatible within a major, or within a minor when major is zero), `~`
+# (within a minor), `1.2.*`, and `1.*`.
+#
+# Public names all start with `semver_`; text work uses the shared `text`
+# module.
+
+import "text"
+
+# One dotted piece as a non-negative number, or -1 when it isn't decimal.
+to semver_parse_part with piece as a view of text:
+    let n be length of piece
+    if n is 0:
+        give back -1
+    let i be 1
+    while i is at most n:
+        if (text_digit with (letter i of piece)) is less than 0:
+            give back -1
+        set i to i + 1
+    give back text_to_number with piece
+
+# The dotted parts as numbers. Invalid text gives an empty list.
+to semver_parts with v as a view of text:
+    let out be an empty list of numbers
+    if not (semver_valid with v):
+        give back out
+    for each piece in (text_split with v and "."):
+        add (semver_parse_part with piece) to out
+    give back out
+
+# True when `v` is one to four dotted runs of decimal digits.
+to semver_valid with v as a view of text:
+    let parts be text_split with v and "."
+    if length of parts is 0 or length of parts is more than 4:
+        give back false
+    for each piece in parts:
+        if (semver_parse_part with piece) is less than 0:
+            give back false
+    give back true
+
+# Part `index` (1-based), or 0 when the version has fewer parts.
+to semver_part with v as a view of text and index as a number:
+    let parts be semver_parts with v
+    if index is less than 1 or index is more than length of parts:
+        give back 0
+    give back item index of parts
+
+# The major, minor, and patch numbers, padding missing parts with zero.
+to semver_major with v as a view of text:
+    give back semver_part with v and 1
+
+to semver_minor with v as a view of text:
+    give back semver_part with v and 2
+
+to semver_patch with v as a view of text:
+    give back semver_part with v and 3
+
+# A valid version in `major.minor.patch` form; "" when it is invalid.
+to semver_pad with v as a view of text:
+    if not (semver_valid with v):
+        give back ""
+    let major be text_from_number with (semver_major with v)
+    let minor be text_from_number with (semver_minor with v)
+    let patch be text_from_number with (semver_patch with v)
+    give back major + "." + minor + "." + patch
+
+# -1 when `a` is older, 0 when equal, 1 when newer.
+to semver_compare with a as a view of text and b as a view of text:
+    let pa be semver_parts with a
+    let pb be semver_parts with b
+    let count be length of pa
+    if length of pb is more than count:
+        set count to length of pb
+    let i be 1
+    while i is at most count:
+        let x be 0
+        let y be 0
+        if i is at most length of pa:
+            set x to item i of pa
+        if i is at most length of pb:
+            set y to item i of pb
+        if x is less than y:
+            give back -1
+        if x is more than y:
+            give back 1
+        set i to i + 1
+    give back 0
+
+# True when two versions compare equal.
+to semver_equal with a as a view of text and b as a view of text:
+    give back (semver_compare with a and b) is 0
+
+# True when `v` matches `spec`.
+to semver_satisfies with v as a view of text and spec as a view of text:
+    let s be text_trim with spec
+    if s is "" or s is "*":
+        give back true
+    if length of s is at least 2 and (part (length of s - 1) to (length of s) of s) is ".*":
+        let prefix_text be part 1 to (length of s - 2) of s
+        if v is prefix_text:
+            give back true
+        give back (text_starts_with with v and (prefix_text + "."))
+    if length of s is at least 2 and (part 1 to 2 of s) is ">=":
+        give back (semver_compare with v and (part 3 to (length of s) of s)) is at least 0
+    if length of s is at least 2 and (part 1 to 2 of s) is "<=":
+        give back (semver_compare with v and (part 3 to (length of s) of s)) is at most 0
+    if length of s is at least 2 and (part 1 to 2 of s) is "==":
+        give back (semver_compare with v and (part 3 to (length of s) of s)) is 0
+    if length of s is at least 1 and (letter 1 of s) is ">":
+        give back (semver_compare with v and (part 2 to (length of s) of s)) is 1
+    if length of s is at least 1 and (letter 1 of s) is "<":
+        give back (semver_compare with v and (part 2 to (length of s) of s)) is -1
+    if length of s is at least 1 and (letter 1 of s) is "=":
+        give back (semver_compare with v and (part 2 to (length of s) of s)) is 0
+    if length of s is at least 1 and (letter 1 of s) is "^":
+        let base be part 2 to (length of s) of s
+        if (semver_compare with v and base) is less than 0:
+            give back false
+        let major be semver_major with base
+        if major is more than 0:
+            give back (semver_major with v) is major
+        give back (semver_major with v) is 0 and (semver_minor with v) is (semver_minor with base)
+    if length of s is at least 1 and (letter 1 of s) is "~":
+        let tilde_base be part 2 to (length of s) of s
+        if (semver_compare with v and tilde_base) is less than 0:
+            give back false
+        give back (semver_major with v) is (semver_major with tilde_base) and (semver_minor with v) is (semver_minor with tilde_base)
+    give back (semver_compare with v and s) is 0
+
+# The package name at the front of a `name spec` requirement.
+to semver_requirement_name with requirement as a view of text:
+    let r be text_trim with requirement
+    let n be length of r
+    let i be 1
+    while i is at most n:
+        let ch be letter i of r
+        if ch is " " or ch is "\t" or ch is ">" or ch is "<" or ch is "=" or ch is "^" or ch is "~":
+            if i is 1:
+                give back ""
+            give back part 1 to (i - 1) of r
+        set i to i + 1
+    give back r
+
+# The spec after the name, or `*` when the requirement has no spec.
+to semver_requirement_spec with requirement as a view of text:
+    let r be text_trim with requirement
+    let n be length of r
+    let start be 0
+    let i be 1
+    while i is at most n:
+        let ch be letter i of r
+        if ch is " " or ch is "\t":
+            if start is 0:
+                set start to i + 1
+        otherwise if ch is ">" or ch is "<" or ch is "=" or ch is "^" or ch is "~":
+            if start is 0:
+                set start to i
+        set i to i + 1
+    if start is 0 or start is more than n:
+        give back "*"
+    give back text_trim with (part start to n of r)
+
+# True when a requirement has a name and a spec this module understands.
+to semver_requirement_valid with requirement as a view of text:
+    let name be semver_requirement_name with requirement
+    let spec be semver_requirement_spec with requirement
+    if name is "":
+        give back false
+    if spec is "*":
+        give back true
+    let n be length of spec
+    let start be 1
+    if n is at least 2:
+        let two be part 1 to 2 of spec
+        if two is ">=" or two is "<=" or two is "==":
+            set start to 3
+    if start is 1 and n is at least 1:
+        let one be letter 1 of spec
+        if one is ">" or one is "<" or one is "=" or one is "^" or one is "~":
+            set start to 2
+    if start is more than n:
+        give back false
+    let body be part start to n of spec
+    if (text_ends_with with body and ".*"):
+        give back semver_valid with (part 1 to (length of body - 2) of body)
+    give back semver_valid with body

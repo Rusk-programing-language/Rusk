@@ -126,9 +126,10 @@ skips it; `--no-startup` or `TOASTSET_NO_STARTUP=1` skips the question.
 `PATH` edit, `--version` to pin a release, or `--bin-dir` to choose the
 installation directory.
 
-Release archives include both installer scripts and the whole `rusklib/` source
-tree. The terminal UI library is always at `rusklib/wheat/` in the archive and
-on GitHub `main`; start with [`rusklib/wheat/README.md`](../rusklib/wheat/README.md).
+Release archives include both installer scripts and the whole `rusklib/`,
+`ruskmods/`, and `fastlib/` source trees. The terminal UI library is always at
+`rusklib/wheat/` in the archive and on GitHub `main`; start with
+[`rusklib/wheat/README.md`](../rusklib/wheat/README.md).
 
 Check the version:
 
@@ -921,8 +922,8 @@ full-screen session, `stop with` restores the terminal first.
 
 `import` includes another file once. A relative path is resolved next to the
 importing file, then in `ruskmods/`, `rusklib/`, and `fastlib/` beside it, then
-in those same places in each parent directory, then in the current directory.
-Cycles are detected.
+in those same places in each parent directory, then in the current directory,
+and finally beside the compiler. Cycles are detected.
 
 ```rusk
 import "lib/greetings"
@@ -936,8 +937,16 @@ say math_square with 12
 
 A bare name (no slash) may also name a module directory, so `import "wheat"`
 finds `rusklib/wheat/wheat.rk` and `import "simple"` finds
-`fastlib/simple/simple.rk`. This is why a program in `examples/` can write
-`import "math"` and still reach the checkout's modules.
+`fastlib/simple/simple.rk`. A path with a slash also finds a same-named file
+inside a folder: `import "json/json"` finds `ruskmods/json/json.rk` and
+`import "rusklib/http"` finds `rusklib/http/http.rk`. This is why a program in
+`examples/` or a program started outside the checkout can still reach the
+bundled modules.
+
+The layout rule is **one folder = one module = one public prefix**. Generic
+modules live at `ruskmods/<name>/<name>.rk`, system/IO modules at
+`rusklib/<name>/<name>.rk`, and installer frameworks keep their own folder with
+internal modules. A root `<name>.rk` file is only a compatibility shim.
 
 A plain import is textual inclusion into one global namespace. Modules that
 want separation use a name:
@@ -1004,22 +1013,43 @@ export "math.rk"
 say double with 21        # 42
 ```
 
-The checkout also ships libraries written in Rusk. `ruskmods/` holds focused
+The checkout also ships libraries written in Rusk. `ruskmods/` holds generic
 modules (`math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`,
-`os`, `path`, `shutils`) and the `installwork/` installer framework.
-`rusklib/` adds file and archive helpers, the `wheat/` terminal UI library, and
-one bundle. `fastlib/` adds libraries whose bottom layer is a language primary,
-starting with the `simple/` GUI:
+`os`, `path`, `shutils`, `text`, `bytes`, `maps`, `result`, `semver`, `manifest`,
+`lock`, `archive`, `fs`, `sha`, `gzip`) and the `installwork/` and `npmwork/`
+installer frameworks. `rusklib/` adds system/IO modules (`http`, `cache`,
+`fs_fast`, `platform`, `term`, `bench`), file helpers, the `wheat/` terminal UI
+library, and one bundle. `fastlib/` adds libraries whose bottom layer is a
+language primary, starting with the `simple/` GUI:
 
 ```rusk
 import "date"
+import "semver"
+import "npmwork"
+import "rusklib/http"
 import "rusklib/files"
 import "wheat/wheat"
 import "simple/simple"
 
 say date_format_iso with 2026 and 11 and 12
+say semver_valid with "1.2.3"
+say http_cache_key with "https://example.com"
 say files_exists with "notes.txt"
 say wheat_box_around with "hello" and 0 and "rounded"
+```
+
+The exact imports from the module guide all work from anywhere:
+
+```rusk
+import "semver"
+import "json/json"
+import "manifest"
+import "lock"
+import "npmwork"
+import "rusklib/http"
+import "rusklib/cache"
+import "rusklib/term"
+import "rusklib/rusklib"
 ```
 
 For everything at once:
@@ -1033,8 +1063,8 @@ say files_size with "notes.txt"
 say wheat_bar with 3 and 10 and 10
 ```
 
-Each module keeps a prefix (`date_`, `path_`, `files_`, `wheat_`, `simple_`, ...)
-because a plain import shares one global namespace. See
+Each module keeps a prefix (`date_`, `path_`, `files_`, `http_`, `npmwork_`,
+`wheat_`, `simple_`, ...) because a plain import shares one global namespace. See
 [`ruskmods/README.md`](../ruskmods/README.md),
 [`rusklib/README.md`](../rusklib/README.md),
 [`rusklib/wheat/README.md`](../rusklib/wheat/README.md), and
@@ -1352,6 +1382,31 @@ The registry is a local directory tree, not a server; `--registry PATH` and
 `--prefix PATH` (or `RUSK_REGISTRY` / `RUSK_PREFIX`) choose where it looks and
 installs. The default prefix is `~/.rusk`.
 
+### Creating a project with npmwork
+
+`import "npmwork"` brings in the JS/TS framework. Its launcher follows the same
+two-line pattern:
+
+```rusk
+# npmwork.rk
+import "npmwork/cli"
+npmwork_cli_main
+```
+
+```console
+$ rusk build npmwork.rk -o npmwork
+$ ./npmwork init demo
+$ ./npmwork check --dir demo
+$ ./npmwork global
+```
+
+`npmwork` reads `package.json`, builds a dependency plan with `semver` rules,
+downloads tarballs with `rusklib/http`, places them under `node_modules`, and
+records the result in `npm-lock.rk`. It uses `NPM_CONFIG_REGISTRY` and
+`NPM_CONFIG_PREFIX` when set. It does not run npm lifecycle scripts and its
+registry reader is deliberately small: it builds URLs and downloads tarballs,
+not a full npm metadata index.
+
 ## 14. What ships with Rusk
 
 Everything in this section is present in the v1.2.2 tree. The helper libraries
@@ -1359,9 +1414,11 @@ are ordinary Rusk source, not compiler magic, so you can read or copy them.
 
 | Path | What it is |
 |---|---|
-| `ruskmods/` | standard modules: `math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`, `shutils` |
-| `ruskmods/installwork/` | package registry, version requirements, dependency resolver, archives, install prefix, and the `installwork` CLI |
-| `rusklib/files.rk` | file and directory helpers that copy, size, and walk trees |
+| `ruskmods/` | generic modules: `math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`, `shutils`, `text`, `bytes`, `maps`, `result`, `semver`, `manifest`, `lock`, `archive`, `fs`, `sha`, `gzip` |
+| `ruskmods/installwork/` | Rusk package registry, version requirements, resolver, archives, install prefix, and CLI |
+| `ruskmods/npmwork/` | npm/JS/TS framework: manifest, registry, resolver, installer, lock, global, project, and CLI |
+| `rusklib/http/`, `cache/`, `fs_fast/`, `platform/`, `term/`, `bench/` | system/IO helpers that shell out or read the environment |
+| `rusklib/files/files.rk` | canonical file and directory helpers; `rusklib/files.rk` forwards to it |
 | `rusklib/rusklib.rk` | one import that pulls in the whole helper bundle |
 | `rusklib/wheat/` | **wheat**, the terminal UI library: widths, colours, styles, boxes, tables, progress bars, panels, layout, and themes |
 | `fastlib/simple/` | **simple**, the native GUI library: windows, buttons, labels, fields, events, dialogs, themes, and layouts |
@@ -1447,8 +1504,8 @@ src/main.rs           command-line interface
 tests/e2e.rs          bake and run compiled programs
 tests/cli.rs          CLI and piped-session tests
 benches/compiler.rs   codegen, size, and runtime benchmark
-ruskmods/             standard modules written in Rusk, plus installwork/
-rusklib/              file helpers, the wheat terminal UI, and one-import bundle
+ruskmods/             generic modules plus installwork/ and npmwork/
+rusklib/              system/IO modules, files/, wheat/, and one-import bundle
 selfhost/             a Rusk interpreter written in Rusk
 ```
 
@@ -1518,8 +1575,9 @@ Implemented and checked:
 - A growable `mmap`-backed heap with a free list
 - Line REPL and native full-screen TUI
 - A Rusk-in-Rusk interpreter (`selfhost/interpreter.rk`)
-- Standard modules under `ruskmods/`, the `installwork/` installer framework,
-  and file helpers plus the `wheat/` terminal UI in `rusklib/`
+- Generic modules and the `installwork/` and `npmwork/` frameworks under
+  `ruskmods/`; system/IO helpers, file helpers, and the `wheat/` terminal UI in
+  `rusklib/`
 - Native GUI primaries on Windows x86-64 and the `simple/` library in `fastlib/`
 - A `Ruskfile` manifest and task runner, found automatically when `rusk` runs
   with no arguments
@@ -1529,9 +1587,9 @@ Not implemented yet:
 - Full compiler self-hosting; the interpreter is the bootstrap stage
 - A global x86-64 register allocator that keeps values across branches and
   calls
-- Threads, signals, a full GUI toolkit beyond `simple`'s controls, and a
-  networked package registry (the `installwork/` registry is a local directory
-  tree, not a server)
+- Threads, signals, and a full GUI toolkit beyond `simple`'s controls
+- A full npm metadata index or lifecycle scripts: `npmwork` builds registry URLs
+  and downloads tarballs; `installwork/` uses a local directory tree
 - IPv6, UDP, DNS, TLS, socket timeouts, and non-blocking sockets
 - Windows beyond the current console and `simple` GUI milestone: `file exists`,
   directories, process launch, sockets, and relocatable images

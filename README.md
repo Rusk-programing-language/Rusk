@@ -435,26 +435,33 @@ A bare module name is resolved next to the importing file, then in `ruskmods/`,
 `examples/`, `import "wheat/table"` finds `rusklib/wheat/table.rk`, and
 `import "simple/simple"` finds `fastlib/simple/simple.rk`.
 
-The checkout ships small Rusk libraries under `ruskmods/`: `math`, `date`,
-`time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`, `path`, and
-`shutils`. `ruskmods/installwork/` is an installer framework with a registry,
-version specs, a dependency resolver, archives, an install prefix, and a CLI.
-The `rusklib/` folder adds higher-level file and archive helpers, the `wheat`
-terminal UI library, and a bundle that imports everything. The root-level
+The checkout ships Rusk libraries under `ruskmods/`: focused generic modules
+(`math`, `date`, `time`, `random`, `statistics`, `json`, `toml`, `sys`, `os`,
+`path`, `shutils`, `text`, `bytes`, `maps`, `result`, `semver`, `manifest`,
+`lock`, `archive`, `fs`, `sha`, `gzip`) and the `installwork/` and `npmwork/`
+installer frameworks. The `rusklib/` folder adds system/IO helpers (`http`,
+`cache`, `fs_fast`, `platform`, `term`, `bench`), higher-level file helpers, the
+`wheat` terminal UI library, and a bundle that imports everything. The root-level
 [`wheat/`](wheat/) folder is a signpost to [`rusklib/wheat/`](rusklib/wheat/).
-`fastlib/` holds
-libraries built on language primaries, starting with the `simple` GUI:
+`fastlib/` holds libraries built on language primaries, starting with the
+`simple` GUI:
 
 ```rusk
+import "semver"
+import "npmwork"
+import "rusklib/http"
 import "rusklib/rusklib"
+say semver_valid with "1.2.3"
+say http_cache_key with "https://example.com"
 say date_format_iso with 2026 and 11 and 12
 say files_exists with "notes.txt"
 say wheat_box_around with "hello" and 0 and "rounded"
 ```
 
-Every public name carries its module's prefix (`date_`, `files_`, `wheat_`,
-`simple_`, and so on) because a plain import shares one global namespace. Import
-one module directly when a program does not need the bundle. See
+Every public name carries its module's prefix (`date_`, `files_`, `http_`,
+`npmwork_`, `wheat_`, `simple_`, and so on) because a plain import shares one
+global namespace. Import one module directly when a program does not need the
+bundle. See
 [`ruskmods/README.md`](ruskmods/README.md),
 [`rusklib/README.md`](rusklib/README.md), and
 [`fastlib/README.md`](fastlib/README.md) for the function lists.
@@ -735,6 +742,12 @@ installwork install demo
 ```
 
 The registry is a local directory tree of package versions; there is no server.
+
+For JS/TS projects, `import "npmwork"` adds a second framework with the same
+shape: a `package.json` reader, a `semver` resolver, `curl`-backed registry and
+tarball downloads, `node_modules` installation, a text lock file, global
+prefixes, project commands, and a CLI. It does not run npm lifecycle scripts or
+parse a full npm metadata index.
 
 ## How it works
 

@@ -1,0 +1,68 @@
+# registry.rk — npm registry URLs and downloads for npmwork.
+#
+# Network access goes through the bundled `rusklib/http` module, which uses
+# `curl` for DNS and TLS. This module only builds npm URLs and chooses local
+# cache paths; it does not parse a package registry index. All public names use
+# the `npmwork_registry_` prefix.
+
+import "text"
+import "path"
+import "http"
+import "cache"
+
+# The default registry. npm's own environment variable wins.
+to npmwork_registry_default:
+    let configured be environment "NPM_CONFIG_REGISTRY"
+    if configured is not "":
+        give back configured
+    give back "https://registry.npmjs.org"
+
+# Remove a trailing slash from a registry base URL.
+to npmwork_registry_base with url as a view of text:
+    let t be text_trim with url
+    let n be length of t
+    if n is 0:
+        give back "https://registry.npmjs.org"
+    if (letter n of t) is "/":
+        give back part 1 to (n - 1) of t
+    give back t
+
+# The metadata URL for one package.
+to npmwork_registry_metadata_url with base as a view of text and name as a view of text:
+    give back (npmwork_registry_base with base) + "/" + name
+
+# The published tarball URL for one package version. Scoped packages keep their
+# `@scope/name` prefix in the URL and use the short name in the file name.
+to npmwork_registry_tarball_url with base as a view of text and name as a view of text and version as a view of text:
+    let tarball be npmwork_text_tarball_name with name and version
+    give back (npmwork_registry_metadata_url with base and name) + "/-/" + tarball
+
+# The cache key for a package version.
+to npmwork_registry_cache_key with name as a view of text and version as a view of text:
+    give back "npm:" + name + ":" + version
+
+# The cache path for a package tarball.
+to npmwork_registry_cache_path with name as a view of text and version as a view of text:
+    give back cache_tarball_path with (npmwork_registry_cache_key with name and version)
+
+# Fetch package metadata as text. An empty result means the fetch failed.
+to npmwork_registry_fetch_metadata with base as a view of text and name as a view of text:
+    give back http_get with (npmwork_registry_metadata_url with base and name)
+
+# Fetch a package tarball into the cache. Gives back the HTTP status number.
+to npmwork_registry_fetch_tarball with base as a view of text and name as a view of text and version as a view of text:
+    let url be npmwork_registry_tarball_url with base and name and version
+    let key be npmwork_registry_cache_key with name and version
+    let target be npmwork_registry_cache_path with name and version
+    let headers be http_header_path with key
+    let status be http_status_path with key
+    give back http_fetch with url and target and headers and status and 2 and 20
+
+# Metadata for the ETag of a package, when the server supplied one.
+to npmwork_registry_etag with base as a view of text and name as a view of text:
+    let url be npmwork_registry_metadata_url with base and name
+    let slot be "http-" + (http_cache_key with url)
+    let headers be http_header_path with slot
+    if not (file exists headers):
+        give back ""
+    give back http_etag with headers

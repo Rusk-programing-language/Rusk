@@ -1,0 +1,184 @@
+# term.rk — terminal colours and progress strings.
+#
+# Import it with `import "term/term"`. Every public name starts with `term_`.
+# This module only builds text; it does not own the screen or print anything.
+# Colours follow WHEAT_COLOR / NO_COLOR / COLORTERM / FORCE_COLOR / TERM, and
+# Rusk cannot detect a TTY portably, so an empty TERM is treated as no colour.
+# Escape strings contain real ANSI CSI codes; write them to a terminal yourself.
+
+import "text"
+
+# True when ANSI colour and style escapes should be emitted.
+to term_supports_color:
+    let forced be environment "WHEAT_COLOR"
+    let lower be text_lower with forced
+    if lower is "none" or lower is "off" or lower is "0" or lower is "false":
+        give back false
+    if environment "NO_COLOR" is not "":
+        give back false
+    let color_term be text_lower with (environment "COLORTERM")
+    if color_term is "truecolor" or color_term is "24bit":
+        give back true
+    let term_name be text_lower with (environment "TERM")
+    if term_name is "dumb" or term_name is "unknown" or term_name is "":
+        give back false
+    let force_color be environment "FORCE_COLOR"
+    if force_color is "0" or force_color is "false":
+        give back false
+    if force_color is not "":
+        give back true
+    give back true
+
+# Reset every style.
+to term_reset:
+    give back "[0m"
+
+# The SGR parameter for a colour name, or empty text for an unknown colour.
+to term_color_code with name as a view of text:
+    let n be text_lower with name
+    if n is "black":
+        give back "30"
+    if n is "red":
+        give back "31"
+    if n is "green":
+        give back "32"
+    if n is "yellow":
+        give back "33"
+    if n is "blue":
+        give back "34"
+    if n is "magenta":
+        give back "35"
+    if n is "cyan":
+        give back "36"
+    if n is "white":
+        give back "37"
+    if n is "gray" or n is "grey" or n is "bright_black":
+        give back "90"
+    if n is "bright_red":
+        give back "91"
+    if n is "bright_green":
+        give back "92"
+    if n is "bright_yellow":
+        give back "93"
+    if n is "bright_blue":
+        give back "94"
+    if n is "bright_magenta":
+        give back "95"
+    if n is "bright_cyan":
+        give back "96"
+    if n is "bright_white":
+        give back "97"
+    if n is "default":
+        give back "39"
+    give back ""
+
+# Wrap text in a foreground colour, or return it unchanged when colour is off.
+to term_color with name as a view of text and body as a view of text:
+    if not term_supports_color:
+        give back copy of body
+    let code be term_color_code with name
+    if code is "":
+        give back copy of body
+    give back "[" + code + "m" + (copy of body) + "[0m"
+
+# Bold text, or the original text when styling is off.
+to term_bold with body as a view of text:
+    if not term_supports_color:
+        give back copy of body
+    give back "[1m" + (copy of body) + "[0m"
+
+# Dim text, or the original text when styling is off.
+to term_dim with body as a view of text:
+    if not term_supports_color:
+        give back copy of body
+    give back "[2m" + (copy of body) + "[0m"
+
+# A single-line progress bar with a trailing percentage. No escapes are added.
+to term_progress with done as a number and total as a number and width as a number:
+    let bar_width be width
+    if bar_width is less than 0:
+        set bar_width to 0
+    let percent be 0
+    if total is more than 0:
+        set percent to (done * 100 + total / 2) / total
+    if percent is less than 0:
+        set percent to 0
+    if percent is more than 100:
+        set percent to 100
+    let filled be 0
+    if total is more than 0:
+        set filled to (done * bar_width + total / 2) / total
+    if filled is less than 0:
+        set filled to 0
+    if filled is more than bar_width:
+        set filled to bar_width
+    give back "[" + (text_repeat with "█" and filled) + (text_repeat with "░" and (bar_width - filled)) + "] " + (text_from_number with percent) + "%"
+
+# A progress bar with a padded label on the left.
+to term_progress_labelled with label as a view of text and done as a number and total as a number and width as a number:
+    let caption be text_take with label and 16
+    let padding be 16 - (length of caption)
+    give back caption + (text_repeat with " " and padding) + " " + (term_progress with done and total and width)
+
+# A ten-step gauge with its percentage written inside the filled part.
+to term_gauge with percent as a number and width as a number:
+    let value be percent
+    if value is less than 0:
+        set value to 0
+    if value is more than 100:
+        set value to 100
+    let bar_width be width
+    if bar_width is less than 12:
+        set bar_width to 12
+    let label be (text_from_number with value) + "%"
+    let label_size be length of label
+    let full be (value * bar_width + 50) / 100
+    let start be full - label_size / 2
+    if start is less than 0:
+        set start to 0
+    if start + label_size is more than bar_width:
+        set start to bar_width - label_size
+    let out be ""
+    let i be 0
+    while i is less than bar_width:
+        let glyph be "░"
+        if i is less than full:
+            set glyph to "█"
+        if i is at least start and i is less than (start + label_size):
+            set glyph to letter (i - start + 1) of label
+        set out to out + glyph
+        set i to i + 1
+    give back out
+
+# One spinner frame for a tick count. Advance `frame` on each update.
+to term_spinner with frame as a number:
+    let frames be ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    let count be length of frames
+    let i be frame - (frame / count) * count
+    if i is less than 0:
+        set i to i + count
+    give back item (i + 1) of frames
+
+# A carriage return plus an erase-to-end-of-line sequence.
+to term_clear_line:
+    give back "\r[2K"
+
+# Hide the cursor while drawing progress strings.
+to term_hide_cursor:
+    give back "[?25l"
+
+# Show the cursor again.
+to term_show_cursor:
+    give back "[?25h"
+
+# A titled horizontal rule, clamped to `width` characters.
+to term_rule with title as a view of text and width as a number:
+    let total be width
+    if total is less than 4:
+        set total to 4
+    let caption be text_take with title and (total - 4)
+    let remaining be total - (length of caption) - 2
+    if remaining is less than 0:
+        set remaining to 0
+    let left be remaining / 2
+    give back (text_repeat with "─" and left) + " " + caption + " " + (text_repeat with "─" and (remaining - left))

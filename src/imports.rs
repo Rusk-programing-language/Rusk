@@ -662,6 +662,11 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
         // module in the current directory.
         let bare = !raw.contains('/') && !raw.contains('\\');
         let nested = format!("{raw}.rk");
+        let leaf = raw_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("{name}.rk"))
+            .unwrap_or_else(|| nested.clone());
         let mut roots: Vec<PathBuf> = Vec::new();
         fn add_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
             if root.as_os_str().is_empty() || roots.contains(&root) {
@@ -703,6 +708,14 @@ fn resolve(raw: &str, base: Option<&Path>) -> Result<PathBuf, String> {
                 candidates.push(root.join("rusklib").join(raw).join(&nested));
                 candidates.push(root.join("fastlib").join(raw).join(&nested));
             }
+            // A path such as `rusklib/http` means the module in
+            // `rusklib/http/http.rk`, just as a bare `math` means
+            // `ruskmods/math/math.rk`. Try that shape after the direct files so
+            // `wheat/table` and `json/json` keep working unchanged.
+            candidates.push(root.join(raw_path).join(&leaf));
+            candidates.push(root.join("ruskmods").join(raw_path).join(&leaf));
+            candidates.push(root.join("rusklib").join(raw_path).join(&leaf));
+            candidates.push(root.join("fastlib").join(raw_path).join(&leaf));
         }
     }
 
@@ -815,6 +828,32 @@ mod tests {
         let names = func_names(&program);
         assert!(names.contains(&"math_double".to_string()), "{names:?}");
         assert!(names.contains(&"wheat_nothing".to_string()), "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_import_finds_a_same_named_file_inside_a_folder() {
+        let dir = scratch();
+        write(
+            &dir,
+            "rusklib/http/http.rk",
+            "to http_ready:\n    give back true\n",
+        );
+        write(
+            &dir,
+            "ruskmods/json/json.rk",
+            "to json_ready:\n    give back true\n",
+        );
+        let main = write(
+            &dir,
+            "main.rk",
+            "import \"rusklib/http\"\nimport \"json/json\"\n",
+        );
+
+        let program = expand_file(&main).unwrap();
+        let names = func_names(&program);
+        assert!(names.contains(&"http_ready".to_string()), "{names:?}");
+        assert!(names.contains(&"json_ready".to_string()), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

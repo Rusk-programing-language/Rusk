@@ -1,0 +1,4 @@
+# semver.rk — compatibility shim for ruskmods/semver/semver.rk.
+#
+# `import "semver"` loads the folder module; this file only forwards to it.
+import "semver/semver"

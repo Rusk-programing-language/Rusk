@@ -714,3 +714,107 @@ fn every_fastlib_simple_module_checks() {
         );
     }
 }
+
+#[test]
+fn every_new_module_file_checks() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let modules = [
+        "ruskmods/bytes/bytes.rk",
+        "ruskmods/bytes.rk",
+        "ruskmods/maps/maps.rk",
+        "ruskmods/maps.rk",
+        "ruskmods/result/result.rk",
+        "ruskmods/result.rk",
+        "ruskmods/semver/semver.rk",
+        "ruskmods/semver.rk",
+        "ruskmods/manifest/manifest.rk",
+        "ruskmods/manifest.rk",
+        "ruskmods/lock/lock.rk",
+        "ruskmods/lock.rk",
+        "ruskmods/archive/archive.rk",
+        "ruskmods/archive.rk",
+        "ruskmods/fs/fs.rk",
+        "ruskmods/fs.rk",
+        "ruskmods/sha/sha.rk",
+        "ruskmods/sha.rk",
+        "ruskmods/gzip/gzip.rk",
+        "ruskmods/gzip.rk",
+        "ruskmods/text/text.rk",
+        "ruskmods/text.rk",
+        "ruskmods/toml/toml.rk",
+        "ruskmods/installwork/semver.rk",
+        "ruskmods/installwork/manifest.rk",
+        "ruskmods/npmwork/text.rk",
+        "ruskmods/npmwork/manifest.rk",
+        "ruskmods/npmwork/lock.rk",
+        "ruskmods/npmwork/registry.rk",
+        "ruskmods/npmwork/resolver.rk",
+        "ruskmods/npmwork/installer.rk",
+        "ruskmods/npmwork/global.rk",
+        "ruskmods/npmwork/project.rk",
+        "ruskmods/npmwork/cli.rk",
+        "ruskmods/npmwork/npmwork.rk",
+        "rusklib/http/http.rk",
+        "rusklib/cache/cache.rk",
+        "rusklib/fs_fast/fs_fast.rk",
+        "rusklib/platform/platform.rk",
+        "rusklib/term/term.rk",
+        "rusklib/bench/bench.rk",
+        "rusklib/files/files.rk",
+        "rusklib/files.rk",
+        "rusklib/wheat/text.rk",
+        "rusklib/rusklib.rk",
+    ];
+
+    for relative in modules {
+        let file = root.join(relative);
+        let out = Command::new(rusk())
+            .arg("check")
+            .arg(&file)
+            .output()
+            .expect("rusk should start");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "{} failed: {stdout}{stderr}",
+            file.display()
+        );
+    }
+}
+
+#[test]
+fn the_guide_new_imports_check_from_outside_the_checkout() {
+    let dir = std::env::temp_dir().join(format!("rusk-guide-new-imports-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("imports.rk");
+    std::fs::write(
+        &file,
+        concat!(
+            "import \"semver\"\n",
+            "import \"json/json\"\n",
+            "import \"manifest\"\n",
+            "import \"lock\"\n",
+            "import \"npmwork\"\n",
+            "import \"rusklib/http\"\n",
+            "import \"rusklib/cache\"\n",
+            "import \"rusklib/term\"\n",
+            "import \"rusklib/rusklib\"\n",
+            "say \"ok\"\n",
+        ),
+    )
+    .unwrap();
+
+    let out = Command::new(rusk())
+        .arg("check")
+        .arg(&file)
+        .current_dir(&dir)
+        .output()
+        .expect("rusk should start");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("looks good"), "{stdout}{stderr}");
+}

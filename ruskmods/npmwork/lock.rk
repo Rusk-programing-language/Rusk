@@ -1,0 +1,116 @@
+# lock.rk — npmwork's installed-version lock.
+#
+# npmwork keeps a small text lock next to package.json. Each non-comment line is
+# `name version integrity`, where `integrity` may be empty. The shared
+# `ruskmods/lock/` module defines the same `name version` core; npmwork adds the
+# integrity column and keeps its own file so a JS project is not confused with a
+# Rusk install prefix. All public names use the `npmwork_lock_` prefix.
+
+import "text"
+import "path"
+
+# The lock file path for a project directory.
+to npmwork_lock_path with dir as a view of text:
+    let file_name be npmwork_text_lock_name
+    give back path_join with (copy of dir) and file_name
+
+# The records in a lock file, without comments.
+to npmwork_lock_read with dir as a view of text:
+    let out be an empty list of text
+    let path be npmwork_lock_path with dir
+    if not (file exists path):
+        give back out
+    for each line in (text_lines with (read file path)):
+        let t be text_trim with line
+        if t is not "" and not (text_starts_with with t and "#"):
+            add (copy of t) to out
+    give back out
+
+# Replace a lock file from a list of records.
+to npmwork_lock_write with dir as a view of text and entries as a view of a list of text:
+    let out be "# npmwork lock — name version integrity\n"
+    for each entry in entries:
+        set out to out + entry + "\n"
+    write out to file (npmwork_lock_path with dir)
+
+# The 1-based position of `name` in a lock, or 0.
+to npmwork_lock_index with entries as a view of a list of text and name as a view of text:
+    let i be 1
+    while i is at most length of entries:
+        let parts be text_split with (item i of entries) and " "
+        if length of parts is at least 2 and (item 1 of parts) is name:
+            give back i
+        set i to i + 1
+    give back 0
+
+# True when `name` is locked.
+to npmwork_lock_has with entries as a view of a list of text and name as a view of text:
+    give back (npmwork_lock_index with entries and name) is not 0
+
+# The locked version of `name`, or empty text.
+to npmwork_lock_get with entries as a view of a list of text and name as a view of text:
+    let at be npmwork_lock_index with entries and name
+    if at is 0:
+        give back ""
+    let parts be text_split with (item at of entries) and " "
+    give back item 2 of parts
+
+# The locked integrity value of `name`, or empty text.
+to npmwork_lock_integrity with entries as a view of a list of text and name as a view of text:
+    let at be npmwork_lock_index with entries and name
+    if at is 0:
+        give back ""
+    let parts be text_split with (item at of entries) and " "
+    if length of parts is at least 3:
+        give back item 3 of parts
+    give back ""
+
+# Add or replace a lock record and give back the new entries. The input is
+# borrowed, so callers keep their original list.
+to npmwork_lock_set with entries as a view of a list of text and name as a view of text and version as a view of text and integrity as a view of text:
+    let record be name + " " + version + " " + integrity
+    let target be npmwork_lock_index with entries and name
+    let out be an empty list of text
+    let i be 1
+    while i is at most length of entries:
+        if i is target:
+            add (copy of record) to out
+        otherwise:
+            add (copy of (item i of entries)) to out
+        set i to i + 1
+    if target is 0:
+        add record to out
+    give back out
+
+# Remove `name` from the lock and give back the new entries.
+to npmwork_lock_remove with entries as a view of a list of text and name as a view of text:
+    let target be npmwork_lock_index with entries and name
+    let out be an empty list of text
+    let i be 1
+    while i is at most length of entries:
+        if i is not target:
+            add (copy of (item i of entries)) to out
+        set i to i + 1
+    give back out
+
+# Add a lock record on disk.
+to npmwork_lock_add with dir as a view of text and name as a view of text and version as a view of text and integrity as a view of text:
+    let entries be npmwork_lock_read with dir
+    let updated be npmwork_lock_set with entries and name and version and integrity
+    npmwork_lock_write with dir and updated
+    give back updated
+
+# Problems found in a lock file. An empty list means the lock is usable.
+to npmwork_lock_validate with entries as a view of a list of text:
+    let out be an empty list of text
+    for each entry in entries:
+        let parts be text_split with entry and " "
+        if length of parts is less than 2:
+            add ("unreadable lock record: " + entry) to out
+    give back out
+
+# A readable lock listing.
+to npmwork_lock_text with entries as a view of a list of text:
+    if length of entries is 0:
+        give back "(the npmwork lock is empty)\n"
+    give back (text_join with entries and "\n") + "\n"

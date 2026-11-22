@@ -1,0 +1,173 @@
+# cli.rk — command-line front end for npmwork.
+#
+#     import "npmwork/cli"
+#     npmwork_cli_main
+#
+# Commands:
+#
+#     npmwork init NAME [DIR]          write a starter package.json
+#     npmwork check [DIR]              validate package.json
+#     npmwork plan NAME SPEC ...       print a dependency plan
+#     npmwork install NAME VERSION     download and place one package
+#     npmwork remove NAME              remove an installed package
+#     npmwork list [DIR]               list node_modules
+#     npmwork status [DIR]             compare the lock with node_modules
+#     npmwork tree [DIR]               print the locked package tree
+#     npmwork clean [DIR]              remove node_modules and clear the lock
+#     npmwork global                   show the global prefix
+#
+# `--registry URL` and `--dir PATH` may appear anywhere. They can also be set
+# with `NPM_CONFIG_REGISTRY` and `NPMWORK_DIR`.
+
+import "text"
+import "registry"
+import "resolver"
+import "installer"
+import "project"
+import "global"
+import "manifest"
+
+# Default project directory.
+to npmwork_cli_default_dir:
+    let from_env be environment "NPMWORK_DIR"
+    if from_env is not "":
+        give back from_env
+    give back "."
+
+# Split flags out of the arguments. Result: `[registry, dir, words...]`.
+to npmwork_cli_parse with args as a view of a list of text:
+    let registry be npmwork_registry_default
+    let dir be npmwork_cli_default_dir
+    let out be [registry, dir]
+    let i be 1
+    while i is at most length of args:
+        let arg be item i of args
+        if arg is "--registry" and i is less than length of args:
+            set item 1 of out to item (i + 1) of args
+            set i to i + 2
+        otherwise if arg is "--dir" and i is less than length of args:
+            set item 2 of out to item (i + 1) of args
+            set i to i + 2
+        otherwise if text_starts_with with arg and "--registry=":
+            set item 1 of out to text_drop with arg and 11
+            set i to i + 1
+        otherwise if text_starts_with with arg and "--dir=":
+            set item 2 of out to text_drop with arg and 6
+            set i to i + 1
+        otherwise:
+            add arg to out
+            set i to i + 1
+    give back out
+
+# Command words after the two settings.
+to npmwork_cli_words with parsed as a view of a list of text:
+    let out be an empty list of text
+    let i be 3
+    while i is at most length of parsed:
+        add (item i of parsed) to out
+        set i to i + 1
+    give back out
+
+# Join words from `start` with spaces.
+to npmwork_cli_join_from with words as a view of a list of text and start as a number:
+    let out be ""
+    let i be start
+    while i is at most length of words:
+        if out is not "":
+            set out to out + " "
+        set out to out + (item i of words)
+        set i to i + 1
+    give back out
+
+# Print a result list and give back an exit code.
+to npmwork_cli_show with result as a view of a list of text:
+    let ok be false
+    if length of result is more than 0:
+        set ok to (item 1 of result) is "ok"
+    let i be 2
+    while i is at most length of result:
+        say item i of result
+        set i to i + 1
+    if ok:
+        give back 0
+    give back 1
+
+# The help text.
+to npmwork_cli_help:
+    give back "npmwork — a JS/TS package installer written in Rusk\n\n" + "usage: npmwork [--registry URL] [--dir PATH] COMMAND [ARGS]\n\n" + "commands:\n" + "  init NAME [DIR]          write a starter package.json\n" + "  check [DIR]              validate package.json\n" + "  plan NAME SPEC ...       print a dependency plan\n" + "  install NAME VERSION     download and place one package\n" + "  remove NAME              remove an installed package\n" + "  list [DIR]               list node_modules\n" + "  status [DIR]             compare lock and node_modules\n" + "  tree [DIR]               print the locked package tree\n" + "  clean [DIR]              remove node_modules and clear the lock\n" + "  global                   show the global prefix\n"
+
+# Run one command and give back an exit code.
+to npmwork_cli_run with args as a view of a list of text:
+    let parsed be npmwork_cli_parse with args
+    let registry be item 1 of parsed
+    let dir be item 2 of parsed
+    let words be npmwork_cli_words with parsed
+    if length of words is 0:
+        say npmwork_cli_help
+        give back 0
+    let command be item 1 of words
+    if command is "help" or command is "--help" or command is "-h":
+        say npmwork_cli_help
+        give back 0
+    if command is "version" or command is "--version":
+        say "npmwork 0.1.0"
+        give back 0
+    if command is "init":
+        if length of words is less than 2:
+            say "error: init needs a package name"
+            give back 1
+        let target be dir
+        if length of words is at least 3:
+            set target to item 3 of words
+        give back npmwork_cli_show with (npmwork_project_init with target and (item 2 of words))
+    if command is "check":
+        give back npmwork_cli_show with (npmwork_project_check with dir)
+    if command is "plan":
+        if length of words is less than 3:
+            say "error: plan needs a name and a version spec"
+            give back 1
+        let requirement be (item 2 of words) + " " + (npmwork_cli_join_from with words and 3)
+        let selections be [copy of requirement]
+        let available be an empty list of text
+        add (copy of requirement) to available
+        let plan be npmwork_resolver_resolve with selections and available
+        if not (npmwork_resolver_succeeded with plan):
+            say "error: " + (npmwork_resolver_message with plan)
+            give back 1
+        say npmwork_resolver_plan_text with plan
+        give back 0
+    if command is "install":
+        if length of words is less than 3:
+            say "error: install needs a name and a version"
+            give back 1
+        let selection be (item 2 of words) + " " + (item 3 of words)
+        let install_selections be [copy of selection]
+        give back npmwork_cli_show with (npmwork_project_install with dir and registry and install_selections)
+    if command is "remove":
+        if length of words is less than 2:
+            say "error: remove needs a package name"
+            give back 1
+        give back npmwork_cli_show with (npmwork_installer_remove with dir and (item 2 of words))
+    if command is "list":
+        say npmwork_installer_list with dir
+        give back 0
+    if command is "status":
+        say npmwork_project_status with dir
+        give back 0
+    if command is "tree":
+        say npmwork_project_tree with dir
+        give back 0
+    if command is "clean":
+        give back npmwork_cli_show with (npmwork_project_clean with dir)
+    if command is "global":
+        say npmwork_global_report
+        give back 0
+    say "error: I don't know the command '" + command + "'"
+    say npmwork_cli_help
+    give back 1
+
+# Read `all arguments` and stop with the resulting status.
+to npmwork_cli_main:
+    let status be npmwork_cli_run with all arguments
+    if status is not 0:
+        stop with status

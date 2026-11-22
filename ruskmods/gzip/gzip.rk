@@ -1,0 +1,90 @@
+# gzip.rk — shell-backed deflate/inflate helpers written in Rusk.
+#
+# Data shape: file paths and text bodies are text; commands give back an exit
+# status number. Text helpers write their input to a deterministic temporary
+# file, redirect `gzip` output to another file, and read that file back.
+# Every public name starts with `gzip_`.
+#
+# Limits: these helpers need `gzip`, `tar`, `mkdir`, and a POSIX shell on PATH.
+# File helpers are binary-safe through files, but Rusk text helpers assume the
+# bytes are representable as Rusk text. Import with `import "gzip"` or
+# `import "gzip/gzip"`.
+
+import "text"
+import "path"
+
+# Quote text for `/bin/sh`, escaping embedded single quotes.
+to gzip_quote with s as a view of text:
+    let out be "'"
+    let i be 1
+    let n be length of s
+    while i is at most n:
+        let ch be letter i of s
+        if ch is "'":
+            set out to out + "'\\''"
+        otherwise:
+            set out to out + ch
+        set i to i + 1
+    give back out + "'"
+
+# A deterministic temporary path for a seed, under TMPDIR or /tmp. Only safe
+# filename letters from the seed are kept, so binary data cannot put quotes or
+# newlines into a shell command.
+to gzip_tmp_path with seed as a view of text:
+    let dir be environment "TMPDIR"
+    if dir is "":
+        set dir to "/tmp"
+    let allowed be "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    let safe be ""
+    let n be length of seed
+    let i be 1
+    while i is at most n:
+        let ch be letter i of seed
+        if (text_index_of with allowed and ch) is not 0:
+            set safe to safe + ch
+        set i to i + 1
+    if length of safe is more than 24:
+        set safe to text_take with safe and 24
+    give back (dir + "/rusk_gzip_" + (text_from_number with n) + "_" + safe)
+
+# Deflate a file to `output`; gives back the `gzip` exit status.
+to gzip_compress_file with path as a view of text and output as a view of text:
+    give back run command ("gzip -c " + (gzip_quote with path) + " > " + (gzip_quote with output))
+
+# Inflate a file to `output`; gives back the `gzip` exit status.
+to gzip_decompress_file with path as a view of text and output as a view of text:
+    give back run command ("gzip -dc " + (gzip_quote with path) + " > " + (gzip_quote with output))
+
+# Deflate text through temporary files. Empty text means failure or no output.
+to gzip_compress_text with data as a view of text:
+    let in_path be gzip_tmp_path with (data + "|in")
+    let out_path be gzip_tmp_path with (data + "|out")
+    write (copy of data) to file in_path
+    let status be gzip_compress_file with in_path and out_path
+    if status is not 0:
+        give back ""
+    if not (file exists out_path):
+        give back ""
+    give back read file out_path
+
+# Inflate text through temporary files. Empty text means failure or no output.
+to gzip_decompress_text with data as a view of text:
+    let in_path be gzip_tmp_path with (data + "|in")
+    let out_path be gzip_tmp_path with (data + "|out")
+    write (copy of data) to file in_path
+    let status be gzip_decompress_file with in_path and out_path
+    if status is not 0:
+        give back ""
+    if not (file exists out_path):
+        give back ""
+    give back read file out_path
+
+# Create a gzip tarball holding `source`'s own name; gives back the status.
+to gzip_tar_create with source as a view of text and archive as a view of text:
+    let dir be path_dir with (copy of source)
+    let base be path_base with (copy of source)
+    give back run command ("tar -czf " + (gzip_quote with archive) + " -C " + (gzip_quote with dir) + " " + (gzip_quote with base))
+
+# Create `destination` and unpack a gzip tarball into it; gives back status.
+to gzip_tar_extract with archive as a view of text and destination as a view of text:
+    give back run command ("mkdir -p " + (gzip_quote with destination) + " && tar -xzf " + (gzip_quote with archive) + " -C " + (gzip_quote with destination))

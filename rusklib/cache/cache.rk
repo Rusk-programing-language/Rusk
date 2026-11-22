@@ -1,0 +1,139 @@
+# cache.rk — a small metadata and tarball cache with atomic writes.
+#
+# Import it with `import "cache/cache"`. Every public name starts with `cache_`.
+# Entries live under `RUSK_CACHE`, or `$HOME/.rusk-cache`, or a /tmp fallback.
+# Paths are POSIX-oriented: they use `/` and the `mkdir -p`, `rename`, and
+# `touch` behaviour of a POSIX filesystem. Cache values are text; tarballs are
+# handled as paths created by the archive helpers, not parsed here.
+
+import "text"
+import "path"
+
+# Quote text for `/bin/sh` with single quotes.
+to cache_quote with s as a view of text:
+    give back text_quote with (copy of s)
+
+# The cache directory: RUSK_CACHE, then HOME/.rusk-cache, then a /tmp fallback.
+to cache_root:
+    let configured be environment "RUSK_CACHE"
+    if configured is not "":
+        give back path_trim_end with configured
+    let home be environment "HOME"
+    if home is not "":
+        give back (path_trim_end with home) + "/.rusk-cache"
+    give back "/tmp/.rusk-cache"
+
+# The 1-based slot of one letter in a printable alphabet, or 0 when absent.
+to cache_char_slot with ch as a view of text:
+    let alphabet be "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~:/?#[]@!$&'()*+,;=% "
+    give back text_index_of with alphabet and ch
+
+# A short, deterministic text hash for a cache key.
+to cache_key with value as a view of text:
+    let h1 be 5381
+    let h2 be 2166136261
+    let i be 1
+    let n be length of value
+    while i is at most n:
+        let slot be cache_char_slot with (letter i of value)
+        let next1 be h1 * 33 + slot
+        set h1 to next1 - (next1 / 1000003) * 1000003
+        let next2 be h2 * 31 + slot
+        set h2 to next2 - (next2 / 1000033) * 1000033
+        set i to i + 1
+    give back "c" + (text_from_number with h1) + "-" + (text_from_number with h2) + "-" + (text_from_number with n)
+
+# The path prefix for one key, before a `.meta` or `.tar.gz` suffix.
+to cache_path with key as a view of text:
+    give back path_join with (cache_root) and (copy of key)
+
+# Where a key's metadata text is stored.
+to cache_metadata_path with key as a view of text:
+    give back (cache_path with key) + ".meta"
+
+# Where a key's tarball is stored.
+to cache_tarball_path with key as a view of text:
+    give back (cache_path with key) + ".tar.gz"
+
+# Resolve a kind name (`meta`, `metadata`, `tarball`, `tar.gz`, or a custom
+# suffix) to a concrete path.
+to cache_file_path with key as a view of text and kind as a view of text:
+    if kind is "meta" or kind is "metadata":
+        give back cache_metadata_path with key
+    if kind is "tarball" or kind is "tar" or kind is "tar.gz":
+        give back cache_tarball_path with key
+    give back (cache_path with key) + "." + kind
+
+# True when a cache file for this key and kind exists.
+to cache_has with key as a view of text and kind as a view of text:
+    give back file exists (cache_file_path with key and kind)
+
+# The whole cache file as text, or empty text when it is absent.
+to cache_get with key as a view of text and kind as a view of text:
+    let path be cache_file_path with key and kind
+    if not (file exists (copy of path)):
+        give back ""
+    give back read file path
+
+# Write a cache file through a `.tmp` sibling, then rename it into place. The
+# rename is atomic on one filesystem. Gives back true when the final file is
+# present.
+to cache_put with key as a view of text and kind as a view of text and value as a view of text:
+    let path be cache_file_path with key and kind
+    let parent be path_dir with (copy of path)
+    run command ("mkdir -p " + (cache_quote with parent))
+    let temporary be path + ".tmp"
+    write (copy of value) to file temporary
+    rename temporary to path
+    give back file exists path
+
+# Remove one cache file. Gives back true when it is gone afterwards.
+to cache_remove with key as a view of text and kind as a view of text:
+    let path be cache_file_path with key and kind
+    if file exists (copy of path):
+        remove file path
+    give back not (file exists path)
+
+# Refresh a cache file's timestamp with `touch`. Gives back the shell status,
+# or -1 when there is no file to touch.
+to cache_touch with key as a view of text and kind as a view of text:
+    let path be cache_file_path with key and kind
+    if not (file exists (copy of path)):
+        give back -1
+    give back run command ("touch " + (cache_quote with path))
+
+# Store a key's metadata text atomically.
+to cache_write_metadata with key as a view of text and value as a view of text:
+    give back cache_put with key and "meta" and value
+
+# Read a key's metadata text, or empty text when it is absent.
+to cache_read_metadata with key as a view of text:
+    give back cache_get with key and "meta"
+
+# Sort entry names alphabetically, in place.
+to cache_sort with names as a list of text:
+    let n be length of names
+    for each i from 2 to n:
+        let j be i
+        while j is more than 1:
+            let left be item (j - 1) of names
+            let right be item j of names
+            if right is less than left:
+                set item (j - 1) of names to right
+                set item j of names to left
+                set j to j - 1
+            otherwise:
+                break
+    give back names
+
+# Every key that has metadata, in alphabetical order.
+to cache_list:
+    let root be cache_root
+    let keys be an empty list of text
+    if not (file exists (copy of root)):
+        give back keys
+    for each entry in (list directory root):
+        if text_ends_with with entry and ".meta":
+            let size be length of entry
+            add (part 1 to (size - 5) of entry) to keys
+    give back cache_sort with keys

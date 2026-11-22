@@ -1,0 +1,27 @@
+# manifest.rk — installwork's view of the shared manifest module.
+#
+# `Ruskfile` and `package.json` reading now lives in
+# `ruskmods/manifest/manifest.rk`. This wrapper keeps the old installwork name
+# for Ruskfile metadata while the shared module serves npmwork and other tools.
+
+import "../manifest/manifest"
+
+# Read a nearby Ruskfile or package.json as a Ruskfile-shaped body.
+to installwork_manifest_read with path as a view of text:
+    give back manifest_read with path
+
+# The package name declared in `body`.
+to installwork_manifest_name with body as a view of text:
+    give back manifest_name with body
+
+# The package version declared in `body`.
+to installwork_manifest_version with body as a view of text:
+    give back manifest_version with body
+
+# The program entry declared in `body`.
+to installwork_manifest_entry with body as a view of text:
+    give back manifest_entry with body
+
+# The dependency requirements declared in `body`.
+to installwork_manifest_requires with body as a view of text:
+    give back manifest_requires with body

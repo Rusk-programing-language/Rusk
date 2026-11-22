@@ -1,0 +1,4 @@
+# gzip.rk — compatibility shim for ruskmods/gzip/gzip.rk.
+# The canonical source is the folder module; this file only forwards to it.
+
+import "gzip/gzip"
