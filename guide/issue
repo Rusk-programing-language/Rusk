@@ -1,0 +1,45 @@
+PS C:\Users\KEVIN> powershell -ExecutionPolicy Bypass -File toastset.ps1
+The argument 'toastset.ps1' to the -File parameter does not exist. Provide the path to an existing '.ps1' file as an argument to the -File parameter.
+Windows PowerShell
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+Install the latest PowerShell for new features and improvements! https://aka.ms/PSWindows
+
+PS C:\Users\KEVIN> # or, without a checkout:
+PS C:\Users\KEVIN> irm https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 | iex
+iex : At line:283 char:46
++     Say-Info "installed rusk $Version to $Exe"
++                                              ~
+The string is missing the terminator: ".
+At line:264 char:24
++                 } else {
++                        ~
+Missing closing '}' in statement block or type definition.
+At line:253 char:20
++             } else {
++                    ~
+Missing closing '}' in statement block or type definition.
+At line:249 char:13
++         try {
++             ~
+Missing closing '}' in statement block or type definition.
+At line:290 char:1
++
+The Try statement is missing its Catch or Finally block.
+At line:248 char:37
++     if ($answer -match '^(y|yes)$') {
++                                     ~
+Missing closing '}' in statement block or type definition.
+At line:241 char:60
++ if (-not $NoStartup -and $env:TOASTSET_NO_STARTUP -ne '1') {
++                                                            ~
+Missing closing '}' in statement block or type definition.
+At line:1 char:89
++ ... usercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 | iex
++                                                                       ~~~
+    + CategoryInfo          : ParserError: (:) [Invoke-Expression], ParseE
+   xception
+    + FullyQualifiedErrorId : TerminatorExpectedAtEndOfString,Microsoft.Po
+   werShell.Commands.InvokeExpressionCommand
+
+PS C:\Users\KEVIN>
