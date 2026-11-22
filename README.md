@@ -28,8 +28,14 @@ syscalls.
 
 ## Status
 
-v1.2.2 fixes the error/edit flow and adds compiler optimizations. Error codes
-are now fixed by category (`E01` syntax, `E02` type, `E03` ownership, `E04`
+v1.2.3 completes the bundled library layout and adds the `npmwork` framework.
+Generic modules live under `ruskmods/`, system and IO helpers under `rusklib/`,
+and bundled imports resolve from outside the checkout. `rusklib/rusklib` pulls
+in the whole set with one import, and every release archive carries the module
+trees.
+
+v1.2.2 fixed the error/edit flow and added compiler optimizations. Error codes
+are fixed by category (`E01` syntax, `E02` type, `E03` ownership, `E04`
 runtime, `E05` import, `E06` usage); the REPL prints the whole submitted code
 before the edit question and reopens all of it after `y`. The Windows installer
 has a native `toastset.ps1`, and a dependency-free optimization pass folds
@@ -145,7 +151,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.2.2
+sh toastset --version 1.2.3
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -176,14 +182,16 @@ opens at login? [y/N]` and creates `Rusk.lnk` in your personal Startup folder
 only after `y`. Answering `n`, passing `--no-startup`, or setting
 `TOASTSET_NO_STARTUP=1` skips the question. `--uninstall` removes the shortcut.
 Pass `--no-modify-path` (or `TOASTSET_NO_MODIFY_PATH=1`) to leave `PATH` alone,
-`--version 1.2.2` to pin a release, or `--bin-dir` to choose the directory.
+`--version 1.2.3` to pin a release, or `--bin-dir` to choose the directory.
 `curl.exe` and `tar.exe` ship with Windows 10 version 1803 and newer. Set
 `TOASTSET_POSIX_FORCE=1` only if you deliberately want the older POSIX-shell
 install path from Git Bash.
 
 Each release archive also includes the installer scripts and the full
-[`rusklib/`](rusklib/) source tree, so the wheat terminal UI library is there as
-`rusklib/wheat/` whether you download an archive or browse GitHub `main`.
+[`ruskmods/`](ruskmods/), [`rusklib/`](rusklib/), and [`fastlib/`](fastlib/)
+source trees, so the bundled libraries are there whether you download an
+archive or browse GitHub `main`. The wheat terminal UI library lives at
+`rusklib/wheat/` in both places.
 
 ## Toast files and experimental Windows output
 
