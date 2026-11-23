@@ -28,8 +28,9 @@ syscalls.
 
 ## Status
 
-v1.2.4 adds the shell-backed `rusklib/database` library and fixes library lookup
-for installed compilers. v1.2.3 completed the bundled library layout and added
+v1.2.5 fixes the native Windows installer script and the `simple` GUI event
+loop. v1.2.4 adds the shell-backed `rusklib/database` library and fixes library
+lookup for installed compilers. v1.2.3 completed the bundled library layout and added
 the `npmwork` framework. Generic modules live under `ruskmods/`, system and IO
 helpers under `rusklib/`, and bundled imports resolve from outside the checkout.
 `rusklib/rusklib` pulls in the whole set with one import, and every release
@@ -152,7 +153,7 @@ curl --proto '=https' --tlsv1.2 -sSf \
 ```
 
 ```console
-sh toastset --version 1.2.4
+sh toastset --version 1.2.5
 sh toastset --target aarch64-unknown-linux-musl
 sh toastset --bin-dir "$HOME/.local/bin"
 ```
@@ -186,7 +187,7 @@ opens at login? [y/N]` and creates `Rusk.lnk` in your personal Startup folder
 only after `y`. Answering `n`, passing `--no-startup`, or setting
 `TOASTSET_NO_STARTUP=1` skips the question. `--uninstall` removes the shortcut.
 Pass `--no-modify-path` (or `TOASTSET_NO_MODIFY_PATH=1`) to leave `PATH` alone,
-`--version 1.2.4` to pin a release, or `--bin-dir` to choose the directory.
+`--version 1.2.5` to pin a release, or `--bin-dir` to choose the directory.
 `curl.exe` and `tar.exe` ship with Windows 10 version 1803 and newer. Set
 `TOASTSET_POSIX_FORCE=1` only if you deliberately want the older POSIX-shell
 install path from Git Bash.
