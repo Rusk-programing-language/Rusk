@@ -1370,8 +1370,8 @@ library wraps them with ordinary `.rk` helpers.
 | `add simple button to W labelled TEXT at X and Y sized W and H` | expression, number | create a button |
 | `add simple label to W labelled TEXT at X and Y sized W and H` | expression, number | create a static label |
 | `add simple field to W labelled TEXT at X and Y sized W and H` | expression, number | create an edit field |
-| `show simple window W` | statement | show the window and start its message loop |
-| `close simple window` | statement | close the window and stop the loop |
+| `show simple window W` | statement | show and update the window; the program must pump events |
+| `close simple window` | statement | destroy the window; the program must leave its own loop |
 | `set simple text of C to TEXT` | statement | change a control's text |
 | `simple text of C` | expression, text | read a control's text |
 | `show simple message TEXT` | statement | show a one-button message box |
@@ -1382,10 +1382,14 @@ library wraps them with ordinary `.rk` helpers.
 
 The control forms use `labelled` rather than `with`: after an identifier,
 `with` starts an ordinary function call. `show simple window` must be reached
-before events arrive. Events are text: `""` for none, `click`, `change`, or
-`close`. The window procedure is emitted by the compiler and only records
-events into data slots; a Rusk program reads them in its own polling loop, so
-no callback crosses the language boundary. A typical loop is:
+before events arrive, but it does not start a message loop; the program must
+call `pump simple events` or `next simple event` repeatedly and leave its own
+loop when the `close` event arrives. Real controls require
+`rusk build ... --target windows`; the default Linux target makes every GUI
+form a typed no-op, as do `check` and the REPL. Events are text: `""` for none,
+`click`, `change`, or `close`. The window procedure is emitted by the compiler
+and only records events into data slots; a Rusk program reads them in its own
+polling loop, so no callback crosses the language boundary. A typical loop is:
 
 ```rusk
 let window be make simple window titled "Hi" wide 320 high 200

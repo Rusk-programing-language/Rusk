@@ -110,9 +110,10 @@ On Windows, `toastset` delegates to the native [`toastset.ps1`](../toastset.ps1)
 It works from Git Bash, MSYS2, Cygwin, or a plain PowerShell window:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File toastset.ps1
-# or, without a checkout:
-irm https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 | iex
+# From the folder that contains toastset.ps1:
+powershell -ExecutionPolicy Bypass -File .\toastset.ps1
+# Or, without a checkout:
+irm https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 -UseBasicParsing | iex
 ```
 
 It downloads the release with `curl.exe`, unpacks it with `tar.exe` into
@@ -1490,10 +1491,14 @@ import "simple/simple"
 let window be simple_window with "Hello" and 320 and 200
 let button be simple_button with window and "Press" and 10 and 10 and 100 and 30
 simple_window_open with window
-let event be simple_event_wait
-if event is "click":
-    if (simple_event_id) is button:
-        simple_control_set_text with button and "Thanks"
+let running be true
+while running:
+    let event be simple_event_wait
+    if event is "close":
+        set running to false
+    if event is "click":
+        if (simple_event_id) is button:
+            simple_control_set_text with button and "Thanks"
 simple_window_exit
 ```
 
@@ -1501,10 +1506,15 @@ simple_window_exit
 rusk build app.rk --target windows -o app.exe
 ```
 
+Run the `.exe` on Windows. `--target windows` is required: the default target
+still produces a Linux ELF, where these primaries are no-ops. `rusk check` and
+the REPL likewise never open a window. The program must keep polling events
+after `simple_window_open`; showing a window does not start a loop for you.
 There are real Win32 windows, buttons, labels, and fields on Windows x86-64;
 elsewhere the primaries are no-ops so the same source still checks and bakes.
 `simple_event_wait` gives `""`, `click`, `change`, or `close`. See the
-[`simple` README](../fastlib/simple/README.md) for the module list.
+[`simple` README](../fastlib/simple/README.md) for the module list and a
+troubleshooting checklist.
 
 The installer, the wheat library, the Ruskfile task runner, and the
 `installwork/` package framework landed in the v1.1.6 tree; `simple` was added

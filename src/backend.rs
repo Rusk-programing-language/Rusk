@@ -15,6 +15,8 @@ pub use crate::aarch64::{
 
 use crate::aarch64;
 use crate::x86_64;
+#[cfg(test)]
+use std::collections::HashMap;
 
 /// Scratch slots for the small native GUI runtime. User32 is loaded at runtime
 /// with `LoadLibraryA`/`GetProcAddress`, so the PE still needs only kernel32.
@@ -145,6 +147,22 @@ impl Asm {
             Target::WindowsX86_64 => Inner::X86_64(Box::new(x86_64::Asm::new_windows())),
         };
         Asm { inner }
+    }
+
+    #[cfg(test)]
+    pub fn code_view(&self) -> &[u8] {
+        match &self.inner {
+            Inner::X86_64(a) => a.code_view(),
+            Inner::AArch64(_) => &[],
+        }
+    }
+
+    #[cfg(test)]
+    pub fn label_view(&self) -> &HashMap<String, usize> {
+        match &self.inner {
+            Inner::X86_64(a) => a.label_view(),
+            Inner::AArch64(_) => unreachable!("test only asks the x86-64 backend for labels"),
+        }
     }
 
     pub fn label(&mut self, name: &str) {

@@ -1,8 +1,12 @@
-# toastset.ps1 — the native Windows installer for Rusk.
+# toastset.ps1 - the native Windows installer for Rusk.
+#
+# Keep this file ASCII-only. Windows PowerShell 5.1 reads BOM-less UTF-8 as
+# ANSI, so a non-ASCII quote can break `irm ... | iex` with a confusing
+# "string is missing the terminator" error.
 #
 # Run from PowerShell on Windows 10 or 11:
 #
-#   powershell -ExecutionPolicy Bypass -File toastset.ps1
+#   powershell -ExecutionPolicy Bypass -File .\toastset.ps1
 #
 # Or fetch and run it in one line:
 #
@@ -56,7 +60,7 @@ function Stop-Install {
 
 function Show-Help {
     Write-Host @'
-toastset — install the Rusk compiler and toolchain on Windows
+toastset - install the Rusk compiler and toolchain on Windows
 
 USAGE:
   toastset.ps1 [OPTIONS]
@@ -112,7 +116,7 @@ for ($i = 0; $i -lt $RawArgs.Count; $i++) {
         '^(--no-startup|-NoStartup)$' { $NoStartup = $true }
         '^(--uninstall|-Uninstall)$' { $Uninstall = $true }
         '^(--help|-Help|-h)$' { $Help = $true }
-        default { Stop-Install "I don't know '$arg' — run 'toastset.ps1 --help'" }
+        default { Stop-Install "I don't know '$arg' - run 'toastset.ps1 --help'" }
     }
 }
 

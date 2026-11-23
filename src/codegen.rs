@@ -1176,8 +1176,12 @@ impl Codegen {
         let click = self.intern("click");
         let change = self.intern("change");
         let close = self.intern("close");
-        let done = self.new_label("gui_event_done");
+        // The empty string belongs only to the no-event path. Event branches
+        // jump over it to `return_event`; falling through would replace every
+        // recorded event with "".
+        let no_event = self.new_label("gui_event_none");
         let advance = self.new_label("gui_event_advance");
+        let return_event = self.new_label("gui_event_return");
         let is_change = self.new_label("gui_event_change");
         let is_close = self.new_label("gui_event_close");
 
@@ -1187,7 +1191,7 @@ impl Codegen {
             self.asm.mov_data_addr(X1, WIN_GUI_EVENT_COUNT_OFFSET);
             self.asm.ldr(X1, X1, 0);
             self.asm.cmp_reg_reg(X0, X1);
-            self.asm.bcond_label(CC_GE, &done);
+            self.asm.bcond_label(CC_GE, &no_event);
 
             let is_click = self.new_label("gui_event_click");
             self.asm.mov_data_addr(X0, WIN_GUI_EVENT_KIND_OFFSET);
@@ -1203,7 +1207,7 @@ impl Codegen {
             self.asm.mov_imm64(X1, 3);
             self.asm.cmp_reg_reg(X0, X1);
             self.asm.bcond_label(CC_EQ, &is_close);
-            self.asm.b_label(&done);
+            self.asm.b_label(&advance);
 
             self.asm.label(&is_click);
             self.asm.mov_abs(X0, click);
@@ -1219,9 +1223,11 @@ impl Codegen {
             self.asm.add_imm(X1, X1, 1);
             self.asm.mov_data_addr(X2, WIN_GUI_EVENT_READ_OFFSET);
             self.asm.str(X1, X2, 0);
+            self.asm.b_label(&return_event);
         }
-        self.asm.label(&done);
+        self.asm.label(&no_event);
         self.asm.mov_abs(X0, empty);
+        self.asm.label(&return_event);
         Ok(Ty::Str)
     }
 
@@ -5079,6 +5085,32 @@ mod tests {
     fn bake(src: &str) -> Result<Baked, String> {
         let prog = parse(lex(src).unwrap())?;
         compile(&prog)
+    }
+
+    #[test]
+    fn next_simple_event_does_not_overwrite_recorded_events() {
+        let mut cg = Codegen::new(HashMap::new(), Target::WindowsX86_64);
+        assert_eq!(cg.gui_next_event().unwrap(), Ty::Str);
+
+        let labels = cg.asm.label_view();
+        let offset_of = |prefix: &str| {
+            labels
+                .iter()
+                .find(|(name, _)| name.starts_with(prefix))
+                .map(|(_, offset)| *offset)
+                .unwrap_or_else(|| panic!("no label starting with {prefix}"))
+        };
+        let advance = offset_of("gui_event_advance_");
+        let no_event = offset_of("gui_event_none_");
+        let return_event = offset_of("gui_event_return_");
+
+        assert!(advance < no_event);
+        assert!(no_event < return_event);
+        let code = cg.asm.code_view();
+        assert!(
+            no_event >= 5 && code[no_event - 5] == 0xE9,
+            "the event path should jump over the empty-string branch"
+        );
     }
 
     #[test]

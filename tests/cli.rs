@@ -557,6 +557,23 @@ fn toastset_has_a_native_windows_installer() {
 }
 
 #[test]
+fn toastset_ps1_is_ascii_for_windows_powershell() {
+    let native = include_bytes!("../toastset.ps1");
+    assert!(
+        native.iter().all(|byte| byte.is_ascii()),
+        "toastset.ps1 must be ASCII-only so Windows PowerShell 5.1 cannot misread a quote"
+    );
+    let readme = include_str!("../README.md");
+    let guide = include_str!("../guide/README.md");
+    let source = include_str!("../toastset.ps1");
+    assert!(readme.contains(r"powershell -ExecutionPolicy Bypass -File .\toastset.ps1"));
+    assert!(guide.contains(r"powershell -ExecutionPolicy Bypass -File .\toastset.ps1"));
+    assert!(readme.contains("toastset.ps1 -UseBasicParsing | iex"));
+    assert!(guide.contains("toastset.ps1 -UseBasicParsing | iex"));
+    assert!(source.contains("Keep this file ASCII-only"));
+}
+
+#[test]
 fn toastset_installs_bundled_libraries_beside_the_binary() {
     let installer = include_str!("../toastset");
     assert!(installer.matches("install_libraries").count() >= 2);

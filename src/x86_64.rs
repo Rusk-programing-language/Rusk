@@ -259,6 +259,16 @@ impl Asm {
         self.imports.clone()
     }
 
+    #[cfg(test)]
+    pub fn code_view(&self) -> &[u8] {
+        &self.code
+    }
+
+    #[cfg(test)]
+    pub fn label_view(&self) -> &HashMap<String, usize> {
+        &self.labels
+    }
+
     pub fn label(&mut self, name: &str) {
         // Another path can arrive here, so cached registers may not describe
         // the values this path knows about.
@@ -1341,10 +1351,10 @@ impl Asm {
         self.u8(0xD0); // call rax
     }
 
-    /// A tiny `WndProc` for the simple window class. It records button clicks
-    /// and text changes in fixed slots, then forwards everything else to
-    /// `DefWindowProcA`. Rusk callbacks stay in Rusk: the library reads the
-    /// recorded events in its own loop.
+    /// A tiny `WndProc` for the simple window class. It records button clicks,
+    /// text changes, and window closes in fixed slots, then forwards everything
+    /// else to `DefWindowProcA`. Rusk callbacks stay in Rusk: the library reads
+    /// the recorded events in its own loop.
     pub fn win_emit_wndproc(&mut self, label: &str) {
         self.label(label);
         let destroy = self.win_label("wnd_destroy");
@@ -1378,6 +1388,18 @@ impl Asm {
         self.raw_jmp(&def);
 
         self.label(&destroy);
+        // Record the close before posting WM_QUIT so a Rusk polling loop sees
+        // the same "close" event whether the user clicked the X button or the
+        // program called `close simple window`.
+        self.raw_store_imm64_data(WIN_GUI_EVENT_KIND_OFFSET, 3); // close
+        self.raw_store_imm64_data(WIN_GUI_EVENT_CONTROL_OFFSET, 0);
+        self.raw_store_imm64_data(WIN_GUI_EVENT_VALUE_OFFSET, 0);
+        self.raw_load_data(RAX, WIN_GUI_EVENT_COUNT_OFFSET);
+        self.u8(0x48);
+        self.u8(0x83);
+        self.u8(0xC0);
+        self.u8(0x01); // add rax, 1
+        self.raw_store_data(RAX, WIN_GUI_EVENT_COUNT_OFFSET);
         self.mov_phys_imm64(RCX, 0);
         self.raw_call_slot(WIN_GUI_FN_POST_QUIT_MESSAGE);
         self.u8(0x31);
@@ -2259,5 +2281,18 @@ mod tests {
         let text = bytes(a);
         assert_eq!(&text[0..4], &[0x48, 0x83, 0xEC, 16]);
         assert!(text.windows(4).any(|w| w == [0x48, 0x83, 0xC4, 16]));
+    }
+
+    #[test]
+    fn wndproc_records_click_change_and_close_events() {
+        let mut a = Asm::new_windows();
+        a.win_emit_wndproc("simple_gui_wndproc");
+        let text = a.code_view();
+        for kind in [1u8, 2, 3] {
+            assert!(
+                text.windows(5).any(|w| w == [0xB8, kind, 0, 0, 0]),
+                "WndProc should store event kind {kind}"
+            );
+        }
     }
 }

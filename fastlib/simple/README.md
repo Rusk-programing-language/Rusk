@@ -38,6 +38,27 @@ with `GetProcAddress`. On other targets every GUI primary is a safe no-op, so
 message pumping, and the `WndProc` live in the compiler's Windows backend, not
 in a Rusk callback.
 
+## If no window appears
+
+- Bake with `rusk build app.rk --target windows -o app.exe`. The default target
+  is a Linux architecture even on a Windows host, where GUI primaries are
+  no-ops. `--target windows` is not selected automatically.
+- Run the resulting `.exe` on Windows. `rusk run --target windows` is refused,
+  and `rusk check`, `rusk run` without the target, and the REPL only prove that
+  the source parses and type-checks; none of them open a window.
+- Keep the event loop from the example above alive after
+  `simple_window_open`. Showing the window only calls `ShowWindow` and
+  `UpdateWindow`; it does not run a message loop for you.
+- If the program uses `import "simple/simple"` from outside a checkout, make
+  sure the installed compiler has a `fastlib/` folder beside `rusk.exe` (or
+  `rusk`). The POSIX and native Windows installers copy the bundled library
+  folders there.
+- Only one window is supported at a time. The event slots are shared, so a
+  second window reuses the first one's handle.
+
+The emitted PE uses the console subsystem, so a console window may appear next
+to the GUI window. That is expected for this experimental target.
+
 ## The raw primaries
 
 These are language expressions and statements, not Rusk functions. `core.rk`

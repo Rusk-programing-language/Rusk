@@ -168,14 +168,17 @@ PowerShell window all use the same native installer. The PowerShell script asks
 GitHub for the latest release, downloads it with `curl.exe`, unpacks it with
 `tar.exe` into `%LOCALAPPDATA%\Rusk`, and updates the Windows user `PATH`:
 
+Run this from the folder that contains `toastset.ps1` (a checkout, or the
+folder where you saved the script):
+
 ```powershell
-powershell -ExecutionPolicy Bypass -File toastset.ps1
+powershell -ExecutionPolicy Bypass -File .\toastset.ps1
 ```
 
-Or fetch and run it directly:
+Or fetch and run it directly, without a checkout:
 
 ```powershell
-irm https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 | iex
+irm https://raw.githubusercontent.com/Rusk-programing-language/Rusk/main/toastset.ps1 -UseBasicParsing | iex
 ```
 
 Before finishing it asks `Add Rusk to the Windows Startup folder so the prompt
@@ -620,6 +623,13 @@ Bake a GUI program for Windows x86-64:
 ```console
 rusk build app.rk --target windows -o app.exe
 ```
+
+Run the `.exe` on Windows. `--target windows` is required: the default target
+is a Linux architecture even on a Windows host, and `rusk check` or the REPL
+never open a window. Keep the event loop above alive after opening the window;
+showing it does not start a loop for you. See the
+[`simple` README](fastlib/simple/README.md#if-no-window-appears) for a
+troubleshooting checklist.
 
 The window and controls are real Win32 objects. The PE still imports only
 `kernel32.dll`; `user32.dll` functions are resolved at runtime with
